@@ -170,7 +170,9 @@ public:	// (the RT core user in Reflections.cpp reads the images)
 	RtImagesStruct		Rt;
 	void				RtRegister();		// its RT core user (ShaderManager, once, before the core's first frame)
 	std::string			RtStatusText() const;	// UNOFFICIAL 2026-11-01: the RT trace's state as of its last frame, for the REPORT block
+	bool				NothingReflects() const { return nothingReflects; }	// UNOFFICIAL 2026-11-05: ShouldRender found no reflecting surface (the Ray tracing page)
 private:
+	bool				nothingReflects = false;	// dry, GroundSheen / InteriorFloors 0, no material reflections (ShouldRender, last asked)
 	bool				rtRays = false;		// this frame's RayGen casts rays (the helper is up; false in SplitTest)
 	float				WeaponFovScale() const;	// UNOFFICIAL 2026-10-30
 	bool				weaponFrame = false;	// UNOFFICIAL 2026-10-30: this frame's RT trace takes the first-person weapon too ([Shaders.Reflections.RT] Weapon)

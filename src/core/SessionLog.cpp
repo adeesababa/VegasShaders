@@ -5,6 +5,7 @@
 #include "Diagnostics.h"
 #include "SettingChanges.h"
 #include "InstallCheck.h"
+#include "DxvkLoader.h"
 #include <intrin.h>
 #include <tlhelp32.h>
 #include <cstdarg>
@@ -57,7 +58,7 @@ namespace {
 	}
 
 	std::string FileVersion(const char* module) {
-		HMODULE handle = GetModuleHandleA(module);
+		HMODULE handle = _stricmp(module, "d3d9.dll") ? GetModuleHandleA(module) : DxvkLoader::Runtime();	// (a mod's d3d9.dll is not the one named so)
 		char path[MAX_PATH] = {};
 		if (!handle || !GetModuleFileNameA(handle, path, MAX_PATH)) return std::string();
 		DWORD unused = 0;

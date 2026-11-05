@@ -220,7 +220,6 @@ public:
 		CinemaEffect*			Cinema;
 		ExposureEffect*			Exposure;
 		FlashlightEffect*		Flashlight;
-		FlashlightBeamEffect*	FlashlightBeam;
 		CombineDepthEffect*		CombineDepth;
 		DepthOfFieldEffect*		DepthOfField;
 		DebugEffect*			Debug;
@@ -253,6 +252,8 @@ public:
 		DustMotesEffect*		DustMotes;			// UNOFFICIAL 2026-11-03: dust specks in lit air
 		LocalExposureEffect*	LocalExposure;		// 2026-11-04: each neighbourhood's brightness, for the tone mapper
 		ReflectionsEffect*		Reflections;		// UNOFFICIAL: screen-space reflections on the ground
+		WetnessReflectionsEffect*	WetnessReflections;	// UNOFFICIAL 2026-11-04 Wetness Effects: screen-space reflections on what is wet
+		HudRaindropsEffect*		HudRaindrops;	// UNOFFICIAL 2026-11-04 Wetness Effects: rain drops on the first-person arms and weapon (and AllObjects)
 		BodycamEffect*			Bodycam;			// UNOFFICIAL, testbed: police body-camera look
 		SkyDitherEffect*		SkyDither;			// UNOFFICIAL: breaks up the sky's banding before the 8-bit screen
 		VolumetricCloudsEffect*	VolumetricClouds;	// UNOFFICIAL: 3D clouds in place of the game's cloud layers
@@ -275,6 +276,7 @@ public:
 		GrassShaders*			Grass;
 		ParticleShaders*		Particles; // UNOFFICIAL, optional, off by default
 		TerrainShaders*			Terrain;
+		WetnessEffectsShaders*	Wetness;	// UNOFFICIAL 2026-11-04 Wetness Effects (Includes/Wetness.hlsl)
 	};
 
 	// What UpdateConstants worked out about the game this frame.

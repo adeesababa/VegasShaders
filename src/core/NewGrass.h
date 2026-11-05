@@ -29,7 +29,6 @@
 #include <unordered_map>
 #include <vector>
 #include "GrassWind.h"	// 2026-10-20 grass field wind: the strands get the same wind as their card (Draw)
-#include "../effects/Grass/GrassCollision.h"	// 2026-10-20 grass collision on the strands (Draw)
 
 namespace NewGrass {
 
@@ -575,19 +574,6 @@ namespace NewGrass {
 			const float c7[4] = { savedC7[0], GrassWind::ClockNow, m.SwayA, m.SwayB };
 			device->SetVertexShaderConstantF(7, c7, 1);
 		}
-		// 2026-10-20 grass collision on the strands ([Shaders.Grass.Collision]; user: 'not doing anything i can see'): the push texture on
-		// vertex sampler 0 (as the card's pass has it), c5.xy the camera's world xy (the texture's centre), c6.w 1 / its width (0 = no
-		// push: the strands stand as before). The game reads AlphaParam.zw and AmbientColor.rgb there; c5 and c6 are put back after the draw.
-		float savedC5[4], savedC6[4];
-		const bool haveC56 = SUCCEEDED(device->GetVertexShaderConstantF(5, savedC5, 1)) && SUCCEEDED(device->GetVertexShaderConstantF(6, savedC6, 1));
-		const float pushScale = haveC56 ? GrassCollision::FieldScale() : 0.0f;
-		if (haveC56) {
-			if (pushScale > 0.0f) GrassCollision::Bind(device);
-			const D3DXVECTOR4& camera = TheRenderManager->CameraPosition;
-			const float c5[4] = { camera.x, camera.y, savedC5[2], savedC5[3] }, c6[4] = { savedC6[0], savedC6[1], savedC6[2], pushScale };
-			device->SetVertexShaderConstantF(5, c5, 1);
-			device->SetVertexShaderConstantF(6, c6, 1);
-		}
 		float psc[24];
 		memcpy(psc, S.KeepCards ? ramp.Bright : ramp.C, sizeof(ramp.C));	// the strands wear the card's bright twig colour
 		psc[16] = S.ShadowLift; psc[17] = S.Wrap; psc[18] = S.TipLift; psc[19] = S.Variation;
@@ -607,7 +593,6 @@ namespace NewGrass {
 
 		if (haveVS) device->SetVertexShaderConstantF(248, &savedVS[0][0], 8);	// 2026-10-19: the constants above, put back (see the save)
 		if (wind) device->SetVertexShaderConstantF(7, savedC7, 1);	// 2026-10-20: the game's c7 (grass field wind)
-		if (haveC56) { device->SetVertexShaderConstantF(5, savedC5, 1); device->SetVertexShaderConstantF(6, savedC6, 1); }	// 2026-10-20: the game's c5, c6 (collision)
 		if (havePS) device->SetPixelShaderConstantF(20, &savedPS[0][0], 6);
 		device->SetVertexShader(oldVS); device->SetPixelShader(oldPS); device->SetVertexDeclaration(oldDecl);
 		device->SetStreamSource(0, oldVB, oldOffset, oldStride); device->SetIndices(oldIB);

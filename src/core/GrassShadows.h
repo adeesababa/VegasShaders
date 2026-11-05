@@ -43,6 +43,16 @@ namespace GrassShadows {
 	inline ShaderRecordVertex* VS[4] = {};	// GRASS23x000-003.vso as casters (the 1POINT VS 004-007 are 000-003 plus the lamp)
 	inline ShaderRecordPixel* PS = nullptr;
 	inline bool LoadTried = false, LoadFailed = false;
+	// UNOFFICIAL 2026-11-04 the flashlight's shadow map too (BeginSpot; user: "make the flashlight cast shadows from grass too"): the same
+	// passes into its spot map with the grass VS compiled as GRASS_SHADOW_CASTER 2 (its perspective, the distance over the reach in z,
+	// MIN-blended: the nearer stays), the matrix in c13-c16 and the light in c18; c252 keeps the camera's inverse view.
+	inline bool SpotMode = false;
+	inline ShaderRecordVertex* SpotVS[4] = {};
+	inline bool SpotLoadTried = false, SpotLoadFailed = false;
+	inline float SpotMatrix[4][4] = {};
+	inline D3DXVECTOR4 SpotLight = {};	// camera-relative, w the reach
+	inline unsigned SpotFrames = 0;
+	inline bool SpotSavedMinBlend = false;
 	inline const D3DXMATRIX* CameraToLight = nullptr;	// the near cascade's camera-relative world -> shadow map space (Begin)
 	inline DWORD ZFunc = D3DCMP_LESSEQUAL;
 	inline IDirect3DSurface9* SavedTarget[4] = {};
@@ -85,6 +95,14 @@ namespace GrassShadows {
 	// (Unknown bounds: yes in the near cascade, no in the others.)
 	inline bool InNear(void* pass) {
 		NiAVObject* geometry = *(NiAVObject**)pass;
+		if (SpotMode) {	// the flashlight: the piece within its reach
+			const NiBound* bound = geometry ? geometry->GetWorldBound() : nullptr;
+			if (!bound || bound == NiBound::GetGlobalWorldBound() || !(bound->Radius > 0.0f)) return true;
+			const D3DXVECTOR4& cam = TheRenderManager->CameraPosition;
+			const float dx = bound->Center.x - cam.x - SpotLight.x, dy = bound->Center.y - cam.y - SpotLight.y, dz = bound->Center.z - cam.z - SpotLight.z;
+			const float reach = bound->Radius + SpotLight.w;
+			return dx * dx + dy * dy + dz * dz <= reach * reach;
+		}
 		if (!geometry) return Cascade == 0;
 		const NiBound* bound = geometry->GetWorldBound();
 		if (!bound || bound == NiBound::GetGlobalWorldBound() || !(bound->Radius > 0.0f)) return Cascade == 0;
@@ -121,25 +139,48 @@ namespace GrassShadows {
 		Logger::Log("UNOFFICIAL grass shadows: caster shaders %s (VS %p %p %p %p, PS %p)", LoadFailed ? "FAILED to load: off" : "loaded", VS[0], VS[1], VS[2], VS[3], PS);
 		return !LoadFailed;
 	}
+	inline bool LoadSpotShaders() {
+		if (SpotLoadTried) return !SpotLoadFailed;
+		SpotLoadTried = true;
+		static const D3DXMACRO caster[] = { { "GRASS_SHADOW_CASTER", "2" }, { NULL, NULL } };
+		static const char* const sources[4] = { "GRASS23x000.vso", "GRASS23x001.vso", "GRASS23x002.vso", "GRASS23x003.vso" };
+		static const char* const names[4] = { "GrassSpotCaster0.vso", "GrassSpotCaster1.vso", "GrassSpotCaster2.vso", "GrassSpotCaster3.vso" };
+		for (int i = 0; i < 4; i++) {
+			ShaderTemplate t = {};
+			t.Name = sources[i];
+			SpotVS[i] = (ShaderRecordVertex*)ShaderRecord::LoadShader(names[i], NULL, t, NULL, caster);
+		}
+		SpotLoadFailed = !SpotVS[0] && !SpotVS[1] && !SpotVS[2] && !SpotVS[3];
+		Logger::Log("UNOFFICIAL grass shadows: flashlight caster shaders %s (VS %p %p %p %p)", SpotLoadFailed ? "FAILED to load: no grass in the flashlight's shadow" : "loaded", SpotVS[0], SpotVS[1], SpotVS[2], SpotVS[3]);
+		return !SpotLoadFailed;
+	}
 
 	// One grass draw while Active: into the shadow map with the caster shaders, everything it changed put back after.
 	inline HRESULT STDMETHODCALLTYPE DrawHook(IDirect3DDevice9* device, D3DPRIMITIVETYPE type, INT base, UINT minIndex, UINT numVertices, UINT start, UINT count) {
 		if (!Active) return Next(device, type, base, minIndex, numVertices, start, count);
 		// The grass VS this pass bound (GrassShaders::SetForDraw): only NVR's carries the caster's twin; anything else draws nothing here.
 		const char v = NewGrass::LastVariant;
-		ShaderRecordVertex* vs = GrassShaders::LastBindNVR && v >= '0' && v <= '7' ? VS[(v - '0') & 3] : nullptr;
-		if (!vs || !vs->ShaderHandle || !CameraToLight) { StatSkipped++; return D3D_OK; }
+		ShaderRecordVertex* vs = GrassShaders::LastBindNVR && v >= '0' && v <= '7' ? (SpotMode ? SpotVS : VS)[(v - '0') & 3] : nullptr;
+		if (!vs || !vs->ShaderHandle || (!SpotMode && !CameraToLight)) { StatSkipped++; return D3D_OK; }
 
 		// c252-c255: the inverse view matrix (rows) with the wind lanes in w -> the view -> shadow map transform, lanes kept.
 		float view[4][4];
 		if (FAILED(device->GetVertexShaderConstantF(252, &view[0][0], 4))) { StatSkipped++; return D3D_OK; }
-		D3DXMATRIX invView;
-		for (int r = 0; r < 4; r++) { for (int c = 0; c < 3; c++) invView.m[r][c] = view[r][c]; invView.m[r][3] = r == 3 ? 1.0f : 0.0f; }
-		D3DXMATRIX viewToLight;
-		D3DXMatrixMultiply(&viewToLight, &invView, CameraToLight);
-		float light[4][4];
-		for (int r = 0; r < 4; r++) { for (int c = 0; c < 3; c++) light[r][c] = viewToLight.m[r][c]; light[r][3] = view[r][3]; }
-		device->SetVertexShaderConstantF(252, &light[0][0], 4);
+		float spotSaved[6][4] = {};	// c13-c18 (the flashlight caster's, SpotMode)
+		if (SpotMode) {
+			device->GetVertexShaderConstantF(13, &spotSaved[0][0], 6);
+			device->SetVertexShaderConstantF(13, &SpotMatrix[0][0], 4);
+			device->SetVertexShaderConstantF(18, (const float*)&SpotLight, 1);
+		}
+		else {
+			D3DXMATRIX invView;
+			for (int r = 0; r < 4; r++) { for (int c = 0; c < 3; c++) invView.m[r][c] = view[r][c]; invView.m[r][3] = r == 3 ? 1.0f : 0.0f; }
+			D3DXMATRIX viewToLight;
+			D3DXMatrixMultiply(&viewToLight, &invView, CameraToLight);
+			float light[4][4];
+			for (int r = 0; r < 4; r++) { for (int c = 0; c < 3; c++) light[r][c] = viewToLight.m[r][c]; light[r][3] = view[r][3]; }
+			device->SetVertexShaderConstantF(252, &light[0][0], 4);
+		}
 		// 2026-10-28 (Conor, streaks with cloth on): c248-c251, the camera's inverse projection the caster places each tuft with, written
 		// here as NVR's constant table sends it for the grass VS (TESR_InvProjectionTransform = RenderManager::InvProjMatrix), not
 		// trusted from the device: other code may have touched c248 (ClothWind cleared it before every non-cloth pass), and NVR does not
@@ -208,6 +249,7 @@ namespace GrassShadows {
 		for (unsigned i = 0; i < sizeof(kStates) / sizeof(kStates[0]); i++) if (saved[i] != want[i]) device->SetRenderState(kStates[i], saved[i]);
 		device->SetVertexShaderConstantF(252, &view[0][0], 4);
 		if (projSaved) device->SetVertexShaderConstantF(248, &proj[0][0], 4);
+		if (SpotMode) device->SetVertexShaderConstantF(13, &spotSaved[0][0], 6);
 		return hr;
 	}
 
@@ -302,9 +344,77 @@ namespace GrassShadows {
 		return true;
 	}
 
+	// UNOFFICIAL 2026-11-04 after the sun cascades: the flashlight's spot map (drawn this frame, Map: FlashlightDeferred::ShadowMap's)
+	// becomes the target, its matrix (camera-relative world -> its clip space, rows) and the light (camera-relative, w the reach) go to
+	// the caster. False: nothing to do (off, no grass passes, no map, the format does not blend), nothing changed.
+	inline bool BeginSpot(IDirect3DDevice9* device, IDirect3DTexture9* Map, const D3DXMATRIX& Matrix, const D3DXVECTOR4& Light) {
+		Active = false;
+		SpotMode = false;
+		if (!Enabled || Records.empty() || !device || !Map || !(Light.w > 1.0f)) return false;
+		IDirect3DSurface9* surface = nullptr;
+		if (FAILED(Map->GetSurfaceLevel(0, &surface)) || !surface) return false;
+		surface->Release();	// (the texture keeps it)
+		D3DSURFACE_DESC desc = {};
+		surface->GetDesc(&desc);
+		static int blends = -1;	// the spot map's format MIN-blends (it has no depth buffer of its own here)
+		if (blends < 0) {
+			IDirect3D9* d3d = nullptr;
+			blends = SUCCEEDED(device->GetDirect3D(&d3d)) && d3d && SUCCEEDED(d3d->CheckDeviceFormat(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, D3DFMT_X8R8G8B8,
+				D3DUSAGE_RENDERTARGET | D3DUSAGE_QUERY_POSTPIXELSHADER_BLENDING, D3DRTYPE_TEXTURE, desc.Format)) ? 1 : 0;
+			if (d3d) d3d->Release();
+			Logger::Log("UNOFFICIAL grass shadows: the flashlight's map (format %u) %s", (unsigned)desc.Format, blends ? "MIN-blends: the tufts go into it" : "does not blend: no grass in the flashlight's shadow");
+		}
+		if (!blends || !LoadShaders() || !LoadSpotShaders()) return false;
+		memcpy(SpotMatrix, &Matrix, sizeof(SpotMatrix));
+		SpotLight = Light;
+
+		void** table = *(void***)device;
+		if (table[82] != (void*)&DrawHook) {
+			DWORD old = 0;
+			if (!VirtualProtect(&table[82], sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) return false;
+			Next = (DrawIndexedPrimitiveFn)table[82];
+			table[82] = (void*)&DrawHook;
+			VirtualProtect(&table[82], sizeof(void*), old, &old);
+			Hooked = true;
+		}
+		device->GetViewport(&SavedViewport);
+		for (DWORD i = 0; i < 4; i++) if (FAILED(device->GetRenderTarget(i, &SavedTarget[i]))) SavedTarget[i] = nullptr;
+		if (FAILED(device->GetDepthStencilSurface(&SavedDepth))) SavedDepth = nullptr;
+		device->SetRenderTarget(0, surface);
+		for (DWORD i = 1; i < 4; i++) if (SavedTarget[i]) device->SetRenderTarget(i, nullptr);
+		device->SetDepthStencilSurface(nullptr);	// (no depth test: MIN blend)
+		const D3DVIEWPORT9 full = { 0, 0, desc.Width, desc.Height, 0.0f, 1.0f };
+		device->SetViewport(&full);
+		AtlasTarget = surface;
+		AtlasDepth = nullptr;
+		AtlasViewport = full;
+		SpotSavedMinBlend = MinBlend;	// (the sun maps' own answer, back in End)
+		MinBlend = true;
+		QueryOpen = false;
+		SpotMode = true;
+		Active = true;
+		return true;
+	}
+
 	inline void End(IDirect3DDevice9* device) {
 		if (!Active) return;
 		Active = false;
+		if (SpotMode) {	// UNOFFICIAL 2026-11-04 the flashlight's map
+			SpotMode = false;
+			MinBlend = SpotSavedMinBlend;
+			Unhook(device);
+			device->SetRenderTarget(0, SavedTarget[0]);
+			for (DWORD i = 1; i < 4; i++) if (SavedTarget[i]) device->SetRenderTarget(i, SavedTarget[i]);
+			device->SetDepthStencilSurface(SavedDepth);
+			device->SetViewport(&SavedViewport);
+			for (DWORD i = 0; i < 4; i++) if (SavedTarget[i]) { SavedTarget[i]->Release(); SavedTarget[i] = nullptr; }
+			if (SavedDepth) { SavedDepth->Release(); SavedDepth = nullptr; }
+			if (++SpotFrames <= 3 || SpotFrames % 3600 == 0)
+				Logger::Log("UNOFFICIAL grass shadows: frame %u: %u grass passes drawn into the flashlight's shadow map (%u draws; %u skipped: not NVR's grass VS, or the GPU grass strands cast them), %u out of its reach",
+					SpotFrames, StatPasses, StatDraws, StatSkipped, StatOutside);
+			StatPasses = StatOutside = StatDraws = StatSkipped = StatRetarget = 0;
+			return;
+		}
 		if (QueryOpen) { QueryOpen = false; QueryPending = SUCCEEDED(Query->Issue(D3DISSUE_END)); }
 		Unhook(device);
 		device->SetRenderTarget(0, SavedTarget[0]);

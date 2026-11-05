@@ -5,6 +5,7 @@
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
 #include "../../core/RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
 #include "../../core/RtSunShadows.h"	// UNOFFICIAL 2026-10-30 RT sun CloudShadows
+#include "../../core/ForwardCloudShadows.h"	// UNOFFICIAL 2026-11-04 ForwardCloudShadows (Active)
 
 void VolumetricCloudsEffect::UpdateSettings() {
 	const SettingsStruct before = Settings;
@@ -680,7 +681,7 @@ void VolumetricCloudsEffect::RenderClouds(IDirect3DDevice9* Device, IDirect3DSur
 		// for its own apply). Its own apply darkened the whole pixel, ambient and sky light too, on top of the sun's shadows,
 		// weighted by the depth-rebuilt normals (flat per triangle, striped by the depth's precision): a P82 tester's triangles.
 		const float strength = Constants.Extra.x;
-		if (shadowsViaSunFar || RtSunShadows::CloudsApplied()) Constants.Extra.x = 0.0f;	// 2026-10-30: or in the RT sun's visibility
+		if (shadowsViaSunFar || RtSunShadows::CloudsApplied() || ForwardCloudShadows::Active) Constants.Extra.x = 0.0f;	// 2026-10-30: or in the RT sun's visibility; 2026-11-04: or in the surface shaders (ForwardCloudShadows)
 		// UNOFFICIAL 2026-10-31 PhysicalShadows: the composite's own apply darkens the whole pixel (ambient and sky too), so it keeps the
 		// Shadows setting as before; full strength is only for the sun-only paths (SunFar, the RT sun).
 		else if (Settings.PhysicalShadows) Constants.Extra.x = (std::min)(strength, Settings.Shadows);

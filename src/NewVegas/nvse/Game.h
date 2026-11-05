@@ -860,7 +860,8 @@ class Main {	// 0xA4 bytes
 public:
 	UInt8	pad00[6];
 	UInt8	FlyCam;		// +0x06 tfc
-	UInt8	pad07[0x9D];
+	UInt8	pad07[0x99];
+	NiCamera*	camera;	// +0xA0 the camera the scene being drawn uses (the first-person one in RenderFirstPerson)
 
 	InputControl* GetInputControl() { return *(InputControl**)0x011F35CC; }	// OSInputGlobals
 

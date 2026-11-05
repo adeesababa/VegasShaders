@@ -2,7 +2,6 @@
 #include "../../core/PassSums.h"
 #include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-10-29 ShadowContrast (the game's lamp passes)
 #include "../../core/LinearPreDecode.h"
-#include "../Grass/GrassCollision.h"	// UNOFFICIAL 2026-10-19 (TESR_Translucency.w)
 
 void PBRShaders::RegisterConstants() {
 	ShaderManager* sm = TheShaderManager;
@@ -282,7 +281,7 @@ void PBRShaders::UpdateConstants() {
 	Constants.Translucency.x = FoliageSettings.Translucency;
 	Constants.Translucency.y = FoliageSettings.Power;
 	Constants.Translucency.z = FoliageSettings.SunGate;
-	Constants.Translucency.w = GrassCollision::FieldScale();	// UNOFFICIAL 2026-10-19 grass collision: 1 / its push texture's width (0 off)
+	Constants.Translucency.w = TheShaderManager->Shaders.Grass ? TheShaderManager->Shaders.Grass->BendPush : 0.0f;	// UNOFFICIAL 2026-11-04 the grass bend's push per unit of blade height (Grass.cpp; was Grass Collision's scale)
 
 	// the stronger of the rain animator and the puddle animator drives the dry-to-wet blend
 	const auto& wet = TheShaderManager->Effects.WetWorld->Constants;

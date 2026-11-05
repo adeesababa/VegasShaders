@@ -127,8 +127,5 @@ FadeDistance = 0.0
 [_Shaders.VolumetricLight.Night]
 MaxDistance = 10000.0
 
-[_Shaders.FlashlightBeam.Main]
-MaxDistance = 3000.0
-
 [_Shaders.Terrain.Blending]
 MaxDistance = 8192.0

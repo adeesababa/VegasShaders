@@ -50,7 +50,16 @@
 // default. s14/s15 are the only free sampler slots in ps_3_0 here.
 #define SHADOW_ATLAS_SAMPLER_REG s14
 #define SHADOW_OLD_ATLAS_SAMPLER_REG s15 // the sun cross-fade's kept atlas (SUN_CROSSFADE only)
+#ifdef PS
+    #define SHADOW_CLOUD_VALUE 1   // UNOFFICIAL 2026-11-04 ForwardCloudShadows (Includes/Shadow.hlsl): no sampler is free here, the vertex shader looks the map up
+#endif
 #include "includes/Shadow.hlsl"	// shared code
+// UNOFFICIAL 2026-11-04 ForwardCloudShadows: the clouds' shadow per vertex (texc.z; w the sentinel), compiled in only when on at startup.
+#if FORWARD_CLOUD_SHADOWS && FORWARD_SHADOWS && !(defined(INTERIOR_SHADOWS) && INTERIOR_SHADOWS)
+    #define TERRAIN_CLOUD 1
+#else
+    #define TERRAIN_CLOUD 0
+#endif
 #include "includes/CapturedNormals.hlsl"	// UNOFFICIAL 2026-10-28 CapturedNormals (COLOR3, see there)
 // UNOFFICIAL 2026-11-04 macro variation ([Shaders.Terrain.Macro], Includes/TerrainMacro.hlsl): compiled in only when on at startup.
 #ifndef TERRAIN_MACRO
@@ -98,7 +107,11 @@ struct VS_OUTPUT {	// vertex to pixel
     float4 bw0 : COLOR0;
     float4 bw1 : COLOR1;
     float4 scrPos : POSITION;
+#if TERRAIN_CLOUD
+    float4 texc : TEXCOORD0;   // zw: the clouds' sun share, the sentinel
+#else
     float2 texc : TEXCOORD0;
+#endif
     float3 vcol : TEXCOORD1;
     float4 localPos : TEXCOORD2;   // w: the view depth (terrain blending)
     float3 tanO : TEXCOORD3;
@@ -116,6 +129,13 @@ float4 FogParam : register(c14);	// x fog far, y fog range, z fog power
 float3 FogColor : register(c15);	// the game's fog colour
 float4 EyePosition : register(c16);	// camera, object space
 
+#if TERRAIN_CLOUD
+// UNOFFICIAL 2026-11-04 ForwardCloudShadows (core/ForwardCloudShadows.h sets these per draw, and binds the map on vertex sampler 1; c160-c161: no vertex shader and no DLL upload uses them, c240-c243 being the object vertex shaders' TESR_InvProjectionTransform):
+float4 NVR_CloudSunVS : register(c160);       // as the pixel shaders' NVR_CloudSun (Includes/Shadow.hlsl): xy the map's uv under the camera, z uv per unit, w strength
+float4 NVR_CloudSunLightVS : register(c161);  // xy: the map's light, x / z and y / z
+sampler2D NVR_CloudShadowVS : register(s1);
+#endif
+
 VS_OUTPUT main(VS_INPUT vin) {
     VS_OUTPUT vo;
 
@@ -126,6 +146,17 @@ VS_OUTPUT main(VS_INPUT vin) {
 
     vo.scrPos.xyzw = clipP;
     vo.texc.xy = vin.texc.xy;
+#if TERRAIN_CLOUD
+    // The land's pieces are placed unrotated and unscaled: the vertex less the camera (both in the piece's space) is camera-relative world.
+    float3 rel = vin.vpos.xyz - EyePosition.xyz;
+    float cloud = 1.0f;
+    [branch] if (NVR_CloudSunVS.w > 0.0f) {
+        float2 suv = NVR_CloudSunVS.xy + (rel.xy - NVR_CloudSunLightVS.xy * rel.z) * NVR_CloudSunVS.z;
+        float2 edge = min(suv, 1.0f - suv);
+        cloud = lerp(1.0f, tex2Dlod(NVR_CloudShadowVS, float4(suv, 0.0f, 0.0f)).r, saturate(min(edge.x, edge.y) * 10.0f) * NVR_CloudSunVS.w);
+    }
+    vo.texc.zw = float2(cloud, SHADOW_VS_SENTINEL);
+#endif
     vo.vcol.xyz = clamp(vin.vcol.rgb, 0.0f, 1.0f);
     vo.localPos.xyz = vin.vpos.xyz;
     vo.localPos.w = clipP.w;   // UNOFFICIAL: the view depth, for terrain blending (clip w is the depth along the view)
@@ -142,7 +173,11 @@ VS_OUTPUT main(VS_INPUT vin) {
 
 struct PS_INPUT	// vertex to pixel
 {
+#if TERRAIN_CLOUD
+    float4 texc : TEXCOORD0;   // zw: the clouds' sun share, the sentinel (ForwardCloudShadows)
+#else
     float2 texc : TEXCOORD0;
+#endif
     float3 vcol : TEXCOORD1_centroid;
 #if TERRAIN_BLEND_ACTIVE
     // Not centroid with terrain blending: it takes this position's screen derivatives, which centroid sampling spoils at
@@ -251,6 +286,21 @@ float TerrainLampShadow(float3 lampPos, float3 vis, float3 p0, float3 p1, float3
     const float rest = NVR_TerrainLampPack.y > 0.5f ? vis.z : 1.0f;   // (vis stays 1 where nothing was traced: lit)
     return lerp(1.0f, c > 0.5f ? dot(m, vis) / c : rest, NVR_TerrainLampRT.w);
 }
+#endif
+
+// UNOFFICIAL 2026-11-04 Wetness Effects (Includes/Wetness.hlsl, from Physically-Based-Reloaded; in place of WetWorld's screen pass): the
+// land darkens, gains the water film and puddles, and the rain ripples on it. Its constants (c146-c157) are the RT lamp slots' above and
+// the sun cross-fade's, so not with either. The rain cover map on s13, free below seven texture layers (the seventh layer's normal map
+// there): seven-layer land goes without the cover test (open everywhere). The layers' height maps shape the wetness and the puddles
+// (WETNESS_HEIGHT, c158: [Shaders.WetnessEffects.Main] HeightAwareness, CreviceFill, NormalAwareness), as in Physically-Based-Reloaded.
+#if defined(PS) && defined(WETNESS_EFFECTS) && FORWARD_SHADOWS && !SUN_CROSSFADE && !(TERRAIN_LAMP_RT && defined(NUM_PT_LIGHTS))
+    #define TERRAIN_WETNESS
+    #if TEX_COUNT < 7
+        #define WETNESS_ORTHO_REG s13
+    #endif
+    #define WETNESS_RAINDROPS
+    #define WETNESS_HEIGHT      // the land's height maps shape the wetness: water gathers in the crevices
+    #include "includes/Wetness.hlsl"
 #endif
 
 
@@ -544,10 +594,38 @@ PS_OUTPUT main(PS_INPUT pin) {
     // Forward sun shadows. Folded into sunMul, which getSunLighting
     // applies to the sun colour only -- ambient is added afterwards and stays untouched.
     #if FORWARD_SHADOWS	// NVR sun shadows in the object pass
+    #if SHADOW_CLOUD_FROM_VALUE
+    NvrCloudSun = SHADOW_VS_PRESENT(pin.texc.w) ? pin.texc.z : 1.0f;	// UNOFFICIAL 2026-11-04 ForwardCloudShadows: the vertex shader's lookup
+    #endif
     sunMul *= GetSunShadow(camPos, geoN);
     #endif
 
+    #ifdef TERRAIN_WETNESS	// UNOFFICIAL 2026-11-04 Wetness Effects: the albedo darkens before any light sees it (land is porous: full darkening)
+        float3 wetWorldNormal = normalize(mul(combinedNormal, tbnMat));	// tangent space -> the land piece's (world-aligned) space
+        // The surface's height where it is seen (the parallax's coordinates): the layers' height maps (their diffuse alpha, where
+        // LandHeight says they have one; flat 0.5 where not), blended by the same weights as the colour. The textures were just read
+        // there, so these reads hit the cache.
+        float surfaceHeight = 0.0f;
+        float heightWeight = 0.0f;
+        [unroll] for (int wh = 0; wh < texLayers; wh++) {
+            surfaceHeight += wts[wh] * (hStat[wh] > 0.0f ? tex2Dgrad(BaseMap[wh], offsetUV, odx, ody).a : 0.5f);
+            heightWeight += wts[wh];
+        }
+        surfaceHeight = heightWeight > 0.0f ? surfaceHeight / heightWeight : 0.5f;
+        Wetness wet = GetWetness(camPos, geoN, wetWorldNormal, surfaceHeight);
+        baseColor = WetAlbedo(baseColor, wet.darkening, 1.0f);
+    #endif
     float3 litCol = getSunLighting(sunTS, LinColor(SunColor.rgb), toEye, combinedNormal, LinColor(AmbientColor.rgb), baseColor, glossV, specPow, 1.0, sunMul, geoN);
+    #ifdef TERRAIN_WETNESS	// the water film: the sun's highlight on it and its reflection of the sky, over the land
+        [branch] if (wet.gloss > 0.001f) {
+            float3 wetV = -normalize(camPos);
+            float3 wetSun = LinColor(SunColor.rgb) * LinScale(TESR_TerrainData.z) * sunMul;	// as getSunLighting takes the sun
+            litCol += WetSpecular(wet.normal, wetV, TESR_WetnessSun.xyz, wetSun, wet.roughness) * smoothstep(0.0f, 0.2f, wet.gloss);
+            float3 wetR = reflect(-wetV, wet.normal);
+            float wetHorizon = saturate(1.0f + 1.2f * dot(wetR, geoN));
+            litCol += WetSkyReflection(wetR) * WetReflectance(saturate(dot(wet.normal, wetV)), wet.roughness, wet.gloss) * wetHorizon * wetHorizon;
+        }
+    #endif
 
     #if defined(NUM_PT_LIGHTS)	// point lights
         #if TERRAIN_LAMP_RT
@@ -608,6 +686,9 @@ PS_OUTPUT main(PS_INPUT pin) {
     // lets the tessellation stage read it (DXVK checks the sampler against this shader's declarations).
     [branch] if (FogParam.z < -1.0e30f) outCol += tex2Dlod(TESR_DisplaceDepth, float4(0.5f, 0.5f, 0.0f, 0.0f)).x;
 #endif
+    #ifdef TERRAIN_WETNESS
+        [branch] if (WETNESS_DEBUG_COVER) outCol = WetnessCoverDebug(camPos, geoN);	// [Shaders.WetnessEffects.Debug] ShowCover
+    #endif
     po.finalCol.rgb = outCol;
     po.finalCol.rgb = LinearSceneOut(po.finalCol.rgb);	// UNOFFICIAL 2026-10-28 LinearScene (includes/LinearLight.hlsl)
 #if CAPTURED_NORMALS_ON

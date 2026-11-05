@@ -154,9 +154,6 @@
     <ClInclude Include="..\src\effects\SkyDither\SkyDither.h">
       <Filter>Effects</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\effects\Grass\GrassCollision.h">
-      <Filter>Effects</Filter>
-    </ClInclude>
     <ClInclude Include="..\src\effects\Terrain\LandHeights.h">
       <Filter>Effects</Filter>
     </ClInclude>
@@ -286,9 +283,6 @@
     <ClInclude Include="..\src\NewVegas\Hooks\Hooks.h">
       <Filter>NewVegas\Hooks</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\NewVegas\Hooks\MaterialPass.h">
-      <Filter>NewVegas\Hooks</Filter>
-    </ClInclude>
     <ClInclude Include="..\src\NewVegas\Hooks\Render.h">
       <Filter>NewVegas\Hooks</Filter>
     </ClInclude>
@@ -392,9 +386,6 @@
       <Filter>Effects</Filter>
     </ClInclude>
     <ClInclude Include="..\src\effects\Flashlight\Flashlight.h">
-      <Filter>Effects</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\effects\FlashlightBeam\FlashlightBeam.h">
       <Filter>Effects</Filter>
     </ClInclude>
     <ClInclude Include="..\src\effects\DustMotes\DustMotes.h">
@@ -528,9 +519,6 @@
     <ClCompile Include="..\src\effects\SkyDither\SkyDither.cpp">
       <Filter>Effects</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\effects\Grass\GrassCollision.cpp">
-      <Filter>Effects</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\effects\Terrain\LandHeights.cpp">
       <Filter>Effects</Filter>
     </ClCompile>
@@ -630,9 +618,6 @@
     <ClCompile Include="..\src\NewVegas\Hooks\Hooks.cpp">
       <Filter>NewVegas\Hooks</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\NewVegas\Hooks\MaterialPass.cpp">
-      <Filter>NewVegas\Hooks</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\NewVegas\Hooks\Render.cpp">
       <Filter>NewVegas\Hooks</Filter>
     </ClCompile>
@@ -727,9 +712,6 @@
       <Filter>Effects</Filter>
     </ClCompile>
     <ClCompile Include="..\src\effects\Flashlight\Flashlight.cpp">
-      <Filter>Effects</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\effects\FlashlightBeam\FlashlightBeam.cpp">
       <Filter>Effects</Filter>
     </ClCompile>
     <ClCompile Include="..\src\effects\DustMotes\DustMotes.cpp">

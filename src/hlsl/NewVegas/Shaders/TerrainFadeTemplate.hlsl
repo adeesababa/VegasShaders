@@ -16,6 +16,9 @@
     #define LINEAR_LIGHTING
 #endif
 #include "includes/Terrain.hlsl"	// shared code
+#ifdef PS
+    #define SHADOW_CLOUD_IN 1   // UNOFFICIAL 2026-11-04 ForwardCloudShadows (Includes/Shadow.hlsl): the clouds' shadow on the sun term (compiled in only when on at startup)
+#endif
 #include "includes/Shadow.hlsl"	// shared code
 // UNOFFICIAL 2026-11-04 macro variation ([Shaders.Terrain.Macro], Includes/TerrainMacro.hlsl): compiled in only when on at startup.
 #ifndef TERRAIN_MACRO

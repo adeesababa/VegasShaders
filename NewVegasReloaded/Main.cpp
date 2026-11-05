@@ -10,6 +10,7 @@ void HdrOutputNoteDesktop();	// in Render.cpp (UNOFFICIAL 2026-10-29)
 #include "../src/core/InstallCheck.h"	// 2026-11-03: the install self-check (old DLL / folders / textures / presets), shown on screen
 #include "../src/core/SessionLog.h"	// UNOFFICIAL 2026-11-01: session header, game events, exit summary
 #include "../src/core/IOWorker2.h"	// UNOFFICIAL 2026-10-20 (EXPERIMENTAL, off by default): a second loading thread for model / texture tasks
+#include "../src/core/DxvkLoader.h"	// UNOFFICIAL 2026-11-04: the DXVK fork's d3d9.dll from a mod manager's mod
 
 namespace {
 	const UInt32 kPluginVersion = 441;
@@ -215,6 +216,8 @@ extern "C" {
 				Paths::TwinDll = other;	// 2026-11-03: the large warning on the main menu and in game (ImGuiManager RenderTwinDllWarning)
 			}
 		}
+		LoadStep = "the DXVK loader";
+		if (!nvse->IsEditor) DxvkLoader::Load();	// before anything asks which d3d9.dll this is, and before the game makes its Direct3D
 		LoadStep = "the install check";
 		InstallCheck::OnPluginLoad(nvse->Version, nvse->GameVersion);
 		LoadStep = "the session log header";

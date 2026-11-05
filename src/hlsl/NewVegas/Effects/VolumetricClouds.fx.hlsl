@@ -32,6 +32,7 @@ float4 TESR_SunColor;          // its colour
 float4 TESR_SunAmount;         // x: day 0..1
 float4 TESR_SkyColor;          // the sky's top colour
 float4 TESR_SkyLowColor;
+float4 TESR_GameMultisample;  // UNOFFICIAL 2026-11-04 x: the game's MSAA samples (iMultiSample as read; 0 or 1 = off)
 float4 TESR_HorizonColor;
 float4 TESR_CloudsShape;       // x: base altitude (m), y: thickness (m), z: coverage 0..1, w: density
 float4 TESR_CloudsNoise;       // x: shape tile (m), y: detail tile (m), z: detail erosion 0..1, w: weather map tile (m)
@@ -137,6 +138,12 @@ VSOUT FrameVS(VSIN IN) { VSOUT OUT = (VSOUT)0.0f; OUT.vertPos = IN.vertPos; OUT.
 
 #include "Includes/Helpers.hlsl"
 #include "Includes/Depth.hlsl"
+#if PHYSICAL_SKY_ON
+    #define MSAA_SKY_EDGE_REG s13   // after TESR_CloudCurrentFull (s12)
+#else
+    #define MSAA_SKY_EDGE_REG s12   // after TESR_CloudCurrentFull (s11)
+#endif
+#include "Includes/MsaaSkyEdge.hlsl"	// UNOFFICIAL 2026-11-04 the game's MSAA: sky edges (TESR_SkyCoverage, the last TESR_ sampler)
 #if PHYSICAL_SKY_ON
     #include "Includes/Atmosphere.hlsl"
 #endif
@@ -654,46 +661,8 @@ float CloudShadowAt(float3 world) {
 }
 
 // ---- 0: Composite, full resolution ----
-float4 CompositePS(VSOUT IN) : COLOR0 {
-	float2 uv = IN.UVCoord;
-	// UNOFFICIAL 2026-10-27: the clouds' history is drawn whole in every frame (RenderClouds runs the march as in a native frame), so in
-	// a RenderScale frame it is read at the screen position of this (lower resolution) pixel. At native: the same uv.
-	// 2026-10-28: + the frame's jitter in an FSR / DLSS LowResEffects frame (VolumetricClouds.cpp), so the upscaler sees the clouds jitter
-	// with the rest of the picture instead of wobbling by it.
-	float2 huv = rectToScreen(uv) + TESR_CloudsHistoryScale.zw;
-	float4 color = tex2Dlod(TESR_RenderedBuffer, float4(uv, 0, 0));
-	float depth = readDepthLod(uv);
-	[branch] if (depth < farZ * 0.996) {
-		// not sky: the clouds' shadow, and their reflection on water
-		[branch] if (ShadowStrength <= 0.0) return color;
-		float3 eye = toWorld(uv);                                  // camera-relative world per unit of depth
-		float3 world = (TESR_CameraPosition.xyz + eye * depth) * MetresPerUnit;
-		float3 normal = mul((float3x3)TESR_ViewTransform, normalize(tex2Dlod(TESR_NormalsBuffer, float4(uv, 0, 0)).xyz * 2.0 - 1.0));
-		float height = TESR_CameraPosition.z + eye.z * depth;
-		bool water = normal.z > 0.7 && abs(height - TESR_WaterSettings.x) < max(2.0, depth * 0.002);
-		// Water is not shaded: what it shows is the reflection of things far off, not sunlight on its surface (2026-10-12: at
-		// dawn the whole lake went dark and its reflections looked cut out).
-		[branch] if (ShadowStrength > 0.0 && !water) {
-			// Only the sunlight is shaded: surfaces turned away from the sun (and what they show, lit signs on a shaded wall)
-			// keep their light. In the open ground and roofs take the full strength.
-			float3 sunDir = normalize(TESR_SunDirection.xyz);
-			float day = saturate(TESR_SunAmount.x);
-			// UNOFFICIAL 2026-10-21: only the surfaces turned (nearly) away from the sun are let off. The normal here is rebuilt from
-			// depth (flat per triangle, striped by the depth's precision): weighting every surface by it (the old square root of N.L)
-			// drew triangles and stripes on rocks. (With SunFar running, the shadow is put on the land there instead.)
-			float facing = smoothstep(0.0, 0.25, dot(normal, sunDir));
-			float strength = ShadowStrength * lerp(0.3, 1.0, day) * smoothstep(0.08, 0.35, sunDir.z) * facing;   // fades with a low sun
-			float shadow = CloudShadowAt(world);
-			[branch] if (TESR_CloudsExtra.w > 0.0) return float4(shadow.xxx * lerp(0.4, 1.0, facing), 1.0);   // ShadowDebug: white lit, black shaded
-			// UNOFFICIAL 2026-10-13: the colour's trip into linear light and back only where the shadow changes it. With no
-			// cloud overhead, or a surface turned from the sun (strength 0), the factor is exactly 1: the pixel is left as it
-			// was (most of the screen under a clear sky; the round trip cost two pows per channel per pixel for nothing).
-			float factor = lerp(1.0, shadow, strength);
-			[branch] if (factor >= 1.0) return color;
-			return float4(delinearize(max(linearize(max(color.rgb, 0.0)) * factor, 0.0)), color.a);
-		}
-		return color;
-	}
+// The clouds of this pixel from the history: rgb the light they send, a how much of the sky shows through.
+float4 CloudsHere(float2 huv) {
 	// UNOFFICIAL 2026-10-15 Resolution 3-5 (larger than the screen): each pixel averages the history texels it covers (four
 	// bilinear reads a quarter of a pixel out); Catmull-Rom would read only the few nearest.
 	float4 clouds;
@@ -714,6 +683,72 @@ float4 CompositePS(VSOUT IN) : COLOR0 {
 		float4 sharpened = clouds + (clouds - 0.25 * (n0 + n1 + n2 + n3)) * (1.5 * Sharpness);
 		clouds = clamp(sharpened, lo, hi);
 	}
+	return clouds;
+}
+
+float4 CompositePS(VSOUT IN) : COLOR0 {
+	float2 uv = IN.UVCoord;
+	// UNOFFICIAL 2026-10-27: the clouds' history is drawn whole in every frame (RenderClouds runs the march as in a native frame), so in
+	// a RenderScale frame it is read at the screen position of this (lower resolution) pixel. At native: the same uv.
+	// 2026-10-28: + the frame's jitter in an FSR / DLSS LowResEffects frame (VolumetricClouds.cpp), so the upscaler sees the clouds jitter
+	// with the rest of the picture instead of wobbling by it.
+	float2 huv = rectToScreen(uv) + TESR_CloudsHistoryScale.zw;
+	float4 color = tex2Dlod(TESR_RenderedBuffer, float4(uv, 0, 0));
+	float depth = readDepthLod(uv);
+	// UNOFFICIAL 2026-11-04 the game's MSAA (Includes/MsaaSkyEdge.hlsl): a pixel on an edge against the sky took no clouds, and its sky
+	// share kept the clear sky (a bright rim round every leaf and branch). It gets the clouds over that share.
+	[branch] if (depth < farZ * 0.996) {
+		float3 sky;
+		float share = SkyShare(uv, color.rgb, sky);
+		[branch] if (share > 0.0) {
+			float4 clouds = CloudsHere(huv);
+			float3 lin = linearize(max(color.rgb, 0.0)) + share * (sky * (clouds.a - 1.0) + clouds.rgb * TESR_CloudsLayout.w);
+			return float4(delinearize(max(lin, 0.0)), color.a);
+		}
+	}
+	[branch] if (depth < farZ * 0.996) {
+		// not sky: the clouds' shadow, and their reflection on water
+		[branch] if (ShadowStrength <= 0.0) return color;
+		float3 eye = toWorld(uv);                                  // camera-relative world per unit of depth
+		float3 world = (TESR_CameraPosition.xyz + eye * depth) * MetresPerUnit;
+		float3 normal = mul((float3x3)TESR_ViewTransform, normalize(tex2Dlod(TESR_NormalsBuffer, float4(uv, 0, 0)).xyz * 2.0 - 1.0));
+		float height = TESR_CameraPosition.z + eye.z * depth;
+		bool water = normal.z > 0.7 && abs(height - TESR_WaterSettings.x) < max(2.0, depth * 0.002);
+		// Water is not shaded: what it shows is the reflection of things far off, not sunlight on its surface (2026-10-12: at
+		// dawn the whole lake went dark and its reflections looked cut out).
+		[branch] if (ShadowStrength > 0.0 && !water) {
+			// Only the sunlight is shaded: surfaces turned away from the sun (and what they show, lit signs on a shaded wall)
+			// keep their light. In the open ground and roofs take the full strength.
+			float3 sunDir = normalize(TESR_SunDirection.xyz);
+			float day = saturate(TESR_SunAmount.x);
+			// UNOFFICIAL 2026-10-21: only the surfaces turned (nearly) away from the sun are let off. The normal here is rebuilt from
+			// depth (flat per triangle, striped by the depth's precision): weighting every surface by it (the old square root of N.L)
+			// drew triangles and stripes on rocks. (With SunFar running, the shadow is put on the land there instead.)
+			float facing = smoothstep(0.0, 0.25, dot(normal, sunDir));
+			// UNOFFICIAL 2026-11-04: averaged over the pixel and its eight neighbours. On alpha-tested foliage the normal rebuilt from depth is
+			// noise, worst on the outline (and on the extra pixel of depth round every outline that the game's MSAA leaves: the nearest
+			// sample's): there it mostly read as facing the sun, full shadow on the rim and part of it inside, a dark outline round every
+			// bush under a cloud. The average makes the rim match what is round it; on solid surfaces it moves an edge by a pixel at most.
+			[unroll] for (int ny = -1; ny <= 1; ny++) {
+				[unroll] for (int nx = -1; nx <= 1; nx++) {
+					float3 n = mul((float3x3)TESR_ViewTransform, normalize(tex2Dlod(TESR_NormalsBuffer, float4(uv + float2(nx, ny) * TESR_ReciprocalResolution.xy, 0, 0)).xyz * 2.0 - 1.0));
+					facing += (nx == 0 && ny == 0) ? 0.0 : smoothstep(0.0, 0.25, dot(n, sunDir));
+				}
+			}
+			facing /= 9.0;
+			float strength = ShadowStrength * lerp(0.3, 1.0, day) * smoothstep(0.08, 0.35, sunDir.z) * facing;   // fades with a low sun
+			float shadow = CloudShadowAt(world);
+			[branch] if (TESR_CloudsExtra.w > 0.0) return float4(shadow.xxx * lerp(0.4, 1.0, facing), 1.0);   // ShadowDebug: white lit, black shaded
+			// UNOFFICIAL 2026-10-13: the colour's trip into linear light and back only where the shadow changes it. With no
+			// cloud overhead, or a surface turned from the sun (strength 0), the factor is exactly 1: the pixel is left as it
+			// was (most of the screen under a clear sky; the round trip cost two pows per channel per pixel for nothing).
+			float factor = lerp(1.0, shadow, strength);
+			[branch] if (factor >= 1.0) return color;
+			return float4(delinearize(max(linearize(max(color.rgb, 0.0)) * factor, 0.0)), color.a);
+		}
+		return color;
+	}
+	float4 clouds = CloudsHere(huv);
 	float3 lin = linearize(max(color.rgb, 0.0)) * clouds.a + clouds.rgb * TESR_CloudsLayout.w;
 	return float4(delinearize(max(lin, 0.0)), color.a);
 }

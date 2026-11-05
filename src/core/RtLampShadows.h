@@ -148,16 +148,9 @@ namespace RtLampShadows {
 	inline IDirect3DTexture9* FlashTexture = nullptr;
 	inline IDirect3DSurface9* FlashSurface = nullptr;
 	inline bool FlashThisFrame = false, FlashLive = false;
-	inline bool FlashWanted() {
-		FlashlightEffect* flash = TheShaderManager->Effects.Flashlight;
-		return CompiledIn && imageFlash >= 0 && flashShader >= 0 && flash && flash->Enabled && flash->spotLightActive &&
-			TheShaderManager->SpotLightPosition[0].w > 0.0f && TheSettingManager->GetSettingI(kSection, "Flashlight") &&
-			TheSettingManager->GetSettingI(kSection, "Live");
-	}
-	// Flashlight.cpp ExtRender: this frame's traced flashlight shadow, or null (then its shadow map, as before)
-	inline IDirect3DBaseTexture9* FlashlightShadow() { return FlashThisFrame && FlashTexture ? FlashTexture : nullptr; }
-	// ShadowManager: the flashlight's shadow map is not drawn while the trace stands in for it
-	inline bool FlashlightReplacing() { return FlashLive && RtCore::Running(); }
+	// 2026-11-04: never wanted any more. Its only reader was the old screen-space flashlight's shadow pass, gone with it (the deferred light
+	// reads the flashlight's shadow map, always drawn while it is on); the trace is left in place, idle.
+	inline bool FlashWanted() { return false; }
 	// UNOFFICIAL 2026-10-31 ManyLights ([Shaders.ShadowsInteriors.RT] ManyLights, off, needs a restart; docs/next/RT-MANY-LIGHTS.md):
 	// indoors every lamp a draw used goes into the table (the cube-slot lamps at their slot, the others at ids 64+, noted by
 	// PointShadowForward::SetForPass), and RtLampTraceMany.spv traces each pixel's two strongest exactly and all its other lamps as one

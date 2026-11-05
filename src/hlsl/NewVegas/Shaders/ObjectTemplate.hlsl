@@ -343,6 +343,13 @@
 #if defined(PS) && !defined(NVR_SLOT_TIGHT) && !(defined(LIGHTS) && LIGHTS > 3)
     #define SHADOW_CHARACTER_MAP_IN 1
 #endif
+// UNOFFICIAL 2026-11-04 ForwardCloudShadows (Includes/Shadow.hlsl): the clouds' shadow on the sun term (compiled in only when on at startup).
+// Every object pixel shader, the four- and nine-lamp ones too (one lookup and a few ALU, against the character map's second cascade
+// read): without it the objects drawn with the many-lamp shaders kept the sun under a cloud, so the cloud's edge seemed to glide over
+// them as it crossed the land round them.
+#if defined(PS)
+    #define SHADOW_CLOUD_IN 1
+#endif
 #include "includes/Shadow.hlsl"
 // 2026-11-04 dust on top surfaces ([Shaders.PBR.Dust], Includes/ObjectDust.hlsl): compiled in only when on at startup (DUST_ON).
 #ifndef DUST_ON
@@ -350,6 +357,39 @@
 #endif
 #if defined(PS) && DUST_ON
 #include "includes/ObjectDust.hlsl"
+#endif
+// UNOFFICIAL 2026-11-04 Wetness Effects (Includes/Wetness.hlsl, from Physically-Based-Reloaded; in place of WetWorld's screen pass): the
+// passes that light the material's own albedo with the sun get the water layer; lamp-only, highlight-only and lamp-first passes do not,
+// nor the interior records (no rain indoors). Its constants are the sun cross-fade's (c146-c159), so not with SUN_CROSSFADE; s12 is free
+// in every outdoor variant, for the rain cover map.
+#if defined(PS) && defined(WETNESS_EFFECTS) && FORWARD_SHADOWS && !SUN_CROSSFADE && !(defined(INTERIOR_SHADOWS) && INTERIOR_SHADOWS) && \
+    !defined(DIFFUSE) && !defined(POINT) && !defined(ONLY_SPECULAR) && !defined(OBJ_LAMP_FIRST)
+    #define OBJECT_WETNESS
+    #define WETNESS_ORTHO_REG s12
+    #include "includes/Wetness.hlsl"
+    // The wet albedo (linear). In a light-only pass the albedo is 1 here and the texture pass multiplies the real one (dryTexture, stored)
+    // in afterwards, so the light is scaled by how much darker the wet albedo is instead.
+    float3 ObjectWetAlbedo(float3 albedo, float3 dryTexture, Wetness wet, float porosity) {
+        #ifdef ONLY_LIGHT
+            float3 dry = max(LinColor(dryTexture), 1.0f / 256.0f);
+            return albedo * WetAlbedo(dry, wet.darkening, porosity) / dry;
+        #else
+            return WetAlbedo(albedo, wet.darkening, porosity);
+        #endif
+    }
+    // The water film over the material: the sun's highlight on it (sunRadiance: the sun as getSunLighting takes it, shadowed and scaled)
+    // and its reflection of the sky. Undone by the texture a light-only pass's light is later multiplied by.
+    float3 ObjectWetFilm(Wetness wet, float3 position, float3 geometricNormal, float3 sunRadiance, float3 dryTexture) {
+        float3 wetV = -normalize(position);
+        float3 film = WetSpecular(wet.normal, wetV, TESR_WetnessSun.xyz, sunRadiance, wet.roughness) * smoothstep(0.0f, 0.2f, wet.gloss);
+        float3 r = reflect(-wetV, wet.normal);
+        float horizon = saturate(1.0f + 1.2f * dot(r, geometricNormal));
+        film += WetSkyReflection(r) * WetReflectance(saturate(dot(wet.normal, wetV)), wet.roughness, wet.gloss) * horizon * horizon;
+        #ifdef ONLY_LIGHT
+            film /= max(LinColor(dryTexture), 1.0f / 256.0f);
+        #endif
+        return film;
+    }
 #endif
 #include "includes/CapturedNormals.hlsl"	// UNOFFICIAL 2026-10-28 CapturedNormals (COLOR3, see there)
 // UNOFFICIAL 2026-11-03 SmoothCutouts (Includes/AlphaHash.hlsl): the alpha test hashed under TAA / FSR / DLSS. Not in the slot-tight shader.
@@ -381,6 +421,21 @@
     // each is used: six float3 kept alive across the lighting put the 4+ lamp shader (SLS2035 with _rmaos maps, hand blood
     // and MoreLampsPerObject on) one temp register over ps_3_0's 32, and its interior record failed to compile.
     #define POINT_SHADOW_SCALAR
+    // UNOFFICIAL 2026-11-04 the flashlight's game lamp per pixel (core/FlashlightLamp.h; user: "the way the game interacts with lights has no
+    // blending"): the Pip-Boy light the flashlight drives lights the objects the light pass cannot see, but the game hands a lamp to a whole
+    // object, so the CPU could only shape it by the cone at the object's bound (all of a plant lit, or none). Per draw c28-c30 say which slot
+    // it has and the beam; light k's share here is the beam's cone at this pixel over the cone the CPU already gave the object.
+    float4 NVR_FlashLamp[3] : register(c28);	// [0] x the lamp's slot + 1 (0: not in this draw), y 1 / the object's cone, z cos of the full-strength edge;
+                                            	// [1] xyz the light, camera-relative; [2] xyz the beam's axis, w cos of its outer edge
+    static float flashLampCone = 1.0f;
+    float FlashLampCone(float3 worldPos, bool valid) {
+        [branch] if (!valid) return 1.0f;	// (a vanilla vertex shader: the object's cone as the CPU gave it)
+        const float3 toPixel = worldPos - NVR_FlashLamp[1].xyz;
+        const float c = dot(toPixel, NVR_FlashLamp[2].xyz) * rsqrt(max(dot(toPixel, toPixel), 1.0f));
+        const float cone = smoothstep(NVR_FlashLamp[2].w, NVR_FlashLamp[0].z, c);
+        return min(cone * cone * NVR_FlashLamp[0].y, 8.0f);
+    }
+    #define POINT_LAMP_EXTRA(k) ((k) + 1 == NVR_FlashLamp[0].x ? flashLampCone : 1.0f)
     #include "includes/PointShadowForward.hlsl"
 
 #ifndef SHADOW_CONTRAST_ON
@@ -413,8 +468,8 @@ float ShadowContrastKeep(float3 lit, float3 lost) {
 
     // UNOFFICIAL 2026-10-13: blood on the first-person weapon and gloves (c218-c219, set per draw; off for every other draw).
     #include "includes/HandBlood.hlsl"
-    // UNOFFICIAL 2026-10-14: rain on the first-person weapon (Wet World HudDrops, includes/HudRain.hlsl, c221-c222 set per draw;
-    // compiled in only when HudDrops is on at startup: HUD_RAIN_ON, ShaderRecord::LoadShader).
+    // UNOFFICIAL 2026-10-14, 2026-11-04: rain drops on the first-person weapon and (AllObjects) the world's objects (Wetness Effects'
+    // HudRaindrops, includes/HudRain.hlsl, c221, c222, c170 set per draw; compiled in only when on at startup: HUD_RAIN_ON, ShaderRecord).
     #if defined(HUD_RAIN_ON) && HUD_RAIN_ON
         #define HUD_RAIN 1
     #endif
@@ -426,16 +481,12 @@ float ShadowContrastKeep(float3 lit, float3 lost) {
     // saturate(N.L) x colour, exactly 0 where the bumped normal faces away from the sun (dot(normal, lightDir) <= 0: normalize
     // keeps the sign), whatever the shadow, so the lookup is skipped there. In the SPECULAR variants PBRSun keeps N.S >= 1e-5, a
     // tail of the order of 1e-4 of the sun's colour on back-facing pixels (no difference measured: evidence\objects-LOG.md).
-    // The HudRain drops' sun caustic follows the geometric face, not the bumped normal, so pixels under a drop always look up.
     // Compile time: a live switch costs its branch structure even when off. Off: the shaders exactly as before.
     #ifndef UNLIT_SHADOW_SKIP
         #define UNLIT_SHADOW_SKIP 0
     #endif
     bool SunShadowWanted(float3 normalTS, float3 lightTS) {
         bool wanted = dot(normalTS, lightTS) > 0.0f;
-        #if HUD_RAIN
-            wanted = wanted || hudRainCover > 0.0f;
-        #endif
         return wanted;
     }
     // UNOFFICIAL 2026-10-17 LampReachSkip ([Shaders.PBR.Main], restart: LAMP_REACH_SKIP from ShaderRecord::BuildDefines): a lamp's
@@ -1191,7 +1242,8 @@ PS_OUTPUT main(PS_INPUT IN) {
         float3 scLost = 0.0f;	// UNOFFICIAL ShadowContrast: the light the lamps' shadows take here (SC_SPLIT)
     #endif
     PS_OUTPUT pout;
-    
+    [branch] if (NVR_FlashLamp[0].x > 0.5f) flashLampCone = FlashLampCone(IN.shadowWorldPos.xyz, SHADOW_VS_PRESENT(IN.shadowWorldPos.w));	// UNOFFICIAL 2026-11-04
+
 #ifdef LINEAR_LIGHTING
     // UNOFFICIAL linear lighting: the light colours decoded.
     #ifdef LIN_PREDECODED	// UNOFFICIAL LinearPreDecode: decoded on the CPU
@@ -1300,8 +1352,7 @@ PS_OUTPUT main(PS_INPUT IN) {
     // UNOFFICIAL linear lighting: the albedo decoded for the lighting (where the texture is multiplied in by a later pass,
     // the factor above is, which comes out the same). The metal guess and the debug views keep the stored colour.
     const float3 albedoStored = surface.rgb;
-    surface.rgb = LinColor(surface.rgb);
-    surface.rgb *= HudRainLens(float3(0.0f, 0.0f, 1.0f)).x;	// UNOFFICIAL: a drop's rim bends the light away (darker)
+    surface.rgb = LinColor(HudRainAlbedo(surface.rgb));	// UNOFFICIAL: darker under the rain drops (includes/HudRain.hlsl)
 
     #ifdef METAL
         // UNOFFICIAL: metal (Object.hlsl), only while [Shaders.PBR.Metal] is on for this pass; see the lighting below.
@@ -1485,10 +1536,24 @@ PS_OUTPUT main(PS_INPUT IN) {
 #endif
         #endif
         float3 lighting;
+        #ifdef OBJECT_WETNESS	// UNOFFICIAL 2026-11-04 Wetness Effects: the water layer, the albedo darkened before any light sees it
+            #ifdef OBJ_AD_PASS
+                const float3 wetDryTexture = heatMaterialFactor;
+            #else
+                const float3 wetDryTexture = 1.0f;
+            #endif
+            Wetness wet = (Wetness)0;
+            wet.roughness = 1.0f;
+            wet.normal = faceNormal;
+            [branch] if (skyValid > 0.0f) wet = GetWetness(IN.shadowWorldPos.xyz, faceNormal, faceNormal);
+        #endif
         [branch] if (getMetalStrength() > 0.0f) {
             // Faded out with distance (getMetalFade); at full without the position (a vanilla vertex shader ran).
             metallic = HAND_BLOOD_METAL(getDerivedMetallic(normal.a, albedoStored) * (skyValid > 0.0f ? getMetalFade(IN.shadowWorldPos.xyz) : 1.0f));
             metalRoughness = lerp(rough, metalRoughness, metallic);
+            #ifdef OBJECT_WETNESS
+                surface.rgb = ObjectWetAlbedo(surface.rgb, wetDryTexture, wet, 1.0f - saturate(sqrt(metallic)));	// metals darken less (CS's porosity)
+            #endif
             lighting = getSunLighting(IN.lightDir.xyz, PSLightColor[0].rgb * sunAndProj, IN.viewDir.xyz, normal.xyz, surface.rgb, metalRoughness, metallic);
             #ifdef SI
                 lighting += surface.rgb * LinColor(glowTexel.rgb * EmittanceColor.rgb);
@@ -1529,6 +1594,9 @@ PS_OUTPUT main(PS_INPUT IN) {
             #endif
         }
         else {
+            #ifdef OBJECT_WETNESS
+                surface.rgb = ObjectWetAlbedo(surface.rgb, wetDryTexture, wet, 1.0f);
+            #endif
             lighting = getSunLighting(IN.lightDir.xyz, PSLightColor[0].rgb * sunAndProj, IN.viewDir.xyz, normal.xyz, surface.rgb, rough);
             #ifdef SI
                 lighting += surface.rgb * LinColor(glowTexel.rgb * EmittanceColor.rgb);
@@ -1551,8 +1619,24 @@ PS_OUTPUT main(PS_INPUT IN) {
 #endif
             #endif
         }
+        #ifdef OBJECT_WETNESS	// the water film: the sun's highlight on it and its reflection, over the material
+            [branch] if (wet.gloss > 0.001f)
+                lighting += ObjectWetFilm(wet, IN.shadowWorldPos.xyz, faceNormal, PSLightColor[0].rgb * sunAndProj * LIN_SCALE_LIGHT, wetDryTexture);
+        #endif
     #else
     #ifndef OBJ_LAMP_FIRST
+        #ifdef OBJECT_WETNESS	// UNOFFICIAL 2026-11-04 Wetness Effects (as in the METAL path above)
+            #ifdef OBJ_AD_PASS
+                const float3 wetDryTexture = heatMaterialFactor;
+            #else
+                const float3 wetDryTexture = 1.0f;
+            #endif
+            Wetness wet = (Wetness)0;
+            wet.roughness = 1.0f;
+            wet.normal = faceNormal;
+            [branch] if (SHADOW_VS_PRESENT(IN.shadowWorldPos.w)) wet = GetWetness(IN.shadowWorldPos.xyz, faceNormal, faceNormal);
+            surface.rgb = ObjectWetAlbedo(surface.rgb, wetDryTexture, wet, 1.0f);
+        #endif
         FOLD_DECL lighting = getSunLighting(IN.lightDir.xyz, PSLightColor[0].rgb * sunAndProj, IN.viewDir.xyz, normal.xyz, surface.rgb, rough);
     #else
         // Pointlights only. Attenuate from the object-space lightDistSq.x carried from the VS,
@@ -1588,6 +1672,10 @@ PS_OUTPUT main(PS_INPUT IN) {
         // here: POINT implies ONLY_SPECULAR, so !ONLY_SPECULAR implies !POINT.
         lighting += getAmbientLighting(AmbientColor.rgb, surface.rgb, faceNormal,
                                        SHADOW_VS_PRESENT(IN.shadowWorldPos.w) ? 1.0f : 0.0f);
+    #endif
+    #if defined(OBJECT_WETNESS) && !defined(METAL)	// UNOFFICIAL 2026-11-04 Wetness Effects: the water film (the METAL path adds its own above)
+        [branch] if (wet.gloss > 0.001f)
+            lighting += ObjectWetFilm(wet, IN.shadowWorldPos.xyz, faceNormal, PSLightColor[0].rgb * sunAndProj * LIN_SCALE_LIGHT, wetDryTexture);
     #endif
 
     // Other light sources. Same object-space attenuation fix as light0 above.
@@ -1647,10 +1735,6 @@ PS_OUTPUT main(PS_INPUT IN) {
     }
     #endif
 
-    #ifndef OBJ_LAMP_FIRST
-        // UNOFFICIAL: the sun focused through each rain drop into a bright spot on its far side (includes/HudRain.hlsl).
-        lighting += PSLightColor[0].rgb * sunAndProj * surface.rgb * HudRainLens(IN.lightDir.xyz).y;
-    #endif
     #if SHADOW_CONTRAST_ON && !defined(DIFFUSE) && !defined(POINT)
         lighting *= ShadowContrastKeep(lighting, scLost);	// UNOFFICIAL ShadowContrast: a base pass has the ambient: darkened here
     #endif
@@ -1892,6 +1976,7 @@ PS_OUTPUT main(PS_INPUT IN ALPHA_HASH_VPOS_PARAM) {	// UNOFFICIAL 2026-11-03 Smo
 PS_OUTPUT main(PS_INPUT IN) {
 #endif
     PS_OUTPUT pout;
+    [branch] if (NVR_FlashLamp[0].x > 0.5f) flashLampCone = FlashLampCone(SHADOW_WP_LOAD(IN), SHADOW_WP_VALID(IN));	// UNOFFICIAL 2026-11-04
 
 #ifdef LINEAR_LIGHTING
     // UNOFFICIAL linear lighting: as in the LIGHTS < 4 variant.
@@ -1937,8 +2022,7 @@ PS_OUTPUT main(PS_INPUT IN) {
     SetDiffuseEnergyKeep(normal.xyz, float3(IN.lightDir.w, IN.light2.w, IN.light3.w), roughness);	// UNOFFICIAL 2026-10-16 EnergySplit (Includes/PBR.hlsl): once per pixel, every lamp reuses it (view packed in .w)
     baseColor.rgb = HandBloodAlbedo(baseColor.rgb);
     const float3 albedoStored = baseColor.rgb;	// UNOFFICIAL linear lighting: as in the LIGHTS < 4 variant
-    baseColor.rgb = LinColor(baseColor.rgb);
-    baseColor.rgb *= HudRainLens(float3(0.0f, 0.0f, 1.0f)).x;	// UNOFFICIAL: a drop's rim bends the light away (darker)
+    baseColor.rgb = LinColor(HudRainAlbedo(baseColor.rgb));	// UNOFFICIAL: darker under the rain drops (includes/HudRain.hlsl)
 
     // Lighting.
     float3 viewDir = { IN.lightDir.w, IN.light2.w, IN.light3.w };
@@ -2048,6 +2132,20 @@ PS_OUTPUT main(PS_INPUT IN) {
         baseColor.rgb = DustCover(baseColor.rgb, skyNormal, SHADOW_WP_LOAD(IN), SHADOW_WP_VALID(IN));
     #endif
 
+    // UNOFFICIAL 2026-11-04 Wetness Effects (as the LIGHTS < 4 variant): the albedo darkened before any light sees it. Only the sun's
+    // path (OBJ_TOGGLES) has the position and the sun.
+    #if defined(OBJECT_WETNESS) && defined(OBJ_TOGGLES)
+        Wetness wet = (Wetness)0;
+        wet.roughness = 1.0f;
+        wet.normal = sunFaceN;
+        [branch] if (SHADOW_WP_VALID(IN)) wet = GetWetness(sunWP, sunFaceN, sunFaceN);
+        #ifdef METAL
+            baseColor.rgb = ObjectWetAlbedo(baseColor.rgb, 1.0f, wet, 1.0f - saturate(sqrt(metallic)));
+        #else
+            baseColor.rgb = ObjectWetAlbedo(baseColor.rgb, 1.0f, wet, 1.0f);
+        #endif
+    #endif
+
     // The sun's and the lamps' light (includes/ManyLightsDirect.hlsl), then the ambient.
     float3 lighting;
     #if SHADOW_CONTRAST_ON
@@ -2075,6 +2173,10 @@ PS_OUTPUT main(PS_INPUT IN) {
         lighting += getAmbientLighting(AmbientColor.rgb, baseColor.rgb, skyNormal,
                                        SHADOW_WP_VALID(IN) ? 1.0f : 0.0f);
     }
+    #if defined(OBJECT_WETNESS) && defined(OBJ_TOGGLES)	// the water film over the material
+        [branch] if (wet.gloss > 0.001f)
+            lighting += ObjectWetFilm(wet, sunWP, sunFaceN, PSLightColor[0].rgb * sunShadow * LIN_SCALE_LIGHT, 1.0f);
+    #endif
 
     #if SHADOW_CONTRAST_ON
         lighting *= ShadowContrastKeep(lighting, scLost);	// UNOFFICIAL ShadowContrast (see its constant); before the glow, which stays as it is

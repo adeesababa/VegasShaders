@@ -8,6 +8,7 @@
 #ifndef SHADOW_NORMAL_BIAS_TEXELS
     #define SHADOW_NORMAL_BIAS_TEXELS 2.5f
 #endif
+#define SHADOW_CLOUD_IN 1   // UNOFFICIAL 2026-11-04 ForwardCloudShadows (Includes/Shadow.hlsl): the clouds' shadow on the sun term (compiled in only when on at startup)
 #include "includes/Shadow.hlsl"
 #include "includes/Helpers.hlsl"
 #include "includes/PBR.hlsl"
@@ -145,7 +146,12 @@ PixOut main(PixIn src_c) {
         float att = is_sun ? 1.0f : LampAttOther(saturate(1.0f - dn_v * dn_v)); // UNOFFICIAL 2026-10-21 LampFalloff (Includes/LampFalloff.hlsl): as before, the objects' decode or the shape
 
         float3 lv_dir = normalize(mul(tbnMat, to_l));
-        float3 hv_dir = normalize(eye_tan + lv_dir);
+        // UNOFFICIAL 2026-11-04 (hair black in the flashlight, third person): a lamp inside the head (the flashlight on the head bone, at the
+        // hair's origin) sits straight opposite the eye for the hair facing the camera: eye + light is 0 there, and its normalize a NaN that
+        // took the whole hair card (colour and blend) black. Then the normal: NL below decides the light as for any other direction.
+        const float3 hv_sum = eye_tan + lv_dir;
+        const float hv_len2 = dot(hv_sum, hv_sum);
+        float3 hv_dir = hv_len2 > 1.0e-6f ? hv_sum * rsqrt(hv_len2) : n_tan;
 
         // tex2Dlod, not tex2D: gradients under flow control are illegal in ps_3_0 (X3528).
         float lobe_a = tex2Dlod(AnisoMap, float4(dot(r_shift, lv_dir), dot(r_shift, hv_dir), 0.0f, 0.0f)).a;

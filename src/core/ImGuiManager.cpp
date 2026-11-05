@@ -12,7 +12,15 @@
 #include "Branding.h"
 #include "FailOnce.h"	// UNOFFICIAL 2026-11-02 RetryFailedEffects: the status bar lists the parts switched off
 #include "InstallCheck.h"	// 2026-11-03: the install self-check (main-menu notice, Help > Install check, Copy bug report)
+#include "RtCore.h"			// 2026-11-05: the Ray tracing page's status lines
+#include "RtSunShadows.h"
+#include "RtLampShadows.h"
+#include "RtPathTrace.h"
+#include "RtAmbient.h"
+#include "../effects/Reflections/Reflections.h"
+#include "../effects/AmbientOcclusion/AmbientOcclusion.h"
 #include <sstream>
+#include <array>
 #include <iomanip>
 #include <ctime>
 #include <unordered_set>
@@ -50,6 +58,7 @@ namespace {
 		bool revealPage = false;		// UNOFFICIAL 2026-10-25, test shots: unfold the sidebar down to the page shown
 		bool testSettings = false;		// UNOFFICIAL 2026-10-19: the auto-test's 'menu' shots show the test settings (TestShowMenu)
 		bool devOptions = false;		// UNOFFICIAL 2026-10-25: [Main.Menu.Developer] DeveloperOptions, read every drawn frame
+		bool advanced = false;			// 2026-11-05: [Main.Menu.Developer] AdvancedSettings, read every drawn frame
 		bool diskConfirm = false;		// File > Reload from disk was picked: open its confirmation next to the main window
 		bool installCheckOpen = false;	// 2026-11-03: Help > Install check
 		double reportCopiedAt = -1.0;	// 2026-11-03: when Copy bug report was last pressed (ImGui time), for the "Copied" line
@@ -74,6 +83,8 @@ static char* SearchTestBuffer();	// UNOFFICIAL 2026-10-25: the menu search box (
 static void CopyBugReport();	// 2026-11-03: Help > Copy bug report (defined with the install check)
 
 static bool DevOptionsShown() { return gMenu.devOptions || gMenu.testSettings; }
+// 2026-11-05: every setting under its own name, no simple views (Developer options alone does not: it adds the test settings there)
+static bool AdvancedShown() { return gMenu.advanced || gMenu.testSettings; }
 
 // ---- Game input while the menu is open -------------------------------------------------------------------------------
 // Mouse movement: xNVSE cannot block it, so IDirectInputDevice8::GetDeviceState (vtable slot 9) of the mouse is wrapped and
@@ -640,7 +651,7 @@ static const RestartSetting kRestartSettings[] = {
 	{ "Shaders.PBR.MicroShadow",              "Enabled",            RestartRule::Changed },	// MICRO_SHADOW_ON (2026-11-04)
 	{ "Shaders.HandBlood.Status",             "Enabled",            RestartRule::Changed },
 	{ "Shaders.Cloth.Main",                   "Enabled",            RestartRule::TurnOn },
-	{ "Shaders.WetWorld.Main",                "HudDrops",           RestartRule::TurnOn },	// HUD_RAIN_ON: above 0 at start
+	{ "Shaders.WetnessEffects.HudRaindrops",  "Enabled",            RestartRule::TurnOn },	// HUD_RAIN_ON: on at start
 	{ "Shaders.VolumetricClouds.Main",        "Resolution",         RestartRule::Changed },	// textures made at start
 	{ "Shaders.VolumetricClouds.Main",        "HalfResolution",     RestartRule::Changed },
 	{ "Shaders.VolumetricClouds.Main",        "ShadowResolution",   RestartRule::Changed },
@@ -673,7 +684,6 @@ static float RestartState(const RestartSetting& r, bool atStart) {
 	const std::string key = r.Key;
 	if (key == "CubeReflections")
 		return (get("Shaders.PBR.Metal", "CubeReflections") > 0.0f || get("Shaders.PBR.EnvMaps", "CubeReflections") > 0.0f) ? 1.0f : 0.0f;
-	if (key == "HudDrops") return get(r.Section, r.Key) > 0.0f ? 1.0f : 0.0f;
 	if (key == "SmithCorrelated") return get(r.Section, r.Key) == 1.0f ? 1.0f : 0.0f;
 	return get(r.Section, r.Key);
 }
@@ -1073,12 +1083,12 @@ static bool DragWithStepKeys(const char* id, float* value, float speed, const ch
 }
 
 static void RenderColorTriple(SettingManager::Configuration::ConfigNode& nodeR, SettingManager::Configuration::ConfigNode& nodeG,
-	SettingManager::Configuration::ConfigNode& nodeB, const std::string& prefix)
+	SettingManager::Configuration::ConfigNode& nodeB, const std::string& prefix, const char* shownTitle = nullptr)	// shownTitle: a simple view's name
 {
 	SettingManager::Configuration::ConfigNode* rgb[3] = { &nodeR, &nodeG, &nodeB };
 	ColourWheel& wheel = WheelFor(const_cast<const SettingManager::Configuration::ConfigNode**>(rgb), prefix);
 
-	std::string title = prefix;	// "FogColor_" reads "FogColor"
+	std::string title = shownTitle ? shownTitle : prefix;	// "FogColor_" reads "FogColor"
 	while (!title.empty() && title.back() == '_') title.pop_back();
 
 	std::string* atOpen[3];
@@ -1139,7 +1149,7 @@ static void RenderColorTriple(SettingManager::Configuration::ConfigNode& nodeR, 
 
 // ---- Settings drawn as a list of choices -------------------------------------------------------------------------------------
 // Whole numbers that pick one of a few modes get a dropdown of names. Keyed by "Section.Key": the key alone repeats ("Mode" is a
-// different thing for Cinema, DepthOfField and SleepingMode).
+// different thing for Cinema and DepthOfField).
 //
 // Cinema and DepthOfField Mode: the C++ also takes 3 and 4 (Cinema.cpp, DepthOfField.cpp), tests left from the Oblivion code that
 // check for persuasion. New Vegas has no persuasion, so 3 always switches the effect off ("Disabled") and 4 is a copy of 1 or 2 or
@@ -1160,8 +1170,6 @@ static const char* const kToneMappers[] = {
 	"11 - Perceptual (Polyphony)",
 };
 static const char* const kWhenShown[] = { "0 - Always", "1 - Not during dialog", "2 - Only during dialog", "3 - Disabled" };
-// SleepingMode Mode (no comment in the settings file): the cases of ShowSleepWaitMenuHook (src/core/Hooks/SleepingCommon.cpp)
-static const char* const kRestModes[] = { "0 - Always (Wait, Sit, Sleep)", "1 - Sleeping only", "2 - Sitting only", "3 - Sitting & Sleeping" };
 static const char* const kExposureModes[] = { "0 - Classic (screen average)", "1 - Eye adaptation (whole view, white balance)" };	// UNOFFICIAL [Shaders.Exposure.Main] Mode
 static const char* const kShadowQualities[] = { "0 - Low", "1 - Medium", "2 - High", "3 - Full", "4 - Custom" };
 static const char* const kShadowFormats[] = { "0 - 16 bit", "1 - 32 bit" };
@@ -1186,7 +1194,6 @@ static const Choices* ChoicesFor(const char* section, const char* key) {
 		{ "Shaders.DepthOfField.FirstPersonView.Mode", NAMES(kWhenShown) },
 		{ "Shaders.DepthOfField.ThirdPersonView.Mode", NAMES(kWhenShown) },
 		{ "Shaders.DepthOfField.VanityView.Mode", NAMES(kWhenShown) },
-		{ "Main.SleepingMode.Main.Mode", NAMES(kRestModes) },
 		{ "Shaders.ShadowsExteriors.Main.Quality", NAMES(kShadowQualities) },
 		{ "Shaders.ShadowsExteriors.ShadowMaps.Format", NAMES(kShadowFormats) },
 		{ "Shaders.ShadowsExteriors.ShadowMaps.CascadeResolution", NAMES(kCascadeSizes) },
@@ -1215,7 +1222,1106 @@ static int NamePicker(const char* id, const char* shown, const char* const* name
 
 // UNOFFICIAL 2026-10-27 (user: "oh it's called displacement instead of tessellation" / "ok do that"): a setting's menu name where
 // users look for another word; the key in the settings files stays. The ## part keeps ImGui's ID the key.
+// ---- Conflict warnings ------------------------------------------------------------------------------------------------------
+// 2026-11-05 (user: "add some sort of warning if you're going to toggle an effect that silently disables / conflicts with another
+// one"). Turning on a setting or an effect listed here, while the other side of the conflict is on, first opens a "Heads up" box that
+// says in plain words what stops working; the change waits for "Turn it on anyway" (Cancel leaves everything as it was). The list is
+// the conflicts found in the code on 2026-11-05 (AmbientLight's takeover, ComputeGI over RT GI, path tracing, ...), not every partial
+// overlap. An effect's own switch is "Shaders.<Name>.Status" / "Enabled" (or its Main page's Enabled for the effects switched there).
+struct ConflictRule {
+	const char* Section;
+	const char* Key;
+	const char* Value;		// the value that triggers it: "true", or a whole number
+	bool (*Applies)();		// the other side is on now (warn only then); nullptr: always
+	const char* Text;
+};
+static bool SettingOn(const char* section, const char* key) { return TheSettingManager->GetSettingI(section, key) != 0; }
+static bool EffectOn(const char* name) { return TheSettingManager->GetMenuShaderEnabled(name); }
+static bool AnyRtOn() {
+	return SettingOn("Shaders.ShadowsExteriors.RT", "Enabled") || SettingOn("Shaders.ShadowsInteriors.RT", "Enabled") ||
+		SettingOn("Shaders.AmbientOcclusion.RT", "Enabled") || SettingOn("Shaders.Reflections.RT", "Enabled");
+}
+static bool CloudsCastShadows() { return EffectOn("VolumetricClouds") && TheSettingManager->GetSettingF("Shaders.VolumetricClouds.Main", "Shadows") > 0.0f; }
+
+static const ConflictRule kConflictRules[] = {
+	{ "Shaders.AmbientLight.Main", "ComputeGI", "true",
+		[]() { return SettingOn("Shaders.AmbientOcclusion.RT", "GI") && SettingOn("Shaders.AmbientOcclusion.RT", "Enabled"); },
+		"Screen-space bounce light replaces your ray-traced bounce light: the ray-traced one does nothing while this is on." },
+	{ "Shaders.AmbientOcclusion.RT", "GI", "true",
+		[]() { return EffectOn("AmbientLight") && SettingOn("Shaders.AmbientLight.Main", "ComputeGI"); },
+		"Screen-space bounce light (on the Ambient light page) is on and replaces this: ray-traced bounce light does nothing until you turn that off." },
+	{ "Shaders.AmbientOcclusion.Status", "Enabled", "true", []() { return EffectOn("AmbientLight"); },
+		"Ambient light already does ambient occlusion and switches this effect off while it runs: this does nothing unless Ambient light is off." },
+	{ "Shaders.BounceLight.Status", "Enabled", "true", []() { return EffectOn("AmbientLight"); },
+		"Ambient light already does bounce light and switches this effect off while it runs: this does nothing unless Ambient light is off." },
+	{ "Shaders.AmbientLight.Status", "Enabled", "true", []() { return EffectOn("AmbientOcclusion") || EffectOn("BounceLight"); },
+		"Ambient light does ambient occlusion and bounce light itself: the separate Ambient occlusion and Bounce light effects switch off while it runs." },
+	{ "Main.Main.RayTracing", "PTRealtime", "true", nullptr,
+		"Path tracing lights the whole picture itself: Ambient light, ambient occlusion and specular highlights switch off, and the path "
+		"tracer's own settings are overridden. Very heavy: for top graphics cards." },
+	{ "Main.Main.RayTracing", "PTReplace", "true", nullptr,
+		"The path-traced picture replaces the game's: Ambient light, ambient occlusion and specular highlights switch off while it runs." },
+	{ "Shaders.ShadowsExteriors.RT", "Mode", "1", nullptr,
+		"Replace: near you only ray-traced sun shadows are used. Leaves, fences and people may lose their sun shadows up close." },
+	{ "Shaders.TAA.DLSS", "RayReconstruction", "true", AnyRtOn,
+		"Ray Reconstruction takes over from Vegas Shaders' own ray-tracing smoothing: those smoothing settings do nothing while it runs." },
+	{ "Shaders.CloudShadows.Main", "Enabled", "true", CloudsCastShadows,
+		"Volumetric clouds cast their own shadows and replace these flat cloud shadows: this does nothing while they do." },
+	{ "Shaders.VolumetricClouds.Status", "Enabled", "true",
+		[]() { return SettingOn("Shaders.CloudShadows.Main", "Enabled") && TheSettingManager->GetSettingF("Shaders.VolumetricClouds.Main", "Shadows") > 0.0f; },
+		"Volumetric clouds cast their own shadows and replace the flat cloud shadows while they are on." },
+	{ "Shaders.VolumetricFog.Main", "LegacyFog", "true", nullptr,
+		"Legacy fog (for old presets) ignores Classic look, the height layer and the current fog's settings." },
+	{ "Shaders.Terrain.Blending", "Enabled", "true", []() { return SettingOn("Shaders.Grass.GPUGrass", "Enabled"); },
+		"Terrain blending turns off GPU grass: the GPU grass will not show while this is on." },
+	{ "Shaders.Grass.GPUGrass", "Enabled", "true", []() { return SettingOn("Shaders.Terrain.Blending", "Enabled"); },
+		"GPU grass will not show while Terrain blending is on (blending turns grass-first drawing off)." },
+	{ "Main.Main.Misc", "PresetManagerEnabled", "true", nullptr,
+		"Location presets will change your settings by themselves as you move between places." },
+	{ "Main.Main.ReducedQuality", "FXAA", "true", []() { return EffectOn("SMAA"); },
+		"SMAA is on too: both smooth the edges, which costs more and softens the picture. Turn one of them off." },
+	{ "Shaders.SMAA.Status", "Enabled", "true", []() { return SettingOn("Main.Main.ReducedQuality", "FXAA"); },
+		"FXAA is on too: both smooth the edges, which costs more and softens the picture. Turn one of them off." },
+};
+
+static bool SameValue(const char* a, const std::string& b) {
+	auto norm = [](const std::string& v) { return v == "true" ? std::string("1") : v == "false" ? std::string("0") : v; };
+	return norm(a) == norm(b);
+}
+
+static const ConflictRule* FindConflict(const char* section, const char* key, const std::string& value) {
+	for (const ConflictRule& r : kConflictRules)
+		if (!strcmp(r.Section, section) && !strcmp(r.Key, key) && SameValue(r.Value, value) && (!r.Applies || r.Applies())) return &r;
+	return nullptr;
+}
+
+// A change waiting for the Heads up box: the settings to write, or an effect to switch.
+struct PendingChange {
+	bool Request = false;	// open the box next frame (in the main window's ID scope, where it is drawn)
+	std::string Text;
+	std::vector<std::array<std::string, 3>> Sets;	// section, key, value
+	std::string Shader;
+};
+static PendingChange s_pending;
+
+// Whether a change may go ahead now; false: the Heads up box was asked for and the change waits for it.
+static bool ConfirmChanges(const std::vector<std::array<std::string, 3>>& sets) {
+	for (const auto& s : sets)
+		if (const ConflictRule* rule = FindConflict(s[0].c_str(), s[1].c_str(), s[2])) {
+			s_pending = { true, rule->Text, sets, std::string() };
+			return false;
+		}
+	return true;
+}
+static bool ConfirmChange(const char* section, const char* key, const std::string& value) { return ConfirmChanges({ { section, key, value } }); }
+
+// An effect's own switch being turned on ("Shaders.<Name>.Status" Enabled, or its Main page's Enabled).
+static bool ConfirmEffectOn(const std::string& shader) {
+	for (const char* page : { ".Status", ".Main" })
+		if (const ConflictRule* rule = FindConflict(("Shaders." + shader + page).c_str(), "Enabled", "true")) {
+			s_pending = { true, rule->Text, {}, shader };
+			return false;
+		}
+	return true;
+}
+
+static void DrawConflictPopup() {
+	if (s_pending.Request) {
+		ImGui::OpenPopup("Heads up###conflict");
+		s_pending.Request = false;
+	}
+	if (!ImGui::BeginPopupModal("Heads up###conflict", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+	ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
+	ImGui::TextUnformatted(s_pending.Text.c_str());
+	ImGui::PopTextWrapPos();
+	ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.5f));
+	if (ImGui::Button("Turn it on anyway")) {
+		for (const auto& s : s_pending.Sets) TheSettingManager->SetSettingS(s[0].c_str(), s[1].c_str(), s[2].c_str());
+		if (!s_pending.Shader.empty()) TheShaderManager->SwitchShaderStatus(s_pending.Shader.c_str());
+		TheSettingManager->LoadSettings();
+		s_pending = PendingChange();
+		ImGui::CloseCurrentPopup();
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Cancel")) {
+		s_pending = PendingChange();
+		ImGui::CloseCurrentPopup();
+	}
+	ImGui::EndPopup();
+}
+
+// ---- Simple views ---------------------------------------------------------------------------------------------------------
+// 2026-11-05 (docs/next/SETTINGS-GAME-MENU-PLAN.md; user: "simplify the display names of the keys so that they are in a form of language
+// the average gamer will understand and merge some together by proxy on the user side unless someone toggles advanced mode"). A page
+// listed here shows, while the top row's Advanced switch is off, only its rows below: settings under a plain name, and choices that
+// set several settings at once (shown as Custom when the settings match none of them). Advanced on (or Developer options): the page
+// as before, every setting under its own name. The settings themselves, their sections and the saved file do not change. A page not
+// listed is drawn as before in both modes, until it gets its simple view.
+struct SimpleRow {
+	const char* Section;
+	const char* Key;		// a setting shown under Label, or nullptr: a choice
+	const char* Label;
+	const char* Options;	// a choice's options: "Name: Key=Value Key=Value | Name: ...", or nullptr
+	const char* Tip;		// the tooltip while Advanced is off (plain words; Advanced shows the setting's own description)
+};
+static const SimpleRow kSimpleRows[] = {
+	// Sun shadows
+	{ "Shaders.ShadowsExteriors.RT", "Enabled", "Ray-traced sun shadows", nullptr, "Sun shadows traced with rays: exact contact shadows and no missing shadows far away. Needs an RTX-class GPU and the DXVK fork." },
+	{ "Shaders.ShadowsExteriors.RT", nullptr, "Quality",
+		"Performance: HalfResolution=true Penumbra=false | Balanced: HalfResolution=false Penumbra=false | High (soft, realistic edges): HalfResolution=false Penumbra=true",
+		"Performance: traced at half resolution (cheaper, softer). Balanced: full resolution. High: edges soften with distance from what casts "
+		"them, as real sun shadows do (the most expensive)." },
+	{ "Shaders.ShadowsExteriors.RT", nullptr, "Near you",
+		"Add to the shadow maps: Mode=0 | Replace the shadow maps: Mode=1",
+		"Add: the traced shadows fill in what the game's shadow maps miss. Replace: near you only the traced shadows are used (sharper, exact)." },
+	{ "Shaders.ShadowsExteriors.RT", "Strength", "Shadow strength", nullptr, "How dark the traced sun shadows are." },
+	// Lamp shadows
+	{ "Shaders.ShadowsInteriors.RT", "Enabled", "Ray-traced lamp shadows", nullptr, "Lamp shadows traced with rays instead of the old shadow maps: sharper and no leaks. Takes effect after a restart." },
+	{ "Shaders.ShadowsInteriors.RT", "Live", "Use them now (off: the old shadows, to compare)", nullptr, "Switch between traced and old lamp shadows at once, to compare." },
+	{ "Shaders.ShadowsInteriors.RT", nullptr, "Shadow edges",
+		"Sharp: LampRadius=0.0 Rays=1 | Soft: LampRadius=4.0 Rays=1 | Soft, less grainy: LampRadius=4.0 Rays=4",
+		"Sharp: hard edges, the cheapest. Soft: lamps have a size, so edges blur with distance (a little grain that the anti-aliasing smooths). "
+		"Soft, less grainy: four rays per lamp (more expensive)." },
+	{ "Shaders.ShadowsInteriors.RT", "Exteriors", "Also outdoors at night", nullptr, "Street lamps outdoors at night cast traced shadows too. Takes effect after a restart." },
+	// Ambient occlusion and bounce light
+	{ "Shaders.AmbientOcclusion.RT", "Enabled", "Ray-traced ambient occlusion", nullptr, "Soft shadows in corners and under objects, worked out with rays instead of from the screen: no halos, nothing vanishes at the screen edge." },
+	{ "Shaders.AmbientOcclusion.RT", "GI", "Ray-traced bounce light", nullptr, "Light bounces off lit surfaces onto nearby ones, tinted by their colour. Turn off Screen-space bounce light, or it replaces this." },
+	{ "Shaders.AmbientOcclusion.RT", nullptr, "Bounce light quality",
+		"Low: GIReuse=8 GISpatial=0 RadianceCache=false CacheExteriors=false | Medium: GIReuse=8 GISpatial=2 RadianceCache=false CacheExteriors=false | "
+		"High: GIReuse=8 GISpatial=2 RadianceCache=true CacheExteriors=false | Ultra: GIReuse=8 GISpatial=2 RadianceCache=true CacheExteriors=true",
+		"Low: one bounce of light. Medium: less grain. High: light also bounces more than once indoors. Ultra: more than once outdoors too "
+		"(expensive)." },
+	{ "Shaders.AmbientOcclusion.RT", "GIStrength", "Bounce light strength", nullptr, "How much bounced light is added. Higher looks more vivid, less realistic." },
+	{ "Shaders.AmbientOcclusion.RT", "GIAmbient", "Bounce light from the sky (shows on cloudy days)", nullptr, "Lets sky light bounce too, so bounce light still shows on cloudy days and in shade." },
+	// Reflections
+	{ "Shaders.Reflections.RT", "Enabled", "Ray-traced reflections", nullptr, "Rays fill in what normal reflections miss: things off screen or hidden behind something. Needs Reflections on." },
+	{ "Shaders.Reflections.RT", nullptr, "Surfaces that get rays",
+		"Shiny only: MaxRoughness=0.35 | Shiny and satin: MaxRoughness=0.5 | Most surfaces: MaxRoughness=0.75",
+		"How rough a surface can be and still get ray-traced reflections; rougher ones keep the screen-space reflections. Wet ground counts "
+		"by Reflections' WetRoughness: if it is rougher than this, puddles get no rays." },
+	{ "Shaders.Reflections.RT", "Weapon", "Weapon reflections", nullptr, "Your gun reflects the world around it: lamps, signs, the sky. Strongest on metal parts." },
+	{ "Shaders.Reflections.RT", "Water", "Ray-traced water reflections", nullptr, "Water reflects the world with rays instead of the old reflection map." },
+	// Scene and path tracing
+	{ "Main.Main.RayTracing", "Actors", "People in the traced scene", nullptr, "People and creatures cast traced shadows and show up in traced reflections. Costs some frame rate in crowds." },
+	{ "Main.Main.RayTracing", "AlphaTested", "See-through meshes (fences, leaves, grates)", nullptr, "Fences, leaves and grates cast traced shadows with their holes, not as solid blocks." },
+	{ "Main.Main.RayTracing", "Grass", "Grass", nullptr, "Grass casts traced shadows and shows in reflections. Needs See-through meshes on." },
+	{ "Main.Main.RayTracing", "HitTextures", "Real textures in reflections and bounce light", nullptr, "Reflections and bounce light use the real colours of what they hit instead of flat ones. Uses more video memory." },
+	{ "Main.Main.RayTracing", "FarObjectLOD", "Distant buildings and objects", nullptr, "Distant buildings and objects are in the traced scene, so far shadows and reflections are complete." },
+	{ "Main.Main.RayTracing", "FarLandLOD", "Distant land", nullptr, "Distant hills are in the traced scene, so far shadows and reflections include them." },
+	{ "Main.Main.RayTracing", "PTRealtime", "Path tracing (experimental, very heavy)", nullptr, "The whole picture lit by path tracing, like a film render. Experimental and very heavy: for top GPUs." },
+	// GunFX (Main)
+	{ "Main.GunFX.Main", "Puff", "Smoke puff at the muzzle", nullptr, "A small puff of smoke from the barrel on every shot. Needs GunFX.dll." },
+	{ "Main.GunFX.Main", "HeatSmoke", "Smoke from a hot barrel", nullptr, "A thin strand of smoke rises from the barrel after sustained fire." },
+	{ "Main.GunFX.Main", "AfterFireTrail", "Smoke trail after firing", nullptr, "A wispy trail rises from the barrel once you stop shooting." },
+	{ "Main.GunFX.Main", "EjectionSmoke", "Smoke from the ejection port", nullptr, "A burst of smoke with every spent casing, bigger when the gun is hot." },
+	{ "Main.GunFX.Main", "BarrelGlow", "Glowing hot barrel", nullptr, "The barrel glows after sustained fire and cools down slowly." },
+	{ "Main.GunFX.Main", "HeatHaze", "Heat shimmer over a hot barrel", nullptr, "The air shimmers around a hot barrel." },
+	{ "Main.GunFX.Main", "MuzzleBlast", "Heat ripple on every shot", nullptr, "A quick ripple of hot air at the muzzle each time you fire." },
+	{ "Main.GunFX.Main", "VolumetricSmoke", "Real 3D smoke (experimental)", nullptr, "Gun smoke drawn as real 3D smoke that lamps and the sun light. Costs frame rate." },
+	{ "Main.GunFX.Main", "SmokeHaze", "Smoke haze fills the room", nullptr, "Firing for a while fills the room with haze. Needs Real 3D smoke; the most expensive part." },
+	{ "Main.GunFX.Main", "EnergyWeapons", "Also on energy weapons", nullptr, "Lasers, plasma and other energy weapons get the effects too." },
+	// AmbientLight (Main)
+	{ "Shaders.AmbientLight.Main", "OcclusionStrength", "Corner shading strength", nullptr, "How dark creases, corners and the ground under things get." },
+	{ "Shaders.AmbientLight.Main", "Radius", "Corner shading reach", nullptr, "How far the corner shading and bounce light reach." },
+	{ "Shaders.AmbientLight.Main", "GridBounce", "Sun bounce light strength", nullptr, "Soft bounce light from the sun in daylight, spread by a 3D light grid round you. Experimental." },
+	{ "Shaders.AmbientLight.Main", "GridLamps", "Lamp bounce light (indoors, night)", nullptr, "Lamps and fires light the room softly, with light pooling and spreading round them. Indoors and at night." },
+	{ "Shaders.AmbientLight.Main", "ComputeGI", "Screen-space bounce light", nullptr, "Light bounces off what is on screen onto nearby surfaces. Replaces ray-traced bounce light when on. Needs the DXVK fork." },
+	{ "Shaders.AmbientLight.Main", "ComputeGIStrength", "Screen-space bounce light strength", nullptr, "How strong the screen-space bounce light is. Needs the DXVK fork." },
+	{ "Shaders.AmbientLight.Main", nullptr, "Screen-space bounce light quality",
+		"Low: ComputeGIQuality=0 | Medium: ComputeGIQuality=1 | High: ComputeGIQuality=2",
+		"More detail in the shading and bounce light: smoother and steadier, but costs more." },
+	// AmbientOcclusion (Exteriors)
+	{ "Shaders.AmbientOcclusion.Exteriors", "Enabled", "Corner shading outdoors", nullptr, "Darkens corners and creases outdoors for more depth." },
+	{ "Shaders.AmbientOcclusion.Exteriors", "StrengthMultiplier", "Corner shading strength", nullptr, "How dark corners and creases get." },
+	{ "Shaders.AmbientOcclusion.Exteriors", "Range", "Shading reach (larger is softer)", nullptr, "Larger gives wider, softer shading; smaller gives sharper detail in creases." },
+	{ "Shaders.AmbientOcclusion.Exteriors", "ClampStrength", "Darkest shading allowed", nullptr, "Limits how dark the shading may get. Lower values allow near black." },
+	// AmbientOcclusion (Interiors)
+	{ "Shaders.AmbientOcclusion.Interiors", "Enabled", "Corner shading indoors", nullptr, "Darkens corners and creases indoors for more depth." },
+	{ "Shaders.AmbientOcclusion.Interiors", "StrengthMultiplier", "Corner shading strength", nullptr, "How dark corners and creases get." },
+	{ "Shaders.AmbientOcclusion.Interiors", "Range", "Shading reach (larger is softer)", nullptr, "Larger gives wider, softer shading; smaller gives sharper detail in creases." },
+	{ "Shaders.AmbientOcclusion.Interiors", "ClampStrength", "Darkest shading allowed", nullptr, "Limits how dark the shading may get. Lower values allow near black." },
+	// AmbientOcclusion (GTAO)
+	{ "Shaders.AmbientOcclusion.GTAO", "Enabled", "Better corner shading (GTAO)", nullptr, "A more accurate version of the corner shading: no grey flat ground and no halos round objects." },
+	{ "Shaders.AmbientOcclusion.GTAO", "MaxRadius", "Longest reach (pixels)", nullptr, "The widest area on screen the shading looks at. Larger reaches further but costs more." },
+	// AmbientOcclusion (Skylighting)
+	{ "Shaders.AmbientOcclusion.Skylighting", "Enabled", "Darker under roofs and overhangs", nullptr, "Outdoors, removes sky light under roofs, porches, bridges and cliffs so they look properly shaded." },
+	{ "Shaders.AmbientOcclusion.Skylighting", "Strength", "Strength", nullptr, "How much light is taken away under cover." },
+	{ "Shaders.AmbientOcclusion.Skylighting", "Distance", "How far to look for cover", nullptr, "How far the light travels. Larger reaches further." },
+	{ "Shaders.AmbientOcclusion.Skylighting", "Reflections", "Also darken sky reflections under cover", nullptr, "Wet floors and puddles under cover stop mirroring a bright sky." },
+	// BounceLight (Main)
+	{ "Shaders.BounceLight.Main", "Strength", "Bounce light strength", nullptr, "How much light bounces from lit surfaces onto nearby ones." },
+	{ "Shaders.BounceLight.Main", "Radius", "Bounce light reach", nullptr, "How far the bounce light reaches." },
+	{ "Shaders.BounceLight.Main", "BlurRadius", "Softness", nullptr, "Smooths out grain. Higher is softer." },
+	{ "Shaders.BounceLight.Main", nullptr, "Quality",
+		"Faster: QuarterResolution=true | Sharper: QuarterResolution=false",
+		"Faster works the bounce out on a quarter of the pixels (no visible difference for most people). Sharper uses half of them and costs a little more." },
+	{ "Shaders.BounceLight.Main", "Temporal", "Steadier light (less grain)", nullptr, "Keeps light from the last frame to reduce grain and flicker. Can trail slightly when turning." },
+	// Specular (Exterior)
+	{ "Shaders.Specular.Exterior", "SunStrength", "Sun highlight strength", nullptr, "How bright the sun glint is on surfaces. Strongest when looking towards the sun." },
+	{ "Shaders.Specular.Exterior", "Roughness", "Highlight softness", nullptr, "Lower gives small bright highlights and clear reflections; higher gives a broad faint sheen." },
+	{ "Shaders.Specular.Exterior", "SkyReflections", "Sky reflection strength", nullptr, "How much of the sky shows in surfaces, mostly at glancing angles." },
+	{ "Shaders.Specular.Exterior", "DistanceFade", "Highlight distance", nullptr, "How far away highlights stay visible before fading out." },
+	// Specular (Rain)
+	{ "Shaders.Specular.Rain", "SunStrength", "Sun highlight strength", nullptr, "The same, while it rains." },
+	{ "Shaders.Specular.Rain", "Roughness", "Highlight softness", nullptr, "Wet surfaces are smoother: smaller, brighter highlights and clearer reflections." },
+	{ "Shaders.Specular.Rain", "SkyReflections", "Sky reflection strength", nullptr, "The same, while it rains." },
+	{ "Shaders.Specular.Rain", "DistanceFade", "Highlight distance", nullptr, "The same, while it rains." },
+	// PBR (Main)
+	{ "Shaders.PBR.Main", "ReflectivityExterior", "Shininess outdoors", nullptr, "How shiny and reflective surfaces look outdoors." },
+	{ "Shaders.PBR.Main", "ReflectivityInterior", "Shininess indoors", nullptr, "How shiny surfaces look indoors. Lower it if floors look too glossy." },
+	{ "Shaders.PBR.Main", "HairHighlight", "Hair shine", nullptr, "How bright the shine on hair is. 0 removes it." },
+	{ "Shaders.PBR.Main", "Roughness", "Surface roughness", nullptr, "Lower gives small bright highlights and clear reflections; higher gives a broad faint sheen." },
+	{ "Shaders.PBR.Main", "AmbientScale", "Ambient light strength", nullptr, "How bright the general ambient light is on objects." },
+	{ "Shaders.PBR.Main", "LightingScale", "Sun and lamp light strength", nullptr, "How strong the sun and lamp light is on objects." },
+	{ "Shaders.PBR.Main", "Saturation", "Colour saturation", nullptr, "How vivid the colours of lit objects are." },
+	{ "Shaders.PBR.Main", "SkylightingScale", "Sky colour in shade", nullptr, "Adds the colour of the sky to shaded areas. 0 turns it off." },
+	// PBR (Rain)
+	{ "Shaders.PBR.Rain", "Roughness", "Surface roughness", nullptr, "Lower gives small bright highlights and clear reflections; higher gives a broad faint sheen." },
+	{ "Shaders.PBR.Rain", "AmbientScale", "Ambient light strength", nullptr, "How bright the general ambient light is on objects." },
+	{ "Shaders.PBR.Rain", "LightingScale", "Sun and lamp light strength", nullptr, "How strong the sun and lamp light is on objects." },
+	{ "Shaders.PBR.Rain", "Saturation", "Colour saturation", nullptr, "How vivid the colours of lit objects are." },
+	{ "Shaders.PBR.Rain", "SkylightingScale", "Sky colour in shade", nullptr, "Adds the colour of the sky to shaded areas. 0 turns it off." },
+	// PBR (Night)
+	{ "Shaders.PBR.Night", "Roughness", "Surface roughness", nullptr, "Lower gives small bright highlights and clear reflections; higher gives a broad faint sheen." },
+	{ "Shaders.PBR.Night", "AmbientScale", "Ambient light strength", nullptr, "How bright the general ambient light is on objects." },
+	{ "Shaders.PBR.Night", "LightingScale", "Sun and lamp light strength", nullptr, "How strong the sun and lamp light is on objects." },
+	{ "Shaders.PBR.Night", "Saturation", "Colour saturation", nullptr, "How vivid the colours of lit objects are." },
+	{ "Shaders.PBR.Night", "SkylightingScale", "Sky colour in shade", nullptr, "Adds the colour of the sky to shaded areas. 0 turns it off." },
+	// PBR (NightRain)
+	{ "Shaders.PBR.NightRain", "Roughness", "Surface roughness", nullptr, "Lower gives small bright highlights and clear reflections; higher gives a broad faint sheen." },
+	{ "Shaders.PBR.NightRain", "AmbientScale", "Ambient light strength", nullptr, "How bright the general ambient light is on objects." },
+	{ "Shaders.PBR.NightRain", "LightingScale", "Sun and lamp light strength", nullptr, "How strong the sun and lamp light is on objects." },
+	{ "Shaders.PBR.NightRain", "Saturation", "Colour saturation", nullptr, "How vivid the colours of lit objects are." },
+	{ "Shaders.PBR.NightRain", "SkylightingScale", "Sky colour in shade", nullptr, "Adds the colour of the sky to shaded areas. 0 turns it off." },
+	// PBR (Interiors)
+	{ "Shaders.PBR.Interiors", "Roughness", "Surface roughness", nullptr, "Lower gives small bright highlights and clear reflections; higher gives a broad faint sheen." },
+	{ "Shaders.PBR.Interiors", "AmbientScale", "Ambient light strength", nullptr, "How bright the general ambient light is on objects." },
+	{ "Shaders.PBR.Interiors", "LightingScale", "Sun and lamp light strength", nullptr, "How strong the sun and lamp light is on objects." },
+	{ "Shaders.PBR.Interiors", "Saturation", "Colour saturation", nullptr, "How vivid the colours of lit objects are." },
+	// PBR (Metal)
+	{ "Shaders.PBR.Metal", "MetalOn", "Metal look", nullptr, "Gives metal objects a proper metal look, with reflections instead of plastic shine." },
+	{ "Shaders.PBR.Metal", "FirstPerson", "Metal on your weapon", nullptr, "How metal your weapon looks in first person." },
+	{ "Shaders.PBR.Metal", "World", "Metal look on the world", nullptr, "How metal things in the world look. Grey concrete or cloth can be mistaken for metal, so keep it moderate." },
+	{ "Shaders.PBR.Metal", "Roughness", "Metal finish (mirror to rough)", nullptr, "Finish of bare metal: low is a mirror, high is rough cast." },
+	{ "Shaders.PBR.Metal", "Reflections", "Metal reflection strength", nullptr, "How strongly metal reflects the sky and its surroundings." },
+	{ "Shaders.PBR.Metal", "CubeReflections", "Metal reflects its surroundings", nullptr, "Reflects what is really around it, such as the street, neon and lamps. Needs Reflections on." },
+	// PBR (EnvMaps)
+	{ "Shaders.PBR.EnvMaps", "Lighting", "Chrome reflections follow the light", nullptr, "Makes chrome shine follow the light around it, so it is dull in a dark cave and bright at noon." },
+	{ "Shaders.PBR.EnvMaps", "Strength", "Chrome reflection brightness", nullptr, "How bright chrome and glass reflections are in the light." },
+	{ "Shaders.PBR.EnvMaps", "CubeReflections", "Chrome shows its surroundings", nullptr, "Reflects what is really around it, such as the street, neon and lamps. Needs Reflections on." },
+	// PBR (MaterialRules)
+	{ "Shaders.PBR.MaterialRules", "Enabled", "Material types by texture", nullptr, "Sorts surfaces by texture (guns, glass, wood, rock) so only the right ones look metal or polished." },
+	// PBR (Rmaos)
+	{ "Shaders.PBR.Rmaos", "Enabled", "Material maps", nullptr, "Uses material maps for roughness, metal and shading where a texture has one." },
+	{ "Shaders.PBR.Rmaos", "Occlusion", "Material map shading strength", nullptr, "How much the material maps darken the ambient light in crevices." },
+	{ "Shaders.PBR.Rmaos", "MetalFromMap", "Metal from material maps", nullptr, "Takes metal from the material maps instead of guessing from the texture." },
+	{ "Shaders.PBR.Rmaos", "SpecularFromMap", "Shine from material maps", nullptr, "Takes how much surfaces reflect from the material maps." },
+	// PBR (Dust)
+	{ "Shaders.PBR.Dust", "Enabled", "Dust on top surfaces", nullptr, "A thin sandy coat on upward-facing surfaces such as rock tops, car roofs and ledges." },
+	{ "Shaders.PBR.Dust", "Amount", "Dust amount", nullptr, "How thick the dust coat is." },
+	{ "Shaders.PBR.Dust", "ColorR", "Dust colour", nullptr, "The colour of the dust. Sand by default." },
+	{ "Shaders.PBR.Dust", "Patchiness", "Patchiness", nullptr, "0 gives an even coat; higher gives patches with bare spots." },
+	{ "Shaders.PBR.Dust", "Size", "Patch size", nullptr, "How big each patch of dust is." },
+	{ "Shaders.PBR.Dust", "Interiors", "Also indoors", nullptr, "Also adds dust indoors, in ruins and dusty rooms." },
+	// PBR (MicroShadow)
+	{ "Shaders.PBR.MicroShadow", "Enabled", "Deeper cracks and crevices", nullptr, "Bumps in surfaces shadow themselves, so cracks look deep instead of painted on. Needs material maps." },
+	{ "Shaders.PBR.MicroShadow", "Strength", "Strength", nullptr, "How deep cracks and crevices look." },
+	// PBR (Linear)
+	{ "Shaders.PBR.Linear", "Enabled", "Realistic light blending (linear lighting)", nullptr, "Blends light the way real light adds up: smoother falloff into shade and better lamp mixing." },
+	{ "Shaders.PBR.Linear", "Gamma", "Light blending curve (gamma)", nullptr, "How light is blended. Leave at the standard value unless things look too dark or flat." },
+	// PBR (LampFalloff)
+	{ "Shaders.PBR.LampFalloff", "Exterior", "Realistic lamp falloff outdoors", nullptr, "Outdoor lamps and fires fade smoothly with distance instead of lighting an even disc." },
+	{ "Shaders.PBR.LampFalloff", "Interior", "Realistic lamp falloff indoors", nullptr, "Indoor lamps make pools of light with darker areas between." },
+	{ "Shaders.PBR.LampFalloff", "Falloff", "Lamp falloff speed", nullptr, "How fast a lamp dims with distance. Small gives a bright spot and a long dim tail." },
+	{ "Shaders.PBR.LampFalloff", "Brightness", "Lamp brightness", nullptr, "How bright lamps are while this is on." },
+	// Reflections (Main)
+	{ "Shaders.Reflections.Main", "GroundSheen", "Dry ground reflections", nullptr, "How much dry ground, such as roads and pavements, mirrors its surroundings. Streets pick up neon and lamps at night." },
+	{ "Shaders.Reflections.Main", "RainWetness", "Wet ground reflections", nullptr, "How much rain makes the ground mirror neon, lamps and sky. Covered areas stay dry." },
+	{ "Shaders.Reflections.Main", "InteriorFloors", "Floor reflections indoors", nullptr, "How much floors indoors mirror the room, wood and carpet too." },
+	{ "Shaders.Reflections.Main", "Roughness", "Dry reflection blur", nullptr, "Lower gives mirror-like dry reflections; higher blurs them to a glow." },
+	{ "Shaders.Reflections.Main", "WetRoughness", "Wet reflection blur", nullptr, "Lower gives sharp mirror-like reflections in puddles; higher blurs them." },
+	{ "Shaders.Reflections.Main", "MaterialReflect", "Smooth surface reflections", nullptr, "How much smooth materials such as tiles, glass and polished counters reflect. Needs material maps on." },
+	{ "Shaders.Reflections.Main", "DrawDistance", "Reflection distance", nullptr, "How far away surfaces still reflect." },
+	{ "Shaders.Reflections.Main", nullptr, "Quality",
+		"Low: Steps=12 | Medium: Steps=24 | High: Steps=40",
+		"Higher gives steadier reflections with fewer gaps, and costs more." },
+	// Sun shadows (Main)
+	{ "Shaders.ShadowsExteriors.Main", "Enabled", "Sun shadows", nullptr, "Turns the shadows cast by the sun on or off outdoors." },
+	{ "Shaders.ShadowsExteriors.Main", "Darkness", "Shadow darkness", nullptr, "How dark sun shadows are. Lower gives pale shadows, higher gives near-black ones." },
+	{ "Shaders.ShadowsExteriors.Main", "NightMinDarkness", "Shadow darkness in moonlight", nullptr, "How dark shadows stay on nights with little moon. Set to zero for no shadows when the moon is dark." },
+	{ "Shaders.ShadowsExteriors.Main", "SmoothCharacterShadows", "Smooth shadows on faces and skin", nullptr, "Shadows on faces and skin follow the smooth shape of the head instead of showing blocky facets." },
+	{ "Shaders.ShadowsExteriors.Main", "UsePointShadowsNight", "Lamp shadows outdoors at night", nullptr, "Lamps and fires outdoors cast shadows at night. Darkens the whole picture slightly." },
+	// Sun shadows (Sun movement)
+	{ "Shaders.ShadowsExteriors.SunSmoothing", "SmoothSun", "Smooth shadow movement", nullptr, "Shadows glide as the sun moves instead of jumping a step at a time." },
+	{ "Shaders.ShadowsExteriors.SunSmoothing", "GlideSeconds", "Shadow glide time (seconds)", nullptr, "How many real seconds each small shadow move takes. Longer is smoother but lags behind the sun." },
+	// Sun shadows (Casters in the top-down map)
+	{ "Shaders.ShadowsExteriors.FormsOrtho", "Trees", "Trees and plants", nullptr, "Trees count as roofs, so rain and sky light stop under them." },
+	{ "Shaders.ShadowsExteriors.FormsOrtho", "Statics", "Buildings and rocks", nullptr, "Buildings and rocks count as roofs, so rain and sky light stop under them." },
+	{ "Shaders.ShadowsExteriors.FormsOrtho", "Misc", "Small props and junk", nullptr, "Small props such as awnings and junk count as roofs for rain and sky light." },
+	{ "Shaders.ShadowsExteriors.FormsOrtho", "Terrain", "Ground", nullptr, "Hills and overhanging ground count as roofs for rain and sky light." },
+	// Sun shadows (Contact shadows)
+	{ "Shaders.ShadowsExteriors.ScreenSpace", "Enabled", "Contact shadows (small detail shadows)", nullptr, "Adds small dark shadows where things touch, such as under rocks, plants and feet. Costs a little frame rate." },
+	{ "Shaders.ShadowsExteriors.ScreenSpace", "Intensity", "Contact shadow strength", nullptr, "How dark the small contact shadows are." },
+	{ "Shaders.ShadowsExteriors.ScreenSpace", "BlurRadius", "Contact shadow softness", nullptr, "How soft contact shadows are. Keep it low, or they look blocky." },
+	{ "Shaders.ShadowsExteriors.ScreenSpace", "Sharp", "Sharper, steadier contact shadows", nullptr, "Crisper contact shadows that shimmer less. Costs a little more frame rate." },
+	// Sun shadows (Shadow maps)
+	{ "Shaders.ShadowsExteriors.ShadowMaps", nullptr, "Shadow quality",
+		"Low: CascadeResolution=0 Distance=4000 | Medium: CascadeResolution=1 Distance=6000 | High: CascadeResolution=2 Distance=8000 | Very high: CascadeResolution=4 Distance=10000",
+		"Sharper sun shadows that reach further from you. Higher costs more video memory and frame rate, a lot more at Very high." },
+	{ "Shaders.ShadowsExteriors.ShadowMaps", "SmoothFilter", "Smoother shadow edges", nullptr, "Rounds off the stair steps along shadow edges. Edges get slightly softer." },
+	{ "Shaders.ShadowsExteriors.ShadowMaps", "CharacterShadowMap", "Sharper shadows on your character", nullptr, "Gives your own character much finer sun shadows, handy in third person. Needs a restart." },
+	// Sun shadows (Top-down map)
+	{ "Shaders.ShadowsExteriors.Ortho", nullptr, "Roof detection quality (rain, sky light)",
+		"Low: Resolution=1 Distance=2000 | Medium: Resolution=2 Distance=3000 | High: Resolution=3 Distance=4000",
+		"The overhead map that tells which ground is under a roof: rain and sky light stop there. Higher is more exact and costs a little more." },
+	// Sun shadows (Mountain shadows)
+	{ "Shaders.ShadowsExteriors.TerrainShadows", "Enabled", "Mountain shadows", nullptr, "Hills and mountains shade the land far into the distance, most visible at sunrise and sunset." },
+	{ "Shaders.ShadowsExteriors.TerrainShadows", "Strength", "Mountain shadow strength", nullptr, "How much sunlight a mountain shadow takes away." },
+	{ "Shaders.ShadowsExteriors.TerrainShadows", "Softness", "Mountain shadow softness", nullptr, "How gradually mountain shadows fade at their edges." },
+	{ "Shaders.ShadowsExteriors.TerrainShadows", "Contrast", "Mountain shadow sharpness", nullptr, "Higher gives a harder line between lit and shaded land." },
+	{ "Shaders.ShadowsExteriors.TerrainShadows", nullptr, "Mountain shadow detail",
+		"Low: MaxResolution=0 | Medium: MaxResolution=1 | High: MaxResolution=2",
+		"How detailed mountain shadows are. Higher is finer and uses more video memory." },
+	// Lamp shadows (Main)
+	{ "Shaders.ShadowsInteriors.Main", "Darkness", "Shadow darkness", nullptr, "How dark lamp shadows are indoors." },
+	{ "Shaders.ShadowsInteriors.Main", "LightPoints", "Lamps casting shadows at once", nullptr, "How many lamps can cast shadows together. More gives richer rooms and costs frame rate." },
+	{ "Shaders.ShadowsInteriors.Main", nullptr, "Lamp shadow detail",
+		"Low: ShadowCubeMapSize=256 | Medium: ShadowCubeMapSize=512 | High: ShadowCubeMapSize=1024",
+		"How sharp each lamp shadow is. Higher costs more video memory and frame rate." },
+	{ "Shaders.ShadowsInteriors.Main", "DrawDistance", "Lamp shadow distance", nullptr, "How far from you lamps still cast shadows." },
+	{ "Shaders.ShadowsInteriors.Main", "ContactShadows", "Lamp contact shadows (where props meet floors)", nullptr, "Adds small dark lines where props meet the floor or tables meet a wall. Off at zero." },
+	{ "Shaders.ShadowsInteriors.Main", "PlayerShadowFirstPerson", "Your own shadow in first person", nullptr, "Your body casts a lamp shadow even in first person." },
+	// Lamp shadows (Per-object shadows)
+	{ "Shaders.ShadowsInteriors.Forward", "Enabled", "Lamp shadows on each object", nullptr, "Each lamp shadows only its own light, so rooms keep their colours. Off gives the older flat darkening." },
+	{ "Shaders.ShadowsInteriors.Forward", "Strength", "Lamp shadow strength", nullptr, "How dark a lamp shadow is. At full strength it blocks all of that lamp's light." },
+	{ "Shaders.ShadowsInteriors.Forward", "Softness", "Lamp shadow softness", nullptr, "Zero gives hard edges and costs least. Higher gives softer edges and costs frame rate in busy rooms." },
+	{ "Shaders.ShadowsInteriors.Forward", nullptr, "Lamp shadow edge quality",
+		"Low: Quality=0 | Medium: Quality=1 | High: Quality=2 | Ultra: Quality=3",
+		"How smooth lamp shadow edges are. Higher is smoother and costs more frame rate. Needs lamp shadow softness above zero." },
+	{ "Shaders.ShadowsInteriors.Forward", "ContactHardening", "Sharp where objects touch the ground", nullptr, "Shadows are sharp where an object touches the floor and blur further away, as in real life." },
+	{ "Shaders.ShadowsInteriors.Forward", "LampSize", "Lamp size (softer far shadows)", nullptr, "Bigger lamps make shadows blur more with distance. Zero keeps them sharp." },
+	{ "Shaders.ShadowsInteriors.Forward", "FirstPerson", "Shadows on your weapon and arms", nullptr, "Lamp shadows fall on your weapon and arms in first person." },
+	// Lamp shadows (Shadow atlas)
+	{ "Shaders.ShadowsInteriors.Atlas", nullptr, "Lamp shadow map size",
+		"Low: Size=2048 | Medium: Size=4096 | High: Size=8192",
+		"Video memory set aside for lamp shadows. Larger is sharper and uses more memory: High takes 128 MB." },
+	// Sun shadows (Soft contact edges)
+	{ "Shaders.ContactHardening.Main", "SunSize", "Shadow softness with distance", nullptr, "Shadow edges soften further from what casts them. Higher is softer but can show jagged edges." },
+	{ "Shaders.ContactHardening.Main", "MaxSoftness", "Softest shadow edge", nullptr, "The softest a shadow edge can get. Higher allows very soft shadows under tall objects and costs more." },
+	{ "Shaders.ContactHardening.Main", "AtNight", "Also at night", nullptr, "Keeps soft shadow edges at night too. Moonlight shadows are faint, so you will barely see it." },
+	// Cloud shadows (Main)
+	{ "Shaders.CloudShadows.Main", "Enabled", "Cloud shadows", nullptr, "Clouds cast moving shadows on the land. Cheap." },
+	{ "Shaders.CloudShadows.Main", "Strength", "Cloud shadow strength", nullptr, "How much sunlight a thick cloud takes away." },
+	{ "Shaders.CloudShadows.Main", "Density", "Cloud thickness", nullptr, "How solid clouds count. Raise it if thin clouds cast no visible shadow." },
+	{ "Shaders.CloudShadows.Main", "Speed", "Cloud shadow speed", nullptr, "How fast the shadows drift with the wind." },
+	{ "Shaders.CloudShadows.Main", "TileSize", "Cloud shadow size", nullptr, "Smaller gives smaller, more frequent cloud shadows. Larger gives big, slow ones." },
+	{ "Shaders.CloudShadows.Main", "WaterShadows", "Also on water", nullptr, "Cloud and mountain shadows also darken water. Shallow water darkens most." },
+	// Skin (Main)
+	{ "Shaders.Skin.Main", "SpecularStrength", "Skin shine", nullptr, "How strongly skin catches the light. Zero is flat and dry, high looks oily." },
+	{ "Shaders.Skin.Main", "Roughness", "Skin roughness (lower is oilier)", nullptr, "Lower gives tight, bright highlights. Higher gives a matte look." },
+	{ "Shaders.Skin.Main", "Scattering", "Skin softness (light under the skin)", nullptr, "Light spreads under the skin, softening the line between light and shadow, with a warm red edge." },
+	{ "Shaders.Skin.Main", "Translucency", "Light through ears and fingers", nullptr, "Thin parts such as ears and fingers glow red when the light is behind them." },
+	{ "Shaders.Skin.Main", "Sheen", "Soft glow on skin edges", nullptr, "A soft, velvety glow along cheeks, ears and noses where light skims the skin." },
+	{ "Shaders.Skin.Main", "SkyReflection", "Sky reflection on skin", nullptr, "Skin reflects the sky at glancing angles. Outdoors only." },
+	{ "Shaders.Skin.Main", "RainWetness", "Wet skin in rain", nullptr, "How wet and shiny skin gets in the rain." },
+	// Skin (Interiors)
+	{ "Shaders.Skin.Interiors", "SpecularStrength", "Skin shine", nullptr, "How strongly skin catches lamp light indoors. Zero is flat and dry, high looks oily." },
+	{ "Shaders.Skin.Interiors", "Roughness", "Skin roughness (lower is oilier)", nullptr, "Lower gives tight, bright highlights indoors. Higher gives a matte look." },
+	{ "Shaders.Skin.Interiors", "Scattering", "Skin softness (light under the skin)", nullptr, "Light spreads under the skin indoors, softening the edge of shadows." },
+	{ "Shaders.Skin.Interiors", "Translucency", "Light through ears and fingers", nullptr, "Ears and fingers glow red when a lamp is behind them." },
+	{ "Shaders.Skin.Interiors", "Sheen", "Soft glow on skin edges", nullptr, "A soft, velvety glow along cheeks, ears and noses indoors." },
+	{ "Shaders.Skin.Interiors", "ScreenSpace", "Soft, waxy skin glow", nullptr, "Spreads light across the skin on screen for a softer, waxier look indoors." },
+	{ "Shaders.Skin.Interiors", "Width", "Skin glow spread", nullptr, "How far that soft glow spreads. Higher is softer and waxier." },
+	// Skin (Scattering)
+	{ "Shaders.Skin.Scattering", "ScreenSpace", "Soft, waxy skin glow", nullptr, "Spreads light across the skin on screen for a softer, waxier look outdoors." },
+	{ "Shaders.Skin.Scattering", "Width", "Skin glow spread", nullptr, "How far that soft glow spreads. Higher is softer and waxier." },
+	{ "Shaders.Skin.Scattering", "AlbedoDetail", "Skin texture detail kept", nullptr, "Keeps freckles, pores and stubble sharp. Lower blurs them into a waxy look." },
+	// Cloth (Main)
+	{ "Shaders.Cloth.Main", "Enabled", "Moving cloth", nullptr, "Capes, coats, flags, banners and curtains sway. Needs a restart." },
+	{ "Shaders.Cloth.Main", "UseGameWind", "Follow the wind of the weather", nullptr, "Cloth moves with the weather's wind direction and strength outdoors." },
+	{ "Shaders.Cloth.Main", "WindIntensity", "Cloth movement amount", nullptr, "How far loose cloth moves. Higher looks windier." },
+	{ "Shaders.Cloth.Main", "FlutterAmount", "Flutter", nullptr, "How much cloth quivers with small fast movements." },
+	{ "Shaders.Cloth.Main", "RippleAmount", "Billowing", nullptr, "How much cloth billows in and out like a sail." },
+	{ "Shaders.Cloth.Main", "WalkSim", "Coats swing as you walk", nullptr, "Worn coats hang from the hips and the hem trails behind you as you move." },
+	{ "Shaders.Cloth.Main", "AutoDetect", "Move all loose clothing", nullptr, "Clothing not on the cloth list also moves if it hangs free of the legs, such as long coats and robes." },
+	{ "Shaders.Cloth.Main", "MotionIndoors", "Coats swing indoors too", nullptr, "Worn coats follow your movement indoors as well." },
+	// Cloth (Interiors)
+	{ "Shaders.Cloth.Interiors", "Enabled", "Cloth moves indoors", nullptr, "Curtains, banners and flags sway gently indoors, in a draught." },
+	{ "Shaders.Cloth.Interiors", "Strength", "Indoor cloth movement", nullptr, "How much indoor cloth moves. Zero is still, higher moves more." },
+	// Pip-Boy sleeves (Main)
+	{ "Shaders.PipboyFit.Main", "Enabled", "Sleeves fit under the Pip-Boy", nullptr, "In first person, armour sleeves are pulled in so they do not poke through the Pip-Boy. Needs a restart." },
+	{ "Shaders.PipboyFit.Main", "Strength", "Fit strength", nullptr, "How much the sleeves are pulled in. Zero leaves them as they were." },
+	{ "Shaders.PipboyFit.Main", "ThirdPerson", "Also in third person", nullptr, "Your own sleeves are fitted in third person too. Other characters are not changed." },
+	// Blood (Main)
+	{ "Shaders.BloodFlow.Main", "Splats", "Blood runs down walls", nullptr, "Blood splats grow streams that run down walls and slopes." },
+	{ "Shaders.BloodFlow.Main", "Pools", "Blood pools under bodies", nullptr, "A pool of blood spreads under a body after death and slides downhill on slopes." },
+	{ "Shaders.BloodFlow.Main", "BloodAmount", "Amount of blood", nullptr, "How much blood shows. Lower breaks it up into beads and thin streaks." },
+	{ "Shaders.BloodFlow.Main", "DripLength", "Blood stream length", nullptr, "How long blood streams run. Zero means no streams." },
+	{ "Shaders.BloodFlow.Main", "Gloss", "Blood shine", nullptr, "How much fresh blood glints in sun and lamp light. Dry blood stays dull." },
+	{ "Shaders.BloodFlow.Main", "FreshColorR", "Fresh blood colour", nullptr, "The colour of fresh blood." },
+	{ "Shaders.BloodFlow.Main", "DryColorR", "Dried blood colour", nullptr, "The colour blood dries to." },
+	{ "Shaders.BloodFlow.Main", "MaxDistance", "Blood distance", nullptr, "How far from you blood streams and pools are drawn. They fade out over the last stretch." },
+	// Blood (Fluid)
+	{ "Shaders.BloodFlow.Fluid", "Enabled", "Fluid blood (simulated, heavy)", nullptr, "Fresh blood is simulated as a real liquid that runs, gathers and drips. Costs a lot of frame rate." },
+	{ "Shaders.BloodFlow.Fluid", "Amount", "Amount of blood", nullptr, "How much liquid blood each splat and pool makes." },
+	{ "Shaders.BloodFlow.Fluid", "Viscosity", "Blood thickness", nullptr, "Higher gives thicker, slower blood that moves as one blob." },
+	{ "Shaders.BloodFlow.Fluid", "Drops", "Dripping drops", nullptr, "How much of the blood in the air shows as drops, such as dripping off ledges." },
+	{ "Shaders.BloodFlow.Fluid", nullptr, "Fluid blood detail",
+		"Low: MaxParticles=8192 | Medium: MaxParticles=16384 | High: MaxParticles=65536",
+		"How much liquid blood can exist at once. More looks fuller and costs more frame rate and memory." },
+	// Blood on weapon and hands (Main)
+	{ "Shaders.HandBlood.Main", "PerHit", "Blood on weapon and hands", nullptr, "Fresh blood nearby splashes onto your weapon and gloves. Higher gets you bloodier faster." },
+	{ "Shaders.HandBlood.Main", "Reach", "Distance blood reaches you", nullptr, "How close fresh blood must be to get on you. Small means point blank only." },
+	{ "Shaders.HandBlood.Main", "ColorR", "Blood colour", nullptr, "The colour of blood on your hands and weapon, until a blood splat has been seen." },
+	{ "Shaders.HandBlood.Main", "Brightness", "Blood brightness", nullptr, "Below one gives darker, thicker-looking blood on the gun." },
+	{ "Shaders.HandBlood.Main", "CellSize", "Spatter droplet size", nullptr, "Bigger gives a coarser spatter." },
+	{ "Shaders.HandBlood.Main", "Run", "Blood running", nullptr, "How far drops run down after a hit. Zero keeps them round." },
+	{ "Shaders.HandBlood.Main", "DryTime", "Drying time", nullptr, "Seconds until the blood dries dark and matte." },
+	{ "Shaders.HandBlood.Main", "FadeTime", "Time to wear off", nullptr, "Seconds until the blood wears off. Zero keeps it. Water washes it off." },
+	// Sky (Main)
+	{ "Shaders.Sky.Main", "TintDayR", "Sky colour by day", nullptr, "Tints the daytime sky. White leaves it as the weather made it." },
+	{ "Shaders.Sky.Main", "TintNightR", "Sky colour at night", nullptr, "Tints the night sky, for example a little blue for moonlit nights." },
+	{ "Shaders.Sky.Main", "SaturationDay", "Sky colourfulness by day", nullptr, "How colourful the daytime sky is. Lower is paler and greyer, higher is richer." },
+	{ "Shaders.Sky.Main", "SaturationNight", "Sky colourfulness at night", nullptr, "How colourful the night sky is. Lower is paler and greyer, higher is richer." },
+	{ "Shaders.Sky.Main", "SunsetR", "Sunset colour boost", nullptr, "Adds colour to the sun at sunrise and sunset. Red by default." },
+	{ "Shaders.Sky.Main", "MoonBrightness", "Moon brightness", nullptr, "How bright the moon looks, and how much light it throws on the world at night." },
+	{ "Shaders.Sky.Main", "StarStrength", "Star brightness", nullptr, "How bright the stars are at night." },
+	{ "Shaders.Sky.Main", "StarTwinkle", "Star twinkle speed", nullptr, "How fast the stars twinkle." },
+	// Sky (Physical)
+	{ "Shaders.Sky.Physical", "Enabled", "Realistic sky", nullptr, "Paints the sky from simulated air: blue overhead, pale at the horizon, a glow round the sun, red and gold at sunset." },
+	{ "Shaders.Sky.Physical", "Brightness", "Sky brightness", nullptr, "How bright the realistic sky is compared with the weather's own sky." },
+	{ "Shaders.Sky.Physical", "WeatherTint", "Keep the weather's sky colours", nullptr, "How much of each weather's own sky colour is kept. Low gives pure air colours." },
+	{ "Shaders.Sky.Physical", "Haze", "Dust haze in the air", nullptr, "Dust in the air: a wider, whiter glow round the sun and a paler horizon." },
+	// Sky (Clouds)
+	{ "Shaders.Sky.Clouds", "Transparency", "Flat cloud transparency", nullptr, "How see-through the game's flat clouds are." },
+	{ "Shaders.Sky.Clouds", "Brightness", "Flat cloud brightness", nullptr, "How bright the game's flat clouds are." },
+	// VolumetricClouds (Main)
+	{ "Shaders.VolumetricClouds.Main", nullptr, "Cloud quality",
+		"Low: Resolution=0 Steps=32 | Medium: Resolution=0 Steps=48 | High: Resolution=1 Steps=64 | Very high: Resolution=2 Steps=64",
+		"More detail and steadier cloud edges. Very high costs a lot of frame rate." },
+	{ "Shaders.VolumetricClouds.Main", "CoveragePleasant", "Cloud cover in fair weather", nullptr, "How much of the sky the clouds fill in fair weather." },
+	{ "Shaders.VolumetricClouds.Main", "CoverageCloudy", "Cloud cover when cloudy", nullptr, "How much of the sky the clouds fill in cloudy weather." },
+	{ "Shaders.VolumetricClouds.Main", "Thickness", "Cloud thickness", nullptr, "How deep the cloud layer is. Deeper gives taller, heaped clouds with darker undersides." },
+	{ "Shaders.VolumetricClouds.Main", "Density", "Cloud density", nullptr, "How solid the clouds are. Higher is denser and darker underneath, lower is more see-through." },
+	{ "Shaders.VolumetricClouds.Main", "Brightness", "Cloud brightness", nullptr, "Overall brightness of the clouds." },
+	{ "Shaders.VolumetricClouds.Main", "WindSpeed", "Cloud drift speed", nullptr, "How fast the clouds drift across the sky." },
+	{ "Shaders.VolumetricClouds.Main", "Shadows", "Cloud shadows on the ground", nullptr, "Clouds cast moving shadows over the land. Zero turns them off." },
+	// VolumetricFog (Main)
+	{ "Shaders.VolumetricFog.Main", nullptr, "Fog style",
+		"Current: LegacyFog=false ClassicLook=0 | Classic: LegacyFog=false ClassicLook=1 | Legacy: LegacyFog=true ClassicLook=0",
+		"Current: this version's fog. Classic: the original mod's look. Legacy: the older fog, for presets made for it." },
+	{ "Shaders.VolumetricFog.Main", "Amount", "Fog strength", nullptr, "How strong the fog is outdoors." },
+	{ "Shaders.VolumetricFog.Main", "BaseDensity", "Fog thickness", nullptr, "How thick the fog is, whatever the weather. Higher hides the distance sooner." },
+	{ "Shaders.VolumetricFog.Main", "FogSaturation", "Fog colour richness", nullptr, "How rich the fog's colour is. Lower is greyer." },
+	{ "Shaders.VolumetricFog.Main", "NoiseStrength", "Fog patchiness", nullptr, "How patchy the fog is. Zero is an even haze, higher gives drifting banks." },
+	{ "Shaders.VolumetricFog.Main", "WindSpeed", "Fog drift speed", nullptr, "How fast the fog patches drift." },
+	{ "Shaders.VolumetricFog.Main", "SunGlow", "Glow round the sun", nullptr, "The bright glow in the fog round the sun, strongest at sunrise and sunset." },
+	{ "Shaders.VolumetricFog.Main", "DistantFogBlend", "Haze on distant hills", nullptr, "How strongly far hills and terrain fade into the sky near the horizon." },
+	// VolumetricFog (Night)
+	{ "Shaders.VolumetricFog.Night", "AmountScale", "Fog strength at night", nullptr, "Fog strength at night compared with the day. Below 1 is thinner, above 1 is stronger." },
+	{ "Shaders.VolumetricFog.Night", "DensityScale", "Fog thickness at night", nullptr, "Fog thickness at night compared with the day." },
+	{ "Shaders.VolumetricFog.Night", "InscatteringScale", "Fog brightness at night", nullptr, "How bright and glowing the fog looks at night. Lower is darker." },
+	{ "Shaders.VolumetricFog.Night", "TintR", "Fog colour at night", nullptr, "Tints the fog at night. White leaves it as it is." },
+	// VolumetricFog (Interiors)
+	{ "Shaders.VolumetricFog.Interiors", "Amount", "Fog strength", nullptr, "How strong the fog is indoors." },
+	{ "Shaders.VolumetricFog.Interiors", "BaseDensity", "Fog thickness", nullptr, "How thick the fog is indoors." },
+	{ "Shaders.VolumetricFog.Interiors", "FogSaturation", "Fog colour richness", nullptr, "How rich the fog's colour is indoors. Lower is greyer." },
+	{ "Shaders.VolumetricFog.Interiors", "NoiseStrength", "Fog patchiness", nullptr, "How patchy the indoor fog is. Zero is an even haze." },
+	{ "Shaders.VolumetricFog.Interiors", "LampHazeEnabled", "Glow round lamps in the fog", nullptr, "Lamps glow softly in the fog indoors. Off while it is being tuned." },
+	{ "Shaders.VolumetricFog.Interiors", "LampHaze", "Lamp glow strength", nullptr, "How strongly the fog glows round each lamp. Needs the lamp glow switched on." },
+	// DustMotes (Main)
+	{ "Shaders.DustMotes.Main", "Density", "Amount of dust", nullptr, "How many specks of dust float in the air." },
+	{ "Shaders.DustMotes.Main", "Size", "Dust speck size", nullptr, "How big each speck of dust looks." },
+	{ "Shaders.DustMotes.Main", "Brightness", "Dust brightness", nullptr, "How brightly the specks catch the light." },
+	{ "Shaders.DustMotes.Main", "MaxDistance", "Dust distance", nullptr, "How far from you dust is drawn. Farther costs more frame rate." },
+	{ "Shaders.DustMotes.Main", "Drift", "Dust drift speed", nullptr, "How fast the dust floats about." },
+	{ "Shaders.DustMotes.Main", "Interiors", "Dust indoors", nullptr, "Show floating dust indoors, lit by the room's lamps." },
+	{ "Shaders.DustMotes.Main", "Exteriors", "Dust outdoors", nullptr, "Show floating dust outdoors, lit by street lights and fires at night." },
+	// VolumetricLight (Main)
+	{ "Shaders.VolumetricLight.Main", "Strength", "Light shaft strength", nullptr, "How visible the sunbeams through trees and buildings are by day. Outdoors only; needs the exterior shadows on." },
+	{ "Shaders.VolumetricLight.Main", "Density", "Air thickness", nullptr, "How thick the air is. Higher gives stronger, hazier beams over a shorter distance." },
+	{ "Shaders.VolumetricLight.Main", "MaxDistance", "Light shaft distance", nullptr, "How far from you the beams are drawn." },
+	{ "Shaders.VolumetricLight.Main", "Darken", "Darkening of shaded air", nullptr, "How much shaded air between the beams dims what is behind it." },
+	{ "Shaders.VolumetricLight.Main", "RainStrength", "Strength in rain", nullptr, "How much of the beam strength is kept in rain." },
+	{ "Shaders.VolumetricLight.Main", nullptr, "Quality",
+		"Low: Steps=8 BlurRadius=6.0 | Medium: Steps=16 BlurRadius=4.0 | High: Steps=32 BlurRadius=3.0",
+		"More samples and less smoothing give cleaner beams but cost more frame rate." },
+	// VolumetricLight (Night)
+	{ "Shaders.VolumetricLight.Night", "Strength", "Moonlight shaft strength", nullptr, "How visible the moonlight beams are at night." },
+	{ "Shaders.VolumetricLight.Night", "Darken", "Darkening of shaded air", nullptr, "How much shaded air between the beams dims what is behind it at night." },
+	{ "Shaders.VolumetricLight.Night", "Density", "Air thickness", nullptr, "How thick the air is at night. Higher gives stronger, hazier beams." },
+	{ "Shaders.VolumetricLight.Night", "MaxDistance", "Light shaft distance", nullptr, "How far from you the moonlight beams are drawn." },
+	// GodRays (Main)
+	{ "Shaders.GodRays.Main", "DayMultiplier", "Light shafts by day", nullptr, "How strong the light shafts streaming from the sun are by day." },
+	{ "Shaders.GodRays.Main", "NightMultiplier", "Light shafts at night", nullptr, "How strong the light shafts are at night." },
+	{ "Shaders.GodRays.Main", "RayLength", "Light shaft length", nullptr, "How long the light shafts stretch across the screen." },
+	{ "Shaders.GodRays.Main", "RayIntensity", "Light shaft brightness", nullptr, "How bright the light shafts are." },
+	{ "Shaders.GodRays.Main", "RayVisibility", "Light shaft contrast", nullptr, "Contrast of the shafts. Higher makes them sharper and fewer." },
+	{ "Shaders.GodRays.Main", "TimeEnabled", "Strongest at sunrise and sunset", nullptr, "Shafts are strongest at sunrise and sunset and fade away at noon." },
+	// GodRays (Coloring)
+	{ "Shaders.GodRays.Coloring", "RayR", "Light shaft colour", nullptr, "The colour used for the light shafts." },
+	{ "Shaders.GodRays.Coloring", "Saturate", "Use this colour (0 = sun colour)", nullptr, "How much of your colour is used. Zero takes the sun's colour, full uses only yours." },
+	// Sandstorm (Main)
+	{ "Shaders.Sandstorm.Main", "Visibility", "Visibility in the storm", nullptr, "How far you can see in a full storm. Lower is a thicker storm." },
+	{ "Shaders.Sandstorm.Main", "Billowing", "Cloudiness of the dust", nullptr, "Zero is an even haze, higher gives rolling dust clouds with clearer gaps." },
+	{ "Shaders.Sandstorm.Main", "StreakStrength", "Blowing sand streaks", nullptr, "Thin streaks of sand blown past the camera. Zero turns them off." },
+	{ "Shaders.Sandstorm.Main", "DustColorR", "Dust colour", nullptr, "The colour of the dust." },
+	{ "Shaders.Sandstorm.Main", "Brightness", "Dust brightness", nullptr, "How brightly lit the dust is." },
+	{ "Shaders.Sandstorm.Main", "WindSpeed", "Dust speed", nullptr, "How fast the dust blows in strong wind." },
+	{ "Shaders.Sandstorm.Main", "GrassWind", "Grass sway in the storm", nullptr, "How hard grass sways and flutters in the storm." },
+	{ "Shaders.Sandstorm.Main", "TreeWind", "Tree sway in the storm", nullptr, "How hard tree leaves swing in the storm." },
+	// HeatHaze (Main)
+	{ "Shaders.HeatHaze.Main", "Strength", "Haze strength", nullptr, "How much the distant ground wobbles in the heat. It builds through the day and is gone at night." },
+	{ "Shaders.HeatHaze.Main", "StartDistance", "Nearest distance with haze", nullptr, "Nothing nearer than this shimmers, so close things never waver." },
+	{ "Shaders.HeatHaze.Main", "NoiseScale", "Ripple fineness", nullptr, "Size of the ripples. Higher gives finer, busier ripples." },
+	{ "Shaders.HeatHaze.Main", "Speed", "Ripple speed", nullptr, "How fast the ripples rise." },
+	{ "Shaders.HeatHaze.Main", "PeakHour", "Hottest hour of the day", nullptr, "The hottest hour of the day, when the haze is strongest." },
+	{ "Shaders.HeatHaze.Main", "CloudyScale", "Haze in cloudy weather", nullptr, "How much haze is left in cloudy weather compared with a clear day." },
+	// Precipitations (Main)
+	{ "Shaders.Precipitations.Main", "Opacity", "Rain visibility", nullptr, "How solid and visible the raindrops are." },
+	{ "Shaders.Precipitations.Main", "Speed", "Rain speed", nullptr, "How fast the rain falls." },
+	{ "Shaders.Precipitations.Main", "VerticalScale", "Rain streak length", nullptr, "Longer values draw rain as longer streaks." },
+	{ "Shaders.Precipitations.Main", "Refraction", "Drop distortion", nullptr, "How much raindrops bend and distort the view behind them." },
+	{ "Shaders.Precipitations.Main", "Coloring", "Rain brightness", nullptr, "Makes the rain brighter and more visible." },
+	// Snow (Main)
+	{ "Shaders.Snow.Main", "Flakes", "Snowfall amount", nullptr, "How many snowflakes fall." },
+	{ "Shaders.Snow.Main", "Speed", "Snowfall speed", nullptr, "How fast the snow falls." },
+	// SnowAccumulation (Main)
+	{ "Shaders.SnowAccumulation.Main", "SnowColorR", "Snow colour", nullptr, "The colour of the snow lying on the ground." },
+	{ "Shaders.SnowAccumulation.Main", "SunPower", "Snow brightness in sunlight", nullptr, "How brightly the sun lights the snow." },
+	{ "Shaders.SnowAccumulation.Main", "Increase", "Hours for snow to build up", nullptr, "Game hours of snowfall before the ground is covered. Lower is faster." },
+	{ "Shaders.SnowAccumulation.Main", "Decrease", "Hours for snow to melt", nullptr, "Game hours before the snow melts away. Higher keeps it longer." },
+	{ "Shaders.SnowAccumulation.Main", "Persistent", "Snow stays where it fell (spot by spot)", nullptr, "Snow builds up and melts spot by spot, so sheltered ground stays clear. Needs snowfall." },
+	{ "Shaders.SnowAccumulation.Main", "PersistentFootprints", "Footprints in snow", nullptr, "Your steps leave footprints in the snow." },
+	{ "Shaders.SnowAccumulation.Main", "PersistentDrifts", "Snow drifts in hollows", nullptr, "More snow gathers in hollows and against walls, less on ridges." },
+	// WetWorld (Main)
+	{ "Shaders.WetWorld.Main", "Persistent", "Ground stays wet where rain fell", nullptr, "Rain wets only the ground it reaches, so covered spots stay dry and puddles form in the open." },
+	{ "Shaders.WetWorld.Main", "PersistentWetTime", "Hours of rain to wet the ground", nullptr, "Game hours of rain before open ground is fully wet." },
+	{ "Shaders.WetWorld.Main", "PersistentDryTime", "Hours for wet ground to dry", nullptr, "Game hours for wet ground to dry in full sun. Shade takes longer." },
+	// Water (Default)
+	{ "Shaders.Water.Default", "reflectivity", "Reflections", nullptr, "How strongly the water mirrors its surroundings." },
+	{ "Shaders.Water.Default", "choppiness", "Wave sharpness", nullptr, "Higher gives sharper, more defined wave crests." },
+	{ "Shaders.Water.Default", "waveSpeed", "Wave speed", nullptr, "How fast the waves move." },
+	{ "Shaders.Water.Default", "waveWidth", "Wave size", nullptr, "Bigger values make larger waves; smaller values make fine ripples." },
+	{ "Shaders.Water.Default", "turbidity", "Water murkiness", nullptr, "Higher makes the water murkier." },
+	{ "Shaders.Water.Default", "refractionPower", "Refraction", nullptr, "How much the water bends the view of what lies beneath." },
+	{ "Shaders.Water.Default", "causticsStrength", "Underwater light patterns", nullptr, "Rippling bright patterns of light seen when you are underwater." },
+	{ "Shaders.Water.Default", "depthDarkness", "Darkness with depth", nullptr, "How dark the water gets as it gets deeper." },
+	// Water (Interiors)
+	{ "Shaders.Water.Interiors", "reflectivity", "Reflections", nullptr, "How strongly the water mirrors its surroundings." },
+	{ "Shaders.Water.Interiors", "choppiness", "Wave sharpness", nullptr, "Higher gives sharper, more defined wave crests." },
+	{ "Shaders.Water.Interiors", "waveSpeed", "Wave speed", nullptr, "How fast the waves move." },
+	{ "Shaders.Water.Interiors", "waveWidth", "Wave size", nullptr, "Bigger values make larger waves; smaller values make fine ripples." },
+	{ "Shaders.Water.Interiors", "turbidity", "Water murkiness", nullptr, "Higher makes the water murkier." },
+	{ "Shaders.Water.Interiors", "refractionPower", "Refraction", nullptr, "How much the water bends the view of what lies beneath." },
+	{ "Shaders.Water.Interiors", "depthDarkness", "Darkness with depth", nullptr, "How dark the water gets as it gets deeper." },
+	{ "Shaders.Water.Interiors", "shoreFactor", "Shore fade width", nullptr, "How wide the soft fade is where the water meets a shallow shore." },
+	// Water (Placed)
+	{ "Shaders.Water.Placed", "reflectivity", "Reflections", nullptr, "How strongly the water mirrors its surroundings." },
+	{ "Shaders.Water.Placed", "choppiness", "Wave sharpness", nullptr, "Higher gives sharper, more defined wave crests." },
+	{ "Shaders.Water.Placed", "waveSpeed", "Wave speed", nullptr, "How fast the waves move." },
+	{ "Shaders.Water.Placed", "waveWidth", "Wave size", nullptr, "Bigger values make larger waves; smaller values make fine ripples." },
+	{ "Shaders.Water.Placed", "turbidity", "Water murkiness", nullptr, "Higher makes the water murkier." },
+	{ "Shaders.Water.Placed", "refractionPower", "Refraction", nullptr, "How much the water bends the view of what lies beneath." },
+	{ "Shaders.Water.Placed", "depthDarkness", "Darkness with depth", nullptr, "How dark the water gets as it gets deeper." },
+	{ "Shaders.Water.Placed", "shoreFactor", "Shore fade width", nullptr, "How wide the soft fade is where the water meets a shallow shore." },
+	// WaterLens (Main)
+	{ "Shaders.WaterLens.Main", "Amount", "Water on the lens", nullptr, "How much water clings to the camera after you leave the water." },
+	{ "Shaders.WaterLens.Main", "Viscosity", "Droplet thickness", nullptr, "Higher makes the droplets thicker and slower to run." },
+	// Terrain (Main)
+	{ "Shaders.Terrain.Main", "UsePBR", "Realistic ground lighting", nullptr, "Realistic lighting on the ground. Off gives the game's own ground lighting." },
+	{ "Shaders.Terrain.Main", "Roughness", "Ground roughness (less shine)", nullptr, "Higher makes the ground duller with less shine; lower makes it shinier." },
+	{ "Shaders.Terrain.Main", "Metallicness", "Ground metallic sheen", nullptr, "Adds a metal-like sheen to the ground." },
+	{ "Shaders.Terrain.Main", "AmbientScale", "Ambient light on the ground", nullptr, "Brightens or darkens the soft background light on the ground." },
+	{ "Shaders.Terrain.Main", "SkylightingScale", "Sky colour on the ground", nullptr, "Adds sky colour to shaded ground. Zero turns it off." },
+	{ "Shaders.Terrain.Main", "LightingScale", "Sun and lamp light on the ground", nullptr, "Brightens or darkens the ground where sun or lamps hit it." },
+	{ "Shaders.Terrain.Main", "TerrainSaturation", "Ground colour strength", nullptr, "Higher gives richer ground colours; lower fades them toward grey." },
+	// Terrain (Rain)
+	{ "Shaders.Terrain.Rain", "Roughness", "Ground roughness (less shine)", nullptr, "Higher makes the ground duller with less shine; lower makes it shinier." },
+	{ "Shaders.Terrain.Rain", "Metallicness", "Ground metallic sheen", nullptr, "Adds a metal-like sheen to the ground." },
+	{ "Shaders.Terrain.Rain", "AmbientScale", "Ambient light on the ground", nullptr, "Brightens or darkens the soft background light on the ground." },
+	{ "Shaders.Terrain.Rain", "SkylightingScale", "Sky colour on the ground", nullptr, "Adds sky colour to shaded ground. Zero turns it off." },
+	{ "Shaders.Terrain.Rain", "LightingScale", "Sun and lamp light on the ground", nullptr, "Brightens or darkens the ground where sun or lamps hit it." },
+	{ "Shaders.Terrain.Rain", "TerrainSaturation", "Ground colour strength", nullptr, "Higher gives richer ground colours; lower fades them toward grey." },
+	// Terrain (Night)
+	{ "Shaders.Terrain.Night", "Roughness", "Ground roughness (less shine)", nullptr, "Higher makes the ground duller with less shine; lower makes it shinier." },
+	{ "Shaders.Terrain.Night", "Metallicness", "Ground metallic sheen", nullptr, "Adds a metal-like sheen to the ground." },
+	{ "Shaders.Terrain.Night", "AmbientScale", "Ambient light on the ground", nullptr, "Brightens or darkens the soft background light on the ground." },
+	{ "Shaders.Terrain.Night", "SkylightingScale", "Sky colour on the ground", nullptr, "Adds sky colour to shaded ground. Zero turns it off." },
+	{ "Shaders.Terrain.Night", "LightingScale", "Sun and lamp light on the ground", nullptr, "Brightens or darkens the ground where sun or lamps hit it." },
+	{ "Shaders.Terrain.Night", "TerrainSaturation", "Ground colour strength", nullptr, "Higher gives richer ground colours; lower fades them toward grey." },
+	// Terrain (NightRain)
+	{ "Shaders.Terrain.NightRain", "Roughness", "Ground roughness (less shine)", nullptr, "Higher makes the ground duller with less shine; lower makes it shinier." },
+	{ "Shaders.Terrain.NightRain", "Metallicness", "Ground metallic sheen", nullptr, "Adds a metal-like sheen to the ground." },
+	{ "Shaders.Terrain.NightRain", "AmbientScale", "Ambient light on the ground", nullptr, "Brightens or darkens the soft background light on the ground." },
+	{ "Shaders.Terrain.NightRain", "SkylightingScale", "Sky colour on the ground", nullptr, "Adds sky colour to shaded ground. Zero turns it off." },
+	{ "Shaders.Terrain.NightRain", "LightingScale", "Sun and lamp light on the ground", nullptr, "Brightens or darkens the ground where sun or lamps hit it." },
+	{ "Shaders.Terrain.NightRain", "TerrainSaturation", "Ground colour strength", nullptr, "Higher gives richer ground colours; lower fades them toward grey." },
+	// Terrain (Parallax)
+	{ "Shaders.Terrain.Parallax", "Enabled", "Ground depth (parallax)", nullptr, "Gives the ground a feeling of depth, so stones and ruts look raised as you move." },
+	{ "Shaders.Terrain.Parallax", "Shadows", "Self-shadowing in the ground", nullptr, "Raised bits of ground shade their own surroundings." },
+	{ "Shaders.Terrain.Parallax", "ShadowsIntensity", "Ground self-shadow strength", nullptr, "How dark those ground shadows are." },
+	{ "Shaders.Terrain.Parallax", nullptr, "Quality",
+		"Low: HighQuality=false MaxDistance=1024 | Medium: HighQuality=false MaxDistance=2048 | High: HighQuality=true MaxDistance=2048 | Ultra: HighQuality=true MaxDistance=4096",
+		"How finely and how far away the ground depth is drawn. Ultra reaches twice as far and costs the most frame rate." },
+	// Terrain (Blending)
+	{ "Shaders.Terrain.Blending", "Enabled", "Blend objects into the ground", nullptr, "Objects sink softly into the ground where they meet it. Needs a game restart to turn on." },
+	{ "Shaders.Terrain.Blending", "BlendDistance", "Blend depth", nullptr, "How deep an object can sink into the ground before it fades away." },
+	{ "Shaders.Terrain.Blending", "HeightBlend", "Follow ground texture detail", nullptr, "Makes the blend edge follow the ground texture, with sand reaching over the object." },
+	{ "Shaders.Terrain.Blending", "MaxDistance", "Blend distance", nullptr, "How far away the blending still works." },
+	// Terrain (Erosion)
+	{ "Shaders.Terrain.Erosion", "Enabled", "Gullies on distant slopes", nullptr, "Adds gullies to the shading of distant slopes and mountains." },
+	{ "Shaders.Terrain.Erosion", "Depth", "Gully depth", nullptr, "How deep the gullies look." },
+	{ "Shaders.Terrain.Erosion", "GullyDarkening", "Gully darkness", nullptr, "How much darker the gully floors are than the crests." },
+	{ "Shaders.Terrain.Erosion", "Spacing", "Gully spacing", nullptr, "Distance between the widest gullies. Smaller packs them tighter." },
+	// Terrain (LOD)
+	{ "Shaders.Terrain.LOD", "LODNoiseScale", "Distant land noise amount", nullptr, "How much noise is added to distant land to break up flat colour." },
+	{ "Shaders.Terrain.LOD", "LODNoiseTile", "Distant land noise detail", nullptr, "Higher makes the noise finer; lower makes it broader." },
+	// Terrain (Variation)
+	{ "Shaders.Terrain.Variation", "Enabled", "Less repeating ground", nullptr, "Breaks up the repeating look of the ground so the desert stops looking tiled." },
+	{ "Shaders.Terrain.Variation", "Layers", "Ground textures varied", nullptr, "How many ground textures per patch get the variation. More costs a little. Needs a restart." },
+	{ "Shaders.Terrain.Variation", "Scale", "Variation patch density", nullptr, "Higher changes the pattern more often; lower makes bigger patches." },
+	{ "Shaders.Terrain.Variation", "NormalMaps", "Vary ground bumps too", nullptr, "The ground bumps vary too. Off varies colour only and is cheaper." },
+	{ "Shaders.Terrain.Variation", "StartDistance", "Variation starts this far away", nullptr, "How far from you the variation begins. Zero means everywhere." },
+	// Terrain (Macro)
+	{ "Shaders.Terrain.Macro", "Enabled", "Large-scale ground colour variation", nullptr, "Slow changes in ground brightness and tint over hundreds of metres, such as paler sand here and darker gravel there." },
+	{ "Shaders.Terrain.Macro", "Strength", "Strength", nullptr, "How much of the variation shows." },
+	{ "Shaders.Terrain.Macro", "Size", "Patch size", nullptr, "How big each patch is. Smaller is busier; larger is broad regions." },
+	{ "Shaders.Terrain.Macro", "Brightness", "Brightness change", nullptr, "How much lighter or darker the patches get." },
+	{ "Shaders.Terrain.Macro", "Tint", "Warm and cool tint change", nullptr, "How much warmer or cooler the patches get." },
+	// Terrain (LODBlending)
+	{ "Shaders.Terrain.LODBlending", "Enabled", "Match distant land to near land", nullptr, "Adjusts distant land so it matches the ground near you." },
+	{ "Shaders.Terrain.LODBlending", "Brightness", "Distant land brightness", nullptr, "Brightens distant land if it looks darker than the ground near you." },
+	{ "Shaders.Terrain.LODBlending", "Gamma", "Distant land gamma", nullptr, "Above one darkens the dark parts of distant land for more contrast." },
+	// Terrain (Displacement)
+	{ "Shaders.Terrain.Displacement", "Enabled", "Real 3D bumps on the ground", nullptr, "Real 3D bumps on the ground, not just painted shading. Needs the DXVK fork and costs frame rate." },
+	{ "Shaders.Terrain.Displacement", "Strength", "Bump height", nullptr, "How tall the bumps are, from lowest to highest point." },
+	{ "Shaders.Terrain.Displacement", "BumpSize", "Smallest bump size", nullptr, "The smallest bump the ground gets. Larger leaves out fine grain." },
+	{ "Shaders.Terrain.Displacement", nullptr, "Quality",
+		"Low: EdgeLength=24.0 MaxFactor=8 | Medium: EdgeLength=16.0 MaxFactor=16 | High: EdgeLength=12.0 MaxFactor=16 | Ultra: EdgeLength=8.0 MaxFactor=32",
+		"How finely the ground is cut up for the bumps. Finer bumps look better and cost more frame rate." },
+	{ "Shaders.Terrain.Displacement", nullptr, "Distance",
+		"Near: FadeStart=512.0 FadeEnd=1024.0 | Medium: FadeStart=1024.0 FadeEnd=2048.0",
+		"How far from you the bumps reach before they fade out. Medium costs more than Near." },
+	{ "Shaders.Terrain.Displacement", "CastShadows", "Bumps cast shadows", nullptr, "The bumps throw small sun shadows, so stones and ruts look real." },
+	{ "Shaders.Terrain.Displacement", "BendNormals", "Light bumps as real slopes", nullptr, "Bumps are lit as slopes: the side facing the sun is brighter, the other darker." },
+	// POM (Main)
+	{ "Shaders.POM.Main", "HeightMapScale", "Rock and wall depth (parallax)", nullptr, "How deep rocks and walls with depth maps look." },
+	// POM (Displacement)
+	{ "Shaders.POM.Displacement", "Enabled", "Real 3D bumps on rocks and cliffs", nullptr, "Real 3D bumps on rocks and cliffs, not just painted shading. Needs the DXVK fork and costs frame rate." },
+	{ "Shaders.POM.Displacement", "Strength", "Bump height", nullptr, "How tall the bumps on rocks and cliffs are." },
+	{ "Shaders.POM.Displacement", nullptr, "Quality",
+		"Low: EdgePixels=24.0 MaxFactor=8 | Medium: EdgePixels=16.0 MaxFactor=16 | High: EdgePixels=12.0 MaxFactor=16 | Ultra: EdgePixels=8.0 MaxFactor=32",
+		"How finely rocks and cliffs are cut up for the bumps. Finer bumps look better and cost more frame rate." },
+	{ "Shaders.POM.Displacement", nullptr, "Distance",
+		"Near: FadeStart=512.0 FadeEnd=1024.0 | Medium: FadeStart=1024.0 FadeEnd=2048.0",
+		"How far from you the bumps reach before they fade out. Medium costs more than Near." },
+	// Grass (Main)
+	{ "Shaders.Grass.Main", "CastShadows", "Grass casts shadows", nullptr, "Grass throws sun shadows on the ground." },
+	{ "Shaders.Grass.Main", "CastShadowsReach", "Grass shadow distance", nullptr, "How far from you the grass casts shadows." },
+	// Grass (GPUGrass)
+	{ "Shaders.Grass.GPUGrass", "Enabled", "Strand grass (a different grass renderer: needs the DXVK fork)", nullptr, "Draws grass as many thin strands instead of the game's flat cards. Looks very different. Needs the DXVK fork." },
+	{ "Shaders.Grass.GPUGrass", "KeepCards", "Keep the game's flat grass as well (fuller)", nullptr, "Keeps the game's flat grass and adds strands around it for fuller clumps." },
+	{ "Shaders.Grass.GPUGrass", "Density", "Grass density", nullptr, "More strand clumps beside each grass tuft. Denser fields cost more." },
+	{ "Shaders.Grass.GPUGrass", nullptr, "Quality",
+		"Low: Blades=24 BladesFar=4 | Medium: Blades=40 BladesFar=6 | High: Blades=64 BladesFar=8 | Ultra: Blades=96 BladesFar=12",
+		"How many strands make up each clump of strand grass, near and far. More is fuller and costs more." },
+	{ "Shaders.Grass.GPUGrass", "BladeDistance", "Strand grass distance", nullptr, "How far away strand grass is drawn. Beyond it the game's flat grass is used." },
+	{ "Shaders.Grass.GPUGrass", "HeightScale", "Strand grass height", nullptr, "How tall the strands are compared to the plant." },
+	// Grass (Wind)
+	{ "Shaders.Grass.Wind", "Enabled", "Grass moves in waves of wind", nullptr, "Grass moves like a field in the wind, with gusts rolling across it." },
+	{ "Shaders.Grass.Wind", "GustStrength", "Gust strength", nullptr, "How far a passing gust leans the grass." },
+	{ "Shaders.Grass.Wind", "GustSize", "Gust size", nullptr, "Distance between gusts. Larger gives broad slow waves; smaller gives choppy ones." },
+	{ "Shaders.Grass.Wind", "GustSpeed", "Gust speed", nullptr, "How fast gusts roll across the grass." },
+	{ "Shaders.Grass.Wind", "Flutter", "Small quiver", nullptr, "Each tuft's own small quiver, so neighbours never move in step." },
+	// Plants (Wind)
+	{ "Shaders.Plants.Wind", "Enabled", "Plants move in the wind", nullptr, "Plants and bushes move in the same wind and gusts as the grass." },
+	{ "Shaders.Plants.Wind", "Bend", "Plant sway", nullptr, "How far a gust leans the top of a plant." },
+	{ "Shaders.Plants.Wind", "LeafGust", "Bush leaf sway in gusts", nullptr, "How much gusts strengthen the swing of bush leaves." },
+	{ "Shaders.Plants.Wind", "LeafFlutter", "Bush leaf flutter", nullptr, "Extra leaf flutter on bushes in the wind." },
+	// Foliage (Main)
+	{ "Shaders.Foliage.Main", "Translucency", "Light shining through leaves and grass", nullptr, "Grass and leaves glow softly when the sun is behind them. Zero is off." },
+	{ "Shaders.Foliage.Main", "Power", "Glow tightness (how close to the sun)", nullptr, "Higher shows the glow only when looking almost straight at the sun." },
+	// Particles (Main)
+	{ "Shaders.Particles.Main", "Strength", "Lighting on smoke, dust and blood", nullptr, "Smoke, dust and blood are lit by the scene instead of looking flat. Zero is the game's look." },
+	{ "Shaders.Particles.Main", "Brightness", "Particle brightness", nullptr, "Raise if particles look too dark next to the scene; lower if too bright." },
+	{ "Shaders.Particles.Main", "SunShare", "Sunlight on particles", nullptr, "How much sunlight particles catch outdoors. Shaded ones get only ambient light and lamps." },
+	// GPUParticles (Main)
+	{ "Shaders.GPUParticles.Main", "Enabled", "Rain and snow drawn on the graphics card (needs the DXVK fork)", nullptr, "Draws rain and snow as many more drops and flakes outdoors. Needs the DXVK fork." },
+	{ "Shaders.GPUParticles.Main", nullptr, "Quality",
+		"Low: Count=16384 Radius=1000 | Medium: Count=32768 Radius=1200 | High: Count=65536 Radius=1600",
+		"How many drops or flakes fall and how far around you. More is denser and costs more." },
+	{ "Shaders.GPUParticles.Main", "Size", "Drop and flake size", nullptr, "How big the drops, splashes and flakes are." },
+	{ "Shaders.GPUParticles.Main", "Speed", "Fall speed", nullptr, "How fast the drops and flakes fall." },
+	{ "Shaders.GPUParticles.Main", "Opacity", "Visibility", nullptr, "How strongly the drops and flakes show." },
+	{ "Shaders.GPUParticles.Main", "Splashes", "Splashes where drops land", nullptr, "Rain drops make a small splash where they land; snow settles briefly." },
+	// Tonemapping (Main)
+	{ "Shaders.Tonemapping.Main", nullptr, "Tone mapper",
+		"None (the game's own): TonemappingMode=0 | VT Lottes: TonemappingMode=1 | Lottes (tuned): TonemappingMode=2 | Reinhard: TonemappingMode=3 | Reinhard Jodie: TonemappingMode=4 | ACES Filmic: TonemappingMode=5 | ACES Fitted: TonemappingMode=6 | Uncharted 2: TonemappingMode=7 | Uchimura (GT): TonemappingMode=8 | AGX: TonemappingMode=9 | DICE (default): TonemappingMode=10 | Perceptual (Gran Turismo style): TonemappingMode=11",
+		"How bright light is fitted onto your screen. DICE is neutral; ACES and Uncharted 2 are punchier and more filmic; None keeps the game's look." },
+	{ "Shaders.Tonemapping.Main", "Exposure", "Brightness", nullptr, "Makes the whole picture brighter or darker." },
+	{ "Shaders.Tonemapping.Main", "Saturation", "Colour strength", nullptr, "How rich the colours are. Lower is greyer, higher is more vivid." },
+	{ "Shaders.Tonemapping.Main", "SkyMultiplier", "Sky brightness", nullptr, "Makes the sky and sun brighter or dimmer. Needs the sky effect on." },
+	{ "Shaders.Tonemapping.Main", "NightShiftEnabled", "Night colour shift (dim areas turn pale and blue)", nullptr, "In dark places the picture loses colour and turns pale and blue, as your eyes do in the dark." },
+	{ "Shaders.Tonemapping.Main", "NightShift", "Night colour shift amount", nullptr, "How strongly dark areas lose colour and turn blue. Used when the night colour shift is on." },
+	// Tonemapping (Interiors)
+	{ "Shaders.Tonemapping.Interiors", nullptr, "Tone mapper",
+		"None (the game's own): TonemappingMode=0 | VT Lottes: TonemappingMode=1 | Lottes (tuned): TonemappingMode=2 | Reinhard: TonemappingMode=3 | Reinhard Jodie: TonemappingMode=4 | ACES Filmic: TonemappingMode=5 | ACES Fitted: TonemappingMode=6 | Uncharted 2: TonemappingMode=7 | Uchimura (GT): TonemappingMode=8 | AGX: TonemappingMode=9 | DICE (default): TonemappingMode=10 | Perceptual (Gran Turismo style): TonemappingMode=11",
+		"How bright light is fitted onto your screen. DICE is neutral; ACES and Uncharted 2 are punchier and more filmic; None keeps the game's look." },
+	{ "Shaders.Tonemapping.Interiors", "Exposure", "Brightness", nullptr, "Makes the whole picture brighter or darker." },
+	{ "Shaders.Tonemapping.Interiors", "Saturation", "Colour strength", nullptr, "How rich the colours are. Lower is greyer, higher is more vivid." },
+	{ "Shaders.Tonemapping.Interiors", "NightShift", "Night colour shift amount", nullptr, "How strongly dark areas lose colour and turn blue. Used when the night colour shift is on." },
+	// Tonemapping (Night)
+	{ "Shaders.Tonemapping.Night", "Exposure", "Brightness", nullptr, "Makes the whole picture brighter or darker." },
+	{ "Shaders.Tonemapping.Night", "Saturation", "Colour strength", nullptr, "How rich the colours are. Lower is greyer, higher is more vivid." },
+	{ "Shaders.Tonemapping.Night", "SkyMultiplier", "Sky brightness", nullptr, "Makes the sky and sun brighter or dimmer. Needs the sky effect on." },
+	{ "Shaders.Tonemapping.Night", "NightShift", "Night colour shift amount", nullptr, "How strongly dark areas lose colour and turn blue. Used when the night colour shift is on." },
+	// Exposure (Main)
+	{ "Shaders.Exposure.Main", nullptr, "Auto exposure",
+		"Classic: Mode=0 | Eye adaptation: Mode=1",
+		"Classic: the older brightness correction. Eye adaptation: brightness adjusts like an eye, with automatic white balance. The rows below only affect eye adaptation." },
+	{ "Shaders.Exposure.Main", "AdaptExposure", "Eye adaptation strength", nullptr, "How much the brightness adjusts as you move between light and dark. Only with eye adaptation." },
+	{ "Shaders.Exposure.Main", "AdaptWhiteBalance", "Automatic white balance", nullptr, "Automatically removes warm or blue tints from the light, as your eyes do. Only with eye adaptation." },
+	{ "Shaders.Exposure.Main", "DarkAdaptSpeed", "Speed of adjusting to dark", nullptr, "How fast the picture brightens when you go somewhere darker. Higher is faster." },
+	{ "Shaders.Exposure.Main", "LightAdaptSpeed", "Speed of adjusting to bright", nullptr, "How fast the picture darkens when you go somewhere brighter. Higher is faster." },
+	// Exposure (Interiors)
+	{ "Shaders.Exposure.Interiors", "AdaptExposure", "Eye adaptation strength", nullptr, "How much the brightness adjusts as you move between light and dark. Only with eye adaptation." },
+	{ "Shaders.Exposure.Interiors", "AdaptWhiteBalance", "Automatic white balance", nullptr, "Automatically removes warm or blue tints from the light, as your eyes do. Only with eye adaptation." },
+	{ "Shaders.Exposure.Interiors", "DarkAdaptSpeed", "Speed of adjusting to dark", nullptr, "How fast the picture brightens when you go somewhere darker. Higher is faster." },
+	{ "Shaders.Exposure.Interiors", "LightAdaptSpeed", "Speed of adjusting to bright", nullptr, "How fast the picture darkens when you go somewhere brighter. Higher is faster." },
+	// Exposure (Night)
+	{ "Shaders.Exposure.Night", "AdaptExposure", "Eye adaptation strength", nullptr, "How much the brightness adjusts as you move between light and dark. Only with eye adaptation." },
+	{ "Shaders.Exposure.Night", "AdaptWhiteBalance", "Automatic white balance", nullptr, "Automatically removes warm or blue tints from the light, as your eyes do. Only with eye adaptation." },
+	{ "Shaders.Exposure.Night", "DarkAdaptSpeed", "Speed of adjusting to dark", nullptr, "How fast the picture brightens when you go somewhere darker. Higher is faster." },
+	{ "Shaders.Exposure.Night", "LightAdaptSpeed", "Speed of adjusting to bright", nullptr, "How fast the picture darkens when you go somewhere brighter. Higher is faster." },
+	// LocalExposure (Main)
+	{ "Shaders.LocalExposure.Main", "Shadows", "Lift dark areas", nullptr, "Brightens very dark parts of the picture so shaded areas show more detail." },
+	{ "Shaders.LocalExposure.Main", "Highlights", "Calm bright areas", nullptr, "Tones down very bright parts, such as bright sand or a doorway to the outside." },
+	{ "Shaders.LocalExposure.Main", "Blur", "Area size", nullptr, "How large the areas are that get evened out. Small reaches finer detail but can leave halos." },
+	{ "Shaders.LocalExposure.Main", "Interiors", "Also indoors", nullptr, "Also applies the effect indoors." },
+	{ "Shaders.LocalExposure.Main", "Exteriors", "Also outdoors", nullptr, "Also applies the effect outdoors." },
+	// HDR (Main)
+	{ "Shaders.HDR.Main", "Enabled", "HDR output", nullptr, "Sends a true HDR picture to your display, with brighter highlights. Needs an HDR screen with HDR on in Windows and the DXVK fork." },
+	{ "Shaders.HDR.Main", nullptr, "HDR format",
+		"HDR10: Mode=1 | scRGB: Mode=2",
+		"HDR10 is what most HDR games use. Try the other only if HDR10 looks wrong." },
+	{ "Shaders.HDR.Main", "PaperWhiteNits", "Normal white brightness (nits)", nullptr, "How bright normal white, the HUD and menus are on an HDR screen. Match your Windows setting." },
+	{ "Shaders.HDR.Main", "PeakNits", "Peak brightness (nits, 0 = automatic)", nullptr, "The brightest a highlight may get. Zero uses your display's own maximum." },
+	{ "Shaders.HDR.Main", "HighlightStrength", "Highlight strength", nullptr, "How much brighter than normal white the highlights go. Zero gives a normal picture." },
+	{ "Shaders.HDR.Main", "Gamma22", "Darker, deeper shadows (2.2 gamma)", nullptr, "Slightly darker, deeper shadows, like many standard monitors show." },
+	// Bloom (Main)
+	{ "Shaders.Bloom.Main", "Strength", "Glow strength", nullptr, "How strongly bright things glow." },
+	{ "Shaders.Bloom.Main", nullptr, "Quality",
+		"Low: Passes=4 | Medium: Passes=6 | High: Passes=8",
+		"Higher gives a smoother glow and costs a little more." },
+	{ "Shaders.Bloom.Main", "Spread", "Glow size", nullptr, "Makes glows wider and softer. Higher spreads light further around bright objects." },
+	{ "Shaders.Bloom.Main", "GlowBoost", "Extra glow from bright lights", nullptr, "Makes bright lights such as neon signs, lamps and fire glow more than the rest of the picture." },
+	// Bloom (Night)
+	{ "Shaders.Bloom.Night", "Strength", "Glow strength", nullptr, "How strongly bright things glow." },
+	{ "Shaders.Bloom.Night", nullptr, "Quality",
+		"Low: Passes=4 | Medium: Passes=6 | High: Passes=8",
+		"Higher gives a smoother glow and costs a little more." },
+	{ "Shaders.Bloom.Night", "Spread", "Glow size", nullptr, "Makes glows wider and softer. Higher spreads light further around bright objects." },
+	{ "Shaders.Bloom.Night", "GlowBoost", "Extra glow from bright lights", nullptr, "Makes bright lights such as neon signs, lamps and fire glow more than the rest of the picture." },
+	// Bloom (Interiors)
+	{ "Shaders.Bloom.Interiors", "Strength", "Glow strength", nullptr, "How strongly bright things glow." },
+	{ "Shaders.Bloom.Interiors", nullptr, "Quality",
+		"Low: Passes=4 | Medium: Passes=6 | High: Passes=8",
+		"Higher gives a smoother glow and costs a little more." },
+	{ "Shaders.Bloom.Interiors", "Spread", "Glow size", nullptr, "Makes glows wider and softer. Higher spreads light further around bright objects." },
+	{ "Shaders.Bloom.Interiors", "GlowBoost", "Extra glow from bright lights", nullptr, "Makes bright lights such as neon signs, lamps and fire glow more than the rest of the picture." },
+	// BloomLegacy (Exteriors)
+	{ "Shaders.BloomLegacy.Exteriors", "BloomIntensity", "Glow strength", nullptr, "How strongly bright things glow." },
+	{ "Shaders.BloomLegacy.Exteriors", "BloomSaturation", "Glow colour strength", nullptr, "How colourful the glow is." },
+	{ "Shaders.BloomLegacy.Exteriors", "OriginalIntensity", "Picture brightness", nullptr, "Brightness of the picture itself under the glow." },
+	{ "Shaders.BloomLegacy.Exteriors", "OriginalSaturation", "Picture colour strength", nullptr, "Colour strength of the picture itself under the glow." },
+	// BloomLegacy (Interiors)
+	{ "Shaders.BloomLegacy.Interiors", "BloomIntensity", "Glow strength", nullptr, "How strongly bright things glow." },
+	{ "Shaders.BloomLegacy.Interiors", "BloomSaturation", "Glow colour strength", nullptr, "How colourful the glow is." },
+	{ "Shaders.BloomLegacy.Interiors", "OriginalIntensity", "Picture brightness", nullptr, "Brightness of the picture itself under the glow." },
+	{ "Shaders.BloomLegacy.Interiors", "OriginalSaturation", "Picture colour strength", nullptr, "Colour strength of the picture itself under the glow." },
+	// Lens (Main)
+	{ "Shaders.Lens.Main", "Strength", "Lens dirt strength", nullptr, "How visible the dirt on the camera lens is when you look at bright lights." },
+	{ "Shaders.Lens.Main", "Smudginess", "Dirt coverage", nullptr, "How much of the screen the lens dirt covers." },
+	// Lens (Night)
+	{ "Shaders.Lens.Night", "Strength", "Lens dirt strength", nullptr, "How visible the dirt on the camera lens is when you look at bright lights." },
+	{ "Shaders.Lens.Night", "Smudginess", "Dirt coverage", nullptr, "How much of the screen the lens dirt covers." },
+	// Lens (Interiors)
+	{ "Shaders.Lens.Interiors", "Strength", "Lens dirt strength", nullptr, "How visible the dirt on the camera lens is when you look at bright lights." },
+	{ "Shaders.Lens.Interiors", "Smudginess", "Dirt coverage", nullptr, "How much of the screen the lens dirt covers." },
+	// LUT (Main)
+	{ "Shaders.LUT.Main", "Strength", "Colour grade strength", nullptr, "How strongly the chosen colour grade is applied. Zero is off." },
+	// Coloring (Default)
+	{ "Shaders.Coloring.Default", "Strength", "Strength", nullptr, "How strongly the whole colour look is applied." },
+	{ "Shaders.Coloring.Default", "Saturation", "Colour strength", nullptr, "How rich the colours are. Lower is greyer." },
+	{ "Shaders.Coloring.Default", "Contrast", "Contrast", nullptr, "Difference between dark and bright parts. Higher is punchier." },
+	{ "Shaders.Coloring.Default", "Bleach", "Bleached look", nullptr, "A washed-out, desaturated film look with harder contrast." },
+	{ "Shaders.Coloring.Default", "Fade", "Faded look", nullptr, "Lifts the blacks for a faded, hazy look." },
+	// ImageAdjust (Main)
+	{ "Shaders.ImageAdjust.Main", "Strength", "Strength", nullptr, "How strongly these picture adjustments are applied." },
+	{ "Shaders.ImageAdjust.Main", "Brightness", "Brightness", nullptr, "Makes the picture lighter or darker." },
+	{ "Shaders.ImageAdjust.Main", "Contrast", "Contrast", nullptr, "Difference between dark and bright parts. Higher is punchier." },
+	{ "Shaders.ImageAdjust.Main", "Saturation", "Colour strength", nullptr, "How rich the colours are. Lower is greyer." },
+	{ "Shaders.ImageAdjust.Main", "DarkColorR", "Shadow colour", nullptr, "Tints the dark parts of the picture." },
+	{ "Shaders.ImageAdjust.Main", "LightColorR", "Highlight colour", nullptr, "Tints the bright parts of the picture." },
+	// ImageAdjust (Night)
+	{ "Shaders.ImageAdjust.Night", "Strength", "Strength", nullptr, "How strongly these picture adjustments are applied." },
+	{ "Shaders.ImageAdjust.Night", "Brightness", "Brightness", nullptr, "Makes the picture lighter or darker." },
+	{ "Shaders.ImageAdjust.Night", "Contrast", "Contrast", nullptr, "Difference between dark and bright parts. Higher is punchier." },
+	{ "Shaders.ImageAdjust.Night", "Saturation", "Colour strength", nullptr, "How rich the colours are. Lower is greyer." },
+	{ "Shaders.ImageAdjust.Night", "DarkColorR", "Shadow colour", nullptr, "Tints the dark parts of the picture." },
+	{ "Shaders.ImageAdjust.Night", "LightColorR", "Highlight colour", nullptr, "Tints the bright parts of the picture." },
+	// ImageAdjust (Interiors)
+	{ "Shaders.ImageAdjust.Interiors", "Strength", "Strength", nullptr, "How strongly these picture adjustments are applied." },
+	{ "Shaders.ImageAdjust.Interiors", "Brightness", "Brightness", nullptr, "Makes the picture lighter or darker." },
+	{ "Shaders.ImageAdjust.Interiors", "Contrast", "Contrast", nullptr, "Difference between dark and bright parts. Higher is punchier." },
+	{ "Shaders.ImageAdjust.Interiors", "Saturation", "Colour strength", nullptr, "How rich the colours are. Lower is greyer." },
+	{ "Shaders.ImageAdjust.Interiors", "DarkColorR", "Shadow colour", nullptr, "Tints the dark parts of the picture." },
+	{ "Shaders.ImageAdjust.Interiors", "LightColorR", "Highlight colour", nullptr, "Tints the bright parts of the picture." },
+	// Cinema (Main)
+	{ "Shaders.Cinema.Main", "AspectRatio", "Black bars (screen shape)", nullptr, "Adds black cinema bars at the top and bottom. Use 1 for no bars." },
+	{ "Shaders.Cinema.Main", "FilmGrainAmount", "Film grain", nullptr, "Adds moving film grain, like a cinema picture." },
+	{ "Shaders.Cinema.Main", "ChromaticAberration", "Colour fringes at the edges", nullptr, "Splits red and blue slightly towards the edges, like a real lens." },
+	{ "Shaders.Cinema.Main", "VignetteDarkness", "Dark corners", nullptr, "Darkens the corners and edges of the screen." },
+	{ "Shaders.Cinema.Main", "OverlayStrength", "Contrast and colour boost", nullptr, "Boosts colour and contrast for a richer, more filmic picture." },
+	// Bodycam (Main)
+	{ "Shaders.Bodycam.Main", "Fisheye", "Lens distortion", nullptr, "How much the wide lens bends straight lines outwards at the edges." },
+	{ "Shaders.Bodycam.Main", "Vignette", "Dark corners", nullptr, "Darkens the corners of the picture." },
+	{ "Shaders.Bodycam.Main", "Grain", "Camera noise", nullptr, "Adds camera noise, stronger in the dark." },
+	{ "Shaders.Bodycam.Main", "Saturation", "Colour strength", nullptr, "How rich the colours are. Lower is more washed out." },
+	{ "Shaders.Bodycam.Main", "Text", "Timestamp", nullptr, "Shows a date and time stamp in the top right corner." },
+	{ "Shaders.Bodycam.Main", "Bounce", "Camera bob", nullptr, "The picture bobs with each step and leans into turns, like a chest-mounted camera." },
+	{ "Shaders.Bodycam.Main", "MotionBlur", "Motion smear", nullptr, "Smears the picture while you turn." },
+	{ "Shaders.Bodycam.Main", "Mic", "Camera microphone sound", nullptr, "Makes all game sound like a cheap camera microphone. Costs no frame rate." },
+	// Bodycam (Night)
+	{ "Shaders.Bodycam.Night", "Fisheye", "Lens distortion", nullptr, "How much the wide lens bends straight lines outwards at the edges." },
+	{ "Shaders.Bodycam.Night", "Vignette", "Dark corners", nullptr, "Darkens the corners of the picture." },
+	{ "Shaders.Bodycam.Night", "Grain", "Camera noise", nullptr, "Adds camera noise, stronger in the dark." },
+	{ "Shaders.Bodycam.Night", "Saturation", "Colour strength", nullptr, "How rich the colours are. Lower is more washed out." },
+	{ "Shaders.Bodycam.Night", "Text", "Timestamp", nullptr, "Shows a date and time stamp in the top right corner." },
+	{ "Shaders.Bodycam.Night", "Bounce", "Camera bob", nullptr, "The picture bobs with each step and leans into turns, like a chest-mounted camera." },
+	{ "Shaders.Bodycam.Night", "LowLight", "Low-light mode (black and white)", nullptr, "Near black and white night-vision look with lifted shadows and more grain." },
+	{ "Shaders.Bodycam.Night", "MotionBlur", "Motion smear", nullptr, "Smears the picture while you turn." },
+	// Bodycam (Interiors)
+	{ "Shaders.Bodycam.Interiors", "Fisheye", "Lens distortion", nullptr, "How much the wide lens bends straight lines outwards at the edges." },
+	{ "Shaders.Bodycam.Interiors", "Vignette", "Dark corners", nullptr, "Darkens the corners of the picture." },
+	{ "Shaders.Bodycam.Interiors", "Grain", "Camera noise", nullptr, "Adds camera noise, stronger in the dark." },
+	{ "Shaders.Bodycam.Interiors", "Saturation", "Colour strength", nullptr, "How rich the colours are. Lower is more washed out." },
+	{ "Shaders.Bodycam.Interiors", "Text", "Timestamp", nullptr, "Shows a date and time stamp in the top right corner." },
+	{ "Shaders.Bodycam.Interiors", "Bounce", "Camera bob", nullptr, "The picture bobs with each step and leans into turns, like a chest-mounted camera." },
+	{ "Shaders.Bodycam.Interiors", "LowLight", "Low-light mode (black and white)", nullptr, "Near black and white night-vision look with lifted shadows and more grain." },
+	{ "Shaders.Bodycam.Interiors", "MotionBlur", "Motion smear", nullptr, "Smears the picture while you turn." },
+	// DepthOfField (FirstPersonView)
+	{ "Shaders.DepthOfField.FirstPersonView", "Enabled", "Depth of field (background blur)", nullptr, "Blurs things in front of and behind what you look at." },
+	{ "Shaders.DepthOfField.FirstPersonView", "BaseBlurRadius", "Blur strength", nullptr, "How strong the blur is." },
+	{ "Shaders.DepthOfField.FirstPersonView", "Radius", "Blur size", nullptr, "How large the blur is." },
+	{ "Shaders.DepthOfField.FirstPersonView", nullptr, "When it applies",
+		"Always: Mode=0 | Not in dialogue: Mode=1 | Only in dialogue: Mode=2",
+		"Whether the blur also applies while you talk to someone." },
+	// DepthOfField (ThirdPersonView)
+	{ "Shaders.DepthOfField.ThirdPersonView", "Enabled", "Depth of field (background blur)", nullptr, "Blurs things in front of and behind what you look at." },
+	{ "Shaders.DepthOfField.ThirdPersonView", "BaseBlurRadius", "Blur strength", nullptr, "How strong the blur is." },
+	{ "Shaders.DepthOfField.ThirdPersonView", "Radius", "Blur size", nullptr, "How large the blur is." },
+	{ "Shaders.DepthOfField.ThirdPersonView", nullptr, "When it applies",
+		"Always: Mode=0 | Not in dialogue: Mode=1 | Only in dialogue: Mode=2",
+		"Whether the blur also applies while you talk to someone." },
+	// DepthOfField (VanityView)
+	{ "Shaders.DepthOfField.VanityView", "Enabled", "Depth of field (background blur)", nullptr, "Blurs things in front of and behind what you look at." },
+	{ "Shaders.DepthOfField.VanityView", "BaseBlurRadius", "Blur strength", nullptr, "How strong the blur is." },
+	{ "Shaders.DepthOfField.VanityView", "Radius", "Blur size", nullptr, "How large the blur is." },
+	{ "Shaders.DepthOfField.VanityView", nullptr, "When it applies",
+		"Always: Mode=0 | Not in dialogue: Mode=1 | Only in dialogue: Mode=2",
+		"Whether the blur also applies while you talk to someone." },
+	// DepthOfField (Bokeh)
+	{ "Shaders.DepthOfField.Bokeh", "Bokeh", "Bokeh (bright lights blur into shapes)", nullptr, "Bright out-of-focus lights become soft shapes. Needs depth of field on and the DXVK fork." },
+	{ "Shaders.DepthOfField.Bokeh", nullptr, "Bokeh shape",
+		"Round: BokehShape=0 | Pentagon: BokehShape=5 | Hexagon: BokehShape=6 | Heptagon: BokehShape=7 | Octagon: BokehShape=8",
+		"The shape of the blurred bright lights, like a camera lens." },
+	{ "Shaders.DepthOfField.Bokeh", "BokehSize", "Bokeh size", nullptr, "How large the blurred light shapes are." },
+	{ "Shaders.DepthOfField.Bokeh", "BokehIntensity", "Bokeh brightness", nullptr, "How bright the blurred light shapes are." },
+	// MotionBlur (FirstPersonView)
+	{ "Shaders.MotionBlur.FirstPersonView", "Enabled", "Motion blur", nullptr, "Blurs the picture while you turn or move quickly." },
+	{ "Shaders.MotionBlur.FirstPersonView", "BlurScale", "Motion blur strength", nullptr, "How strong the motion blur is." },
+	// MotionBlur (ThirdPersonView)
+	{ "Shaders.MotionBlur.ThirdPersonView", "Enabled", "Motion blur", nullptr, "Blurs the picture while you turn or move quickly." },
+	{ "Shaders.MotionBlur.ThirdPersonView", "BlurScale", "Motion blur strength", nullptr, "How strong the motion blur is." },
+	// LowHF (Main)
+	{ "Shaders.LowHF.Main", "BlurMultiplier", "Blur when hurt", nullptr, "How blurry the picture gets when you are badly hurt." },
+	{ "Shaders.LowHF.Main", "DarknessMultiplier", "Darkening when hurt", nullptr, "How dark the picture gets when you are badly hurt." },
+	{ "Shaders.LowHF.Main", "VignetteMultiplier", "Dark edges when hurt", nullptr, "How dark the screen edges get when you are badly hurt." },
+	{ "Shaders.LowHF.Main", "HealthLimit", "Health level where it starts", nullptr, "The health level below which the hurt effect begins." },
+	// TAA (Main)
+	{ "Shaders.TAA.Main", "Sharpness", "Sharpness", nullptr, "Sharpens the picture to counter the softness anti-aliasing adds." },
+	{ "Shaders.TAA.Main", "HistoryWeight", "Smoothness over time", nullptr, "Higher is smoother with less shimmer, but can leave slight ghosting on moving things." },
+	{ "Shaders.TAA.Main", "WeaponTAA", "Smoothing on the weapon", nullptr, "How much anti-aliasing smoothing applies to your weapon and hands." },
+	// TAA (Cutouts)
+	{ "Shaders.TAA.Cutouts", "Enabled", "Smooth edges on leaves, grass and fences", nullptr, "Smooths the jagged edges of leaves, grass and fences. Needs a game restart." },
+	// TAA (FSR)
+	{ "Shaders.TAA.FSR", "Enabled", "FSR upscaler", nullptr, "AMD FSR upscaling and anti-aliasing. Needs the DXVK fork." },
+	{ "Shaders.TAA.FSR", nullptr, "FSR version",
+		"FSR 2.2: Version=0 | FSR 3.1: Version=1",
+		"FSR 3.1 is the newer version and usually looks cleaner." },
+	{ "Shaders.TAA.FSR", "RenderScale", "Upscaling quality", nullptr, "Draws the game at a lower resolution and scales it up. Lower runs faster but looks softer." },
+	{ "Shaders.TAA.FSR", "Sharpness", "Sharpness", nullptr, "Sharpens the upscaled picture. Zero is off." },
+	// TAA (DLSS)
+	{ "Shaders.TAA.DLSS", "Enabled", "DLSS (NVIDIA RTX only)", nullptr, "NVIDIA DLSS upscaling and anti-aliasing. NVIDIA RTX cards only, needs the DXVK fork." },
+	{ "Shaders.TAA.DLSS", "RenderScale", "Upscaling quality", nullptr, "Draws the game at a lower resolution and scales it up. Lower runs faster but looks softer." },
+	{ "Shaders.TAA.DLSS", "RayReconstruction", "DLSS Ray Reconstruction", nullptr, "NVIDIA's cleaner denoising for ray tracing. NVIDIA RTX cards only, with DLSS on." },
+	{ "Shaders.TAA.DLSS", "WeaponMask", "Weapon ghosting fix", nullptr, "Reduces ghosting and smearing on your weapon and hands with DLSS." },
+	// SMAA (Main)
+	{ "Shaders.SMAA.Main", nullptr, "Quality",
+		"Low: MaxSearchSteps=16 | Medium: MaxSearchSteps=32 | High: MaxSearchSteps=64",
+		"Higher smooths long, shallow edges better and costs a little more." },
+	{ "Shaders.SMAA.Main", "Threshold", "Edge sensitivity", nullptr, "How easily edges are found. Lower smooths more of the picture but can soften detail." },
+	// Sharpening (Main)
+	{ "Shaders.Sharpening.Main", "Strength", "Sharpening strength", nullptr, "How much the picture is sharpened." },
+	{ "Shaders.Sharpening.Main", "Offset", "Sharpening width", nullptr, "How wide the sharpening reaches. Wider looks coarser." },
+	// Sharpening (Interiors)
+	{ "Shaders.Sharpening.Interiors", "Strength", "Sharpening strength", nullptr, "How much the picture is sharpened." },
+	{ "Shaders.Sharpening.Interiors", "Offset", "Sharpening width", nullptr, "How wide the sharpening reaches. Wider looks coarser." },
+	// DitherBuster (Main)
+	{ "Shaders.DitherBuster.Main", "Strength", "Strength", nullptr, "How strongly the dotted patterns on edges are smoothed out." },
+	{ "Shaders.DitherBuster.Main", "Radius", "Smoothing reach", nullptr, "How far along edges the smoothing reaches." },
+	// SkyDither (Main)
+	{ "Shaders.SkyDither.Main", "Strength", "Banding removal strength", nullptr, "Hides visible bands in smooth skies with faint moving noise." },
+	{ "Shaders.SkyDither.Main", "AtToneMap", "Also fix banding over the whole picture", nullptr, "Also removes banding in fog and dark gradients across the whole picture." },
+	// Flashlight (Main)
+	{ "Shaders.Flashlight.Main", "Dimmer", "Brightness", nullptr, "How bright the beam is. Its colour follows your Pip-Boy colour." },
+	{ "Shaders.Flashlight.Main", "Distance", "Beam distance", nullptr, "How far the beam reaches. It fades out well before the end." },
+	{ "Shaders.Flashlight.Main", "AttachToWeapon", "Follows your weapon", nullptr, "The beam points where your weapon points instead of where the camera looks." },
+	// Flashlight (Deferred)
+	{ "Shaders.Flashlight.Deferred", "Shadows", "Flashlight shadows", nullptr, "Things in front of the beam cast shadows. Costs some frame rate while the flashlight is on." },
+	{ "Shaders.Flashlight.Deferred", nullptr, "Shadow quality",
+		"Low: ShadowMapSize=1024 ShadowSoftness=3.0 | Medium: ShadowMapSize=2048 ShadowSoftness=5.0 | High: ShadowMapSize=4096 ShadowSoftness=8.0",
+		"Higher gives sharper, softer shadow edges and uses more video memory. Needs a restart." },
+	{ "Shaders.Flashlight.Deferred", "Falloff", "Beam fade with distance", nullptr, "Higher makes the beam fade out sooner and look shorter. Lower reaches further." },
+	{ "Shaders.Flashlight.Deferred", "Cookie", "Lens pattern", nullptr, "Shows the flashlight lens pattern in the beam. Zero gives a clean, even beam." },
+	{ "Shaders.Flashlight.Deferred", "GameLight", "Lights the world like a lamp", nullptr, "Leaves, your hands and shiny surfaces react to the flashlight the way they do to a lamp at night." },
+	// Grass (Interaction)
+	{ "Shaders.Grass.Interaction", "Enabled", "Grass bends as you walk", nullptr, "Grass pushes away from you as you walk through it and springs back afterwards." },
+	{ "Shaders.Grass.Interaction", "Radius", "Bend distance", nullptr, "How far around your feet the grass bends." },
+	{ "Shaders.Grass.Interaction", "StrengthStanding", "Bend strength (standing)", nullptr, "How much the grass is pushed aside while you stand still." },
+	{ "Shaders.Grass.Interaction", "StrengthMax", "Bend strength (running)", nullptr, "How much the grass is pushed aside when you run." },
+	{ "Shaders.Grass.Interaction", "SpringBackSeconds", "Recovery time", nullptr, "How slowly the grass stands back up after you pass. Higher leaves trails for longer." },
+	// Grass (LOD)
+	{ "Shaders.Grass.LOD", "Enabled", "Fade small grass by size", nullptr, "Grass fades out by how small it looks on screen, not just by distance. Saves frame rate in open fields." },
+	{ "Shaders.Grass.LOD", "MinPixels", "Smallest grass kept", nullptr, "Grass smaller than this on screen disappears. Higher is faster, lower keeps distant grass longer." },
+	{ "Shaders.Grass.LOD", "FadePixels", "Fade-out softness", nullptr, "How gradually small grass fades away. Higher avoids grass popping out." },
+	// Grass (Lights)
+	{ "Shaders.Grass.Lights", "Enabled", "Lamps light the grass", nullptr, "Lamps and your Pip-Boy light shine on nearby grass. Costs nothing where no lamp is near." },
+	{ "Shaders.Grass.Lights", "MaxLights", "Lamps at once", nullptr, "The most lamps that can light the grass at the same time, nearest first." },
+	{ "Shaders.Grass.Lights", "Strength", "Lamp light strength", nullptr, "How bright lamp light looks on the grass." },
+	// Grass (NormalMaps)
+	{ "Shaders.Grass.NormalMaps", "Enabled", "Grass surface detail", nullptr, "Grass textures that come with a detail map catch the sunlight with fine bumps." },
+	{ "Shaders.Grass.NormalMaps", "Strength", "Detail strength", nullptr, "How strongly the fine bumps change the light on the grass." },
+	{ "Shaders.Grass.NormalMaps", "EnableSpecular", "Sun shine on grass", nullptr, "Adds a sun highlight on grass and grass-placed rocks." },
+	{ "Shaders.Grass.NormalMaps", "SpecularStrength", "Shine strength", nullptr, "How bright the sun highlight is." },
+	{ "Shaders.Grass.NormalMaps", "Glossiness", "Shine sharpness", nullptr, "Low gives a broad soft sheen, high gives small sharp glints." },
+	// Wetness (Main)
+	{ "Shaders.WetnessEffects.Main", "MaxRainWetness", "Rain wetness", nullptr, "How wet and glossy surfaces under the open sky get in the rain." },
+	{ "Shaders.WetnessEffects.Main", "MaxPuddleWetness", "Puddle amount", nullptr, "How much puddles fill up on flat ground." },
+	{ "Shaders.WetnessEffects.Main", "PuddleRadius", "Puddle size", nullptr, "How big the puddles are." },
+	{ "Shaders.WetnessEffects.Main", "MinRainWetness", "Wetness in sheltered spots", nullptr, "How wet walls and undersides get, where rain does not fall straight on." },
+	{ "Shaders.WetnessEffects.Main", "WeatherTransitionSpeed", "Wet and dry speed", nullptr, "How fast things get wet when rain starts and dry when it stops." },
+	{ "Shaders.WetnessEffects.Main", "CreviceFill", "Ground flooding", nullptr, "Terrain only. Higher lets standing water rise further in the cracks and flood more ground." },
+	// Wetness (Raindrops)
+	{ "Shaders.WetnessEffects.Raindrops", "EnableRaindropFx", "Raindrops on the ground", nullptr, "Drops land on open ground near you while it rains. Terrain only." },
+	{ "Shaders.WetnessEffects.Raindrops", "EnableRipples", "Rain ripples", nullptr, "Rings spread out where drops land on puddles and wet flat ground." },
+	{ "Shaders.WetnessEffects.Raindrops", "RippleStrength", "Ripple strength", nullptr, "How strongly the ripples distort the water." },
+	{ "Shaders.WetnessEffects.Raindrops", "RaindropChance", "Raindrop amount", nullptr, "How many drops land in heavy rain. Lower looks lighter." },
+	{ "Shaders.WetnessEffects.Raindrops", "RaindropFxRange", "Raindrop distance", nullptr, "How far from you the drops and ripples are drawn." },
+	{ "Shaders.WetnessEffects.Raindrops", "RippleLifetime", "Ripple time", nullptr, "How long each ripple lasts, in seconds." },
+	// Wetness (HudRaindrops)
+	{ "Shaders.WetnessEffects.HudRaindrops", "Enabled", "Rain drops on arms and weapon", nullptr, "Water drops gather on your hands and weapon in the rain. They catch the light and bend what is under them." },
+	{ "Shaders.WetnessEffects.HudRaindrops", "AllObjects", "Rain drops on everything", nullptr, "Drops also appear on buildings, props and people out in the rain. Sheltered things stay dry." },
+	{ "Shaders.WetnessEffects.HudRaindrops", "Density", "Drop amount", nullptr, "How many drops gather once the surface is fully wet." },
+	{ "Shaders.WetnessEffects.HudRaindrops", "DropSize", "Drop size", nullptr, "Bigger gives larger drops." },
+	{ "Shaders.WetnessEffects.HudRaindrops", "Darkness", "Wet darkening", nullptr, "How much each drop darkens the surface under it, as if soaking in." },
+	{ "Shaders.WetnessEffects.HudRaindrops", "WetTime", "Time to get wet or dry", nullptr, "Seconds of heavy rain for a surface to wet through, and to dry off again." },
+	// Wetness (Reflections)
+	{ "Shaders.WetnessEffects.Reflections", "Enabled", "Wet reflections", nullptr, "Wet ground and objects reflect what is on screen, not just the sky. Needs Wetness Effects on." },
+	{ "Shaders.WetnessEffects.Reflections", "Strength", "Reflection strength", nullptr, "How much of the reflection shows the scene instead of the sky." },
+	{ "Shaders.WetnessEffects.Reflections", nullptr, "Reflection quality",
+		"Low: Steps=12 MaxDistance=800.0 | Medium: Steps=24 MaxDistance=1500.0 | High: Steps=40 MaxDistance=2500.0",
+		"Higher finds more distant things and looks finer, but costs more frame rate." },
+	{ "Shaders.WetnessEffects.Reflections", "MaxCameraDistance", "Reflection range", nullptr, "Wet surfaces farther away than this show no scene reflections." },
+};
+
+static const char* SimpleTip(const char* section, const char* key) {
+	for (const SimpleRow& r : kSimpleRows) if (r.Key && !strcmp(section, r.Section) && !strcmp(key, r.Key)) return r.Tip;
+	return nullptr;
+}
+
+static bool HasSimpleView(const std::string& section) {
+	for (const SimpleRow& r : kSimpleRows) if (section == r.Section) return true;
+	return false;
+}
+
+static const char* SimpleLabel(const char* section, const char* key) {
+	for (const SimpleRow& r : kSimpleRows) if (r.Key && !strcmp(section, r.Section) && !strcmp(key, r.Key)) return r.Label;
+	return nullptr;
+}
+
+struct SimpleOption { std::string Name; std::vector<std::pair<std::string, std::string>> Values; };
+
+static std::vector<SimpleOption> ParseSimpleOptions(const char* text) {
+	std::vector<SimpleOption> options;
+	std::stringstream all(text);
+	std::string part;
+	while (std::getline(all, part, '|')) {
+		const size_t colon = part.find(':');
+		if (colon == std::string::npos) continue;
+		SimpleOption o;
+		o.Name = part.substr(0, colon);
+		o.Name.erase(0, o.Name.find_first_not_of(' '));
+		o.Name.erase(o.Name.find_last_not_of(' ') + 1);
+		std::stringstream values(part.substr(colon + 1));
+		std::string kv;
+		while (values >> kv) {
+			const size_t eq = kv.find('=');
+			if (eq != std::string::npos) o.Values.push_back({ kv.substr(0, eq), kv.substr(eq + 1) });
+		}
+		options.push_back(o);
+	}
+	return options;
+}
+
+static bool SimpleValueIs(const char* section, const std::string& key, const std::string& value) {
+	if (value == "true" || value == "false") return (TheSettingManager->GetSettingI(section, key.c_str()) != 0) == (value == "true");
+	if (value.find('.') != std::string::npos) return fabsf(TheSettingManager->GetSettingF(section, key.c_str()) - (float)atof(value.c_str())) < 1e-3f;
+	return TheSettingManager->GetSettingI(section, key.c_str()) == atoi(value.c_str());
+}
+
+// A choice row: picking an option writes all its settings; "Custom" while they match none of the options.
+static void DrawSimpleChoice(const SimpleRow& r) {
+	const std::vector<SimpleOption> options = ParseSimpleOptions(r.Options);
+	int current = -1;
+	for (int i = 0; i < (int)options.size() && current < 0; i++) {
+		bool all = true;
+		for (const auto& kv : options[i].Values) all = all && SimpleValueIs(r.Section, kv.first, kv.second);
+		if (all) current = i;
+	}
+	ImGui::PushID(r.Label);
+	MenuWidgets::RowBegin(r.Label, MenuWidgets::ResetSlotWidth());
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	if (ImGui::BeginCombo("##choice", current >= 0 ? options[current].Name.c_str() : "Custom (set in Advanced)")) {
+		for (int i = 0; i < (int)options.size(); i++) {
+			if (!ImGui::Selectable(options[i].Name.c_str(), i == current)) continue;
+			std::vector<std::array<std::string, 3>> sets;
+			for (const auto& kv : options[i].Values) sets.push_back({ r.Section, kv.first, kv.second });
+			if (!ConfirmChanges(sets)) continue;	// 2026-11-05: a conflict: the Heads up box first
+			for (const auto& kv : options[i].Values) TheSettingManager->SetSettingS(r.Section, kv.first.c_str(), kv.second.c_str());
+			TheSettingManager->LoadSettings();
+		}
+		ImGui::EndCombo();
+	}
+	if (r.Tip && (ImGui::IsItemHovered() || MenuWidgets::RowLabelHovered())) WrappedTooltip(r.Tip);
+	ImGui::PopID();
+}
+
 static const char* MenuKeyLabel(const char* section, const char* key) {
+	if (!AdvancedShown())
+		if (const char* plain = SimpleLabel(section, key)) return plain;	// 2026-11-05: the simple view's name
 	if (!strcmp(section, "Main.Main.Performance") && !strcmp(key, "NvrDxvkDisplacement")) return "NvrDxvkDisplacement (tessellation)##NvrDxvkDisplacement";
 	return key;
 }
@@ -1309,7 +2415,7 @@ static void SwitchOffOtherUpscaler(const SettingManager::Configuration::ConfigNo
 static bool DrawBoolSetting(SettingRow& row) {
 	SettingManager::Configuration::ConfigNode& node = row.node;
 	bool on = !strcmp(node.Value, "1") || !_stricmp(node.Value, "true");
-	if (MenuWidgets::Toggle("##v", &on)) {
+	if (MenuWidgets::Toggle("##v", &on) && (!on || ConfirmChange(node.Section, node.Key, "true"))) {	// (2026-11-05: conflicts ask first)
 		TheSettingManager->SetSetting(node.Section, node.Key, on);
 		if (on && !strcmp(node.Key, "Enabled")) SwitchOffOtherUpscaler(node);
 		TheSettingManager->LoadSettings();
@@ -1372,7 +2478,7 @@ static bool DrawIntSetting(SettingRow& row) {
 		ImGui::DragInt("##v", &wanted, 1.0f);
 	}
 	const bool hovered = ImGui::IsItemHovered();
-	if (wanted != stored) {
+	if (wanted != stored && ConfirmChange(node.Section, node.Key, std::to_string(wanted))) {	// (2026-11-05: conflicts ask first)
 		TheSettingManager->SetSetting(node.Section, node.Key, wanted);
 		TheSettingManager->LoadSettings();
 	}
@@ -1471,8 +2577,12 @@ static void RenderSetting(SettingManager::Configuration::ConfigNode& node, bool 
 	}
 	if (row.inert) ImGui::EndDisabled();
 
-	if (overControl || MenuWidgets::RowLabelHovered())
-		SettingTooltip(node, row.why, row.normalText, MenuWidgets::RowLabelClipped());
+	if (overControl || MenuWidgets::RowLabelHovered()) {
+		const char* plain = AdvancedShown() ? nullptr : SimpleTip(node.Section, node.Key);	// 2026-11-05: the simple view's own words
+		if (plain && !row.why) WrappedTooltip(plain);
+		else if (plain) WrappedTooltip((std::string(plain) + "\n\nNot active now: " + row.why).c_str());
+		else SettingTooltip(node, row.why, row.normalText, MenuWidgets::RowLabelClipped());
+	}
 	ImGui::PopID();
 }
 
@@ -2400,9 +3510,6 @@ static const MenuGroup kMenuGroups[] = {
 		FogType::None, false, "Light bounced from what is on screen (needs the DXVK fork).", nullptr },
 
 	// Shaders.WetWorld.Main
-	{ "Shaders.WetWorld.Main", "Rain on your weapon",
-		"HudDrops, HudDropSize, HudDropDensity, HudRefraction, HudReflection, HudGloss, HudWetGloss, HudWetTime, HudDryTime, HudDebug",
-		FogType::None, true, "Rain drops gather on your first-person weapon while you stand in the rain, and dry off under cover.", nullptr },
 	{ "Shaders.WetWorld.Main", "Wet ground that lasts",
 		"Persistent, PersistentWetTime, PersistentDryTime, PersistentPuddleFill, PersistentPuddleDry, PersistentShade, PersistentMapSize, "
 		"PersistentMapResolution, PersistentDebugView",
@@ -2584,7 +3691,7 @@ static void RenderShaderHeaderSwitch(const std::string& shaderName) {
 		ImGui::SameLine();
 	}
 	ImGui::BeginDisabled(forced);
-	if (MenuWidgets::Toggle("##headerSwitch", &on)) {
+	if (MenuWidgets::Toggle("##headerSwitch", &on) && (!on || ConfirmEffectOn(shaderName))) {	// (2026-11-05: conflicts ask first)
 		TheShaderManager->SwitchShaderStatus(shader);
 		TheSettingManager->LoadSettings();
 	}
@@ -2692,9 +3799,45 @@ struct PageEntry {
 
 // Draws every setting of the page: the ungrouped ones first, then each menu group under its own header.
 // The group, hidden and test facts of each setting are computed once per frame, not in every pass over the list.
+// The simple view of a page (kSimpleRows): its rows in the table's order, and how many more Advanced shows.
+static void RenderSimpleList(SettingManager::Configuration::SettingList& settings, bool isShader) {
+	int shown = 0, rows = 0;
+	for (const auto& s : settings) if (!ShouldHideKey(s.Key) && !IsTestSetting(s)) rows++;
+	for (const SimpleRow& r : kSimpleRows) {
+		if (gMenu.page != r.Section) continue;
+		if (!r.Key) {
+			DrawSimpleChoice(r);
+			continue;
+		}
+		for (size_t i = 0; i < settings.size(); i++) {
+			if (strcmp(settings[i].Key, r.Key)) continue;
+			// A colour (its R key listed): the page's colour wheel for R, G and B, under the plain name
+			const std::string key(r.Key), prefix = key.substr(0, key.size() - 1);
+			SettingManager::Configuration::ConfigNode *g = nullptr, *b = nullptr;
+			if (isShader && key.size() > 1 && key.back() == 'R')
+				for (auto& other : settings) {
+					if (prefix + "G" == other.Key) g = &other;
+					if (prefix + "B" == other.Key) b = &other;
+				}
+			if (g && b) {
+				RenderColorTriple(settings[i], *g, *b, prefix, r.Label);
+				shown += 3;
+			}
+			else {
+				RenderSetting(settings[i], isShader);
+				shown++;
+			}
+		}
+	}
+	ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y));
+	if (rows > shown)
+		ImGui::TextDisabled("%d more setting%s here with Advanced on (top row)", rows - shown, rows - shown == 1 ? "" : "s");
+}
+
 static void RenderSettingsList(SettingManager::Configuration::SettingList& settings) {
 	const bool isShader = (gMenu.page.find("Shaders") == 0);
 	const bool devShown = DevOptionsShown();
+	if (!AdvancedShown() && HasSimpleView(gMenu.page)) return RenderSimpleList(settings, isShader);	// 2026-11-05
 
 	std::vector<PageEntry> facts;
 	facts.reserve(settings.size());
@@ -2824,11 +3967,356 @@ static std::string MenuSectionLabel(const std::string& path, const std::string& 
 	return name;
 }
 
+// ---- The Ray tracing page ------------------------------------------------------------------------------------------------
+// 2026-11-05 (docs/next/SETTINGS-GAME-MENU-PLAN.md phase 1; user: "the rt effects should live in their own menu all together for
+// easier testing"): every ray-traced effect on one page: a status line each (running, or what stops it: testers' "RT does nothing"
+// reports were nearly all another setting in the way), one switch for all of them (A/B), one picker for their debug views, then the
+// five RT sections' own settings. Only the menu moves: the settings keep their sections in the toml, and those pages leave the sidebar.
+
+static const char* const kRtTabId = "@RayTracing";
+
+struct RtSection { const char* Section; const char* Title; const char* Note; };
+static const RtSection kRtSections[] = {
+	{ "Shaders.ShadowsExteriors.RT", "Sun shadows", "Traced sun shadows outdoors, combined with the shadow maps or replacing them near you (Mode)." },
+	{ "Shaders.ShadowsInteriors.RT", "Lamp shadows", "Traced shadows from the lamps instead of cube maps. Enabled needs a restart; Live switches back and forth at once." },
+	{ "Shaders.AmbientOcclusion.RT", "Ambient occlusion and bounce light",
+		"Traced occlusion in place of the screen estimate, and with GI one bounce of light (more with RadianceCache)." },
+	{ "Shaders.Reflections.RT", "Reflections", "Rays for what the screen-space reflections miss: things off screen or hidden. Needs Reflections on." },
+	{ "Main.Main.RayTracing", "Scene and path tracing", "What goes into the traced scene (people, plants, see-through meshes, far distance), and the path tracer." },
+};
+
+static bool IsRtSection(const std::string& path) {
+	for (const RtSection& s : kRtSections) if (path == s.Section) return true;
+	return false;
+}
+
+static bool RtOn(const char* section, const char* key) { return TheSettingManager->GetSettingI(section, key) != 0; }
+
+// One effect's line: running (green), off (dim), or on but something stops it or makes it weak (amber), with the reason.
+enum class RtState { Off, Running, Blocked };
+struct RtStatusLine { RtState State; std::string Text; std::string Detail; };
+
+static RtStatusLine RtCoreLine() {
+	const char* status = RtCore::StatusText();
+	const std::string text = status && status[0] ? status : "not started (no ray-traced effect is on yet)";
+	return { RtCore::Running() ? RtState::Running : RtState::Off, text, std::string() };
+}
+
+static RtStatusLine RtSunLine() {
+	const char* s = "Shaders.ShadowsExteriors.RT";
+	const std::string detail = RtSunShadows::StatusText();
+	if (!RtOn(s, "Enabled")) return { RtState::Off, "off", detail };
+	if (!RtCore::Running()) return { RtState::Blocked, "on, but the ray tracing core is not running (first line)", detail };
+	if (!TheShaderManager->GameState.isExterior) return { RtState::Off, "indoors: the sun is traced outdoors only", detail };
+	return { RtState::Running, TheSettingManager->GetSettingI(s, "Mode") == 1 ? "running (replaces the shadow maps near you)" :
+		"running (combined with the shadow maps)", detail };
+}
+
+static RtStatusLine RtLampLine() {
+	const char* s = "Shaders.ShadowsInteriors.RT";
+	const std::string detail = RtLampShadows::Status;
+	const bool on = RtOn(s, "Enabled");
+	if (on != RtLampShadows::CompiledIn)
+		return { RtState::Blocked, on ? "switched on: needs a restart (the lamp shaders are built at start)" : "switched off: still traced until a restart", detail };
+	if (!on) return { RtState::Off, "off (Enabled; needs a restart)", detail };
+	if (!RtOn(s, "Live")) return { RtState::Off, "Live is off: the cube maps again (A/B)", detail };
+	if (!RtCore::Running()) return { RtState::Blocked, "on, but the ray tracing core is not running (first line)", detail };
+	if (TheShaderManager->GameState.isExterior && !RtOn(s, "Exteriors")) return { RtState::Off, "outdoors: traced indoors only (Exteriors off; needs a restart)", detail };
+	return { RtState::Running, "running", detail };
+}
+
+// Ambient light uses the RT occlusion and bounce light unless its own ComputeGI is on (then it keeps its screen search).
+static bool RtComputeGIInWay() { return TheSettingManager->GetMenuShaderEnabled("AmbientLight") && RtOn("Shaders.AmbientLight.Main", "ComputeGI"); }
+
+static RtStatusLine RtAOLine() {
+	const char* s = "Shaders.AmbientOcclusion.RT";
+	const std::string detail = AmbientOcclusionEffect::RtStatusText();
+	if (!RtOn(s, "Enabled")) return { RtState::Off, "off", detail };
+	if (!RtCore::Running()) return { RtState::Blocked, "on, but the ray tracing core is not running (first line)", detail };
+	if (!RtAmbient::PassesWanted()) return { RtState::Blocked, "on, but the Vulkan passes are off ([Main.Main.Performance] NvrDxvkPasses)", detail };
+	const bool exterior = TheShaderManager->GameState.isExterior;
+	const bool aoRuns = TheSettingManager->GetMenuShaderEnabled("AmbientOcclusion") &&
+		RtOn(exterior ? "Shaders.AmbientOcclusion.Exteriors" : "Shaders.AmbientOcclusion.Interiors", "Enabled");
+	const bool alUses = TheSettingManager->GetMenuShaderEnabled("AmbientLight") && !RtComputeGIInWay();
+	if (!aoRuns && !alUses)
+		return { RtState::Blocked, std::string("on, but nothing uses it here: Ambient occlusion is off ") + (exterior ? "outdoors (Exteriors" : "indoors (Interiors") +
+			" Enabled) and Ambient light " + (RtComputeGIInWay() ? "has ComputeGI on" : "is off"), detail };
+	if (RtComputeGIInWay()) return { RtState::Blocked, "running, but Ambient light ignores it while its ComputeGI is on (only Ambient occlusion uses it)", detail };
+	return { RtState::Running, "running", detail };
+}
+
+static RtStatusLine RtGILine() {
+	const char* s = "Shaders.AmbientOcclusion.RT";
+	const std::string detail = AmbientOcclusionEffect::RtStatusText();
+	if (!RtOn(s, "GI")) return { RtState::Off, "off (GI)", detail };
+	if (!RtOn(s, "Enabled")) return { RtState::Blocked, "GI is on, but it needs the RT ambient occlusion on (Enabled)", detail };
+	if (!RtCore::Running()) return { RtState::Blocked, "on, but the ray tracing core is not running (first line)", detail };
+	if (!TheSettingManager->GetMenuShaderEnabled("AmbientLight")) return { RtState::Blocked, "on, but Ambient light is off: the bounce light is added there", detail };
+	if (RtComputeGIInWay()) return { RtState::Blocked, "on, but Ambient light's ComputeGI is on: it replaces the RT bounce light", detail };
+	const ShaderConstants& sc = TheShaderManager->ShaderConst;
+	const bool weakSun = TheShaderManager->GameState.isExterior && (sc.SunDir.z <= 0.0f || sc.SunAmount.x < 0.3f);
+	if (weakSun && TheSettingManager->GetSettingF(s, "GIAmbient") <= 0.0f)
+		return { RtState::Blocked, "running, but the sun is weak now (cloud, dusk or night) and GIAmbient is 0: only lamps give bounce light", detail };
+	return { RtState::Running, RtOn(s, "RadianceCache") ? "running (more than one bounce: RadianceCache)" : "running (one bounce)", detail };
+}
+
+static RtStatusLine RtReflectionsLine() {
+	const char* s = "Shaders.Reflections.RT";
+	ReflectionsEffect* r = TheShaderManager->Effects.Reflections;
+	const std::string detail = r ? r->RtStatusText() : std::string("no Reflections effect");
+	if (!RtOn(s, "Enabled")) return { RtState::Off, "off", detail };
+	if (!TheSettingManager->GetMenuShaderEnabled("Reflections"))
+		return { RtState::Blocked, "on, but Reflections is off: the rays only fill in what its screen-space reflections miss", detail };
+	if (!RtCore::Running()) return { RtState::Blocked, "on, but the ray tracing core is not running (first line)", detail };
+	const float wet = TheSettingManager->GetSettingF("Shaders.Reflections.Main", "WetRoughness");
+	const float maxRough = TheSettingManager->GetSettingF(s, "MaxRoughness");
+	char t[200];
+	if (wet >= maxRough) {
+		sprintf_s(t, "running, but wet ground (WetRoughness %.2f) is rougher than MaxRoughness %.2f: no rays on wet ground", wet, maxRough);
+		return { RtState::Blocked, t, detail };
+	}
+	if (r && r->NothingReflects())
+		return { RtState::Blocked, TheSettingManager->GetSettingF(s, "Weapon") > 0.0f ? "running for the weapon only: nothing else on screen reflects here (dry, GroundSheen 0)" :
+			"on, but nothing on screen reflects here (dry, GroundSheen and InteriorFloors 0): nothing to trace", detail };
+	return { RtState::Running, "running", detail };
+}
+
+static RtStatusLine RtPathTraceLine() {
+	const char* s = "Main.Main.RayTracing";
+	const std::string detail = RtPathTrace::StatusText();
+	const bool realtime = RtOn(s, "PTRealtime");
+	if (!realtime && !RtOn(s, "ReferencePT")) return { RtState::Off, "off", detail };
+	if (!RtCore::Running()) return { RtState::Blocked, "on, but the ray tracing core is not running (first line)", detail };
+	return { RtState::Running, realtime ? "running: the path-traced game (experimental)" : "running: the reference picture (a comparison, not for play)", detail };
+}
+
+static void DrawRtStatusLine(const char* name, const RtStatusLine& line) {
+	static const ImVec4 kRunning(0.45f, 0.85f, 0.45f, 1.0f), kBlocked(1.0f, 0.75f, 0.2f, 1.0f);
+	ImGui::TextUnformatted(name);
+	ImGui::SameLine(ImGui::GetFontSize() * 9.0f);
+	ImGui::PushTextWrapPos(0.0f);
+	if (line.State == RtState::Off) ImGui::TextDisabled("%s", line.Text.c_str());
+	else ImGui::TextColored(line.State == RtState::Running ? kRunning : kBlocked, "%s", line.Text.c_str());
+	ImGui::PopTextWrapPos();
+	if (!line.Detail.empty() && ImGui::IsItemHovered()) WrappedTooltip(line.Detail.c_str());
+}
+
+// One switch for every RT effect, for an A/B: off remembers which were on, on brings them back (or, with nothing remembered, turns on
+// the sun shadows, the ambient occlusion and bounce light, and the reflections). Lamp shadows go through Live (Enabled needs a restart).
+struct RtMasterKey { const char* Section; const char* Key; bool Default; };
+static const RtMasterKey kRtMasterKeys[] = {
+	{ "Shaders.ShadowsExteriors.RT", "Enabled", true },
+	{ "Shaders.ShadowsInteriors.RT", "Live", true },
+	{ "Shaders.AmbientOcclusion.RT", "Enabled", true },
+	{ "Shaders.Reflections.RT", "Enabled", true },
+	{ "Main.Main.RayTracing", "PTRealtime", false },
+	{ "Main.Main.RayTracing", "ReferencePT", false },
+};
+static bool s_rtRemembered = false;
+static bool s_rtMemory[_countof(kRtMasterKeys)] = {};
+
+static bool RtAnyOn() {
+	for (const RtMasterKey& k : kRtMasterKeys) {
+		if (!RtOn(k.Section, k.Key)) continue;
+		if (!strcmp(k.Key, "Live") && !RtOn(k.Section, "Enabled")) continue;	// Live means nothing without the lamp shadows on
+		return true;
+	}
+	return false;
+}
+
+static void DrawRtMasterSwitch() {
+	bool on = RtAnyOn();
+	MenuWidgets::RowBegin("All ray tracing", MenuWidgets::ResetSlotWidth());
+	if (MenuWidgets::Toggle("##rtmaster", &on)) {
+		if (!on) {
+			for (size_t i = 0; i < _countof(kRtMasterKeys); i++) {
+				s_rtMemory[i] = RtOn(kRtMasterKeys[i].Section, kRtMasterKeys[i].Key);
+				TheSettingManager->SetSetting(kRtMasterKeys[i].Section, kRtMasterKeys[i].Key, false);
+			}
+			s_rtRemembered = true;
+		}
+		else
+			for (size_t i = 0; i < _countof(kRtMasterKeys); i++)
+				TheSettingManager->SetSetting(kRtMasterKeys[i].Section, kRtMasterKeys[i].Key, s_rtRemembered ? s_rtMemory[i] : kRtMasterKeys[i].Default);
+		TheSettingManager->LoadSettings();
+	}
+	if (ImGui::IsItemHovered() || MenuWidgets::RowLabelHovered())
+		WrappedTooltip("Every ray-traced effect off, or back on as it was, to compare. With nothing to bring back it turns on the sun shadows, "
+			"the ambient occlusion and the reflections. Lamp shadows switch through their Live setting (turning them on the first time needs "
+			"a restart). The path tracer is only turned off, never on.");
+}
+
+// One picker for the RT debug views: picking one sets that DebugView and clears the other three, so only one shows.
+struct RtDebugView { const char* Label; const char* Section; int Value; };
+static const char* const kRtDebugSections[] = { "Shaders.ShadowsExteriors.RT", "Shaders.ShadowsInteriors.RT", "Shaders.AmbientOcclusion.RT", "Shaders.Reflections.RT" };
+static const RtDebugView kRtDebugViews[] = {
+	{ "Off (the normal picture)", nullptr, 0 },
+	{ "Sun shadows: the traced shadow alone", "Shaders.ShadowsExteriors.RT", 1 },
+	{ "Sun shadows: traced visibility (white lit, black blocked)", "Shaders.ShadowsExteriors.RT", 4 },
+	{ "Lamp shadows: traced vs cube maps (red / green where they differ)", "Shaders.ShadowsInteriors.RT", 1 },
+	{ "Lamp shadows: where the traced result is used", "Shaders.ShadowsInteriors.RT", 2 },
+	{ "Ambient occlusion: the traced visibility", "Shaders.AmbientOcclusion.RT", 1 },
+	{ "Bounce light alone (GI)", "Shaders.AmbientOcclusion.RT", 6 },
+	{ "Reflections: where each reflection comes from", "Shaders.Reflections.RT", 1 },
+	{ "Reflections: ray hit distance", "Shaders.Reflections.RT", 2 },
+	{ "Reflections: ray tracing alone (screen trace off)", "Shaders.Reflections.RT", 3 },
+};
+
+static int RtCurrentDebugView() {	// the picker's entry, -1 when the DebugViews set match none (set by hand)
+	int set = 0;
+	for (const char* section : kRtDebugSections) if (TheSettingManager->GetSettingI(section, "DebugView") != 0) set++;
+	if (set == 0) return 0;
+	if (set > 1) return -1;
+	for (int i = 1; i < (int)_countof(kRtDebugViews); i++)
+		if (TheSettingManager->GetSettingI(kRtDebugViews[i].Section, "DebugView") == kRtDebugViews[i].Value) return i;
+	return -1;
+}
+
+static void DrawRtDebugPicker() {
+	const int current = RtCurrentDebugView();
+	MenuWidgets::RowBegin("Debug view", MenuWidgets::ResetSlotWidth());
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	if (ImGui::BeginCombo("##rtdebug", current >= 0 ? kRtDebugViews[current].Label : "Other (set in the sections below)")) {
+		for (int i = 0; i < (int)_countof(kRtDebugViews); i++) {
+			if (!ImGui::Selectable(kRtDebugViews[i].Label, i == current)) continue;
+			for (const char* section : kRtDebugSections) TheSettingManager->SetSetting(section, "DebugView", 0);
+			if (kRtDebugViews[i].Section) TheSettingManager->SetSetting(kRtDebugViews[i].Section, "DebugView", kRtDebugViews[i].Value);
+			TheSettingManager->LoadSettings();
+		}
+		ImGui::EndCombo();
+	}
+	if (ImGui::IsItemHovered() || MenuWidgets::RowLabelHovered())
+		WrappedTooltip("Shows one ray-traced effect's own picture, to see what it does. It stays on until you pick Off (the normal picture).");
+}
+
+static void RenderRayTracingPage() {
+	PageTitle("Ray tracing", "Every ray-traced effect in one place. Needs the DXVK fork, NvrRtHelper.exe and a GPU with ray tracing.");
+
+	if (MenuWidgets::SubHeader("Status###rtstatus", true)) {
+		DrawRtStatusLine("Core", RtCoreLine());
+		DrawRtStatusLine("Sun shadows", RtSunLine());
+		DrawRtStatusLine("Lamp shadows", RtLampLine());
+		DrawRtStatusLine("Occlusion", RtAOLine());
+		DrawRtStatusLine("Bounce light", RtGILine());
+		DrawRtStatusLine("Reflections", RtReflectionsLine());
+		DrawRtStatusLine("Path tracing", RtPathTraceLine());
+		ImGui::TextDisabled("Hover a line for the full state.");
+		ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.5f));
+	}
+
+	DrawRtMasterSwitch();
+	DrawRtDebugPicker();
+	ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y));
+
+	// The five sections' own rows, each under its header, drawn as their pages draw them (the groups read the page shown)
+	const std::string page = gMenu.page;
+	for (const RtSection& section : kRtSections) {
+		const std::string header = std::string(section.Title) + "###rtsection" + section.Section;
+		if (!MenuWidgets::SubHeader(header.c_str(), false)) continue;
+		SettingManager::Configuration::SettingList rows;
+		TheSettingManager->FillMenuSettings(&rows, section.Section);
+		ImGui::PushID(section.Section);
+		ImGui::PushTextWrapPos(0.0f);
+		ImGui::TextDisabled("%s", section.Note);
+		ImGui::PopTextWrapPos();
+		gMenu.page = section.Section;
+		PageOrder(rows);
+		RenderSettingsList(rows);
+		gMenu.page = page;
+		ImGui::PopID();
+	}
+}
+
+// 2026-11-05 (user: "cameramode, flycam can live under main -> misc"): small Main sections drawn inside another page under their own
+// headers (as the Ray tracing page draws its sections), instead of as entries of their own in the sidebar. Only the menu moves.
+struct PageAttach { const char* Host; const char* Section; const char* Title; };
+static const PageAttach kPageAttaches[] = {
+	{ "Main.Main.Misc", "Main.CameraMode.Main", "Camera mode" },
+	{ "Main.Main.Misc", "Main.CameraMode.Positioning", "Camera mode position" },
+	{ "Main.Main.Misc", "Main.FlyCam.Main", "Fly camera" },
+	{ "Main.Main.Misc", "Main.Transitions.Main", "Day and night blending" },
+};
+
+static void RenderAttachedSections(const std::string& host) {
+	const std::string page = gMenu.page;
+	for (const PageAttach& a : kPageAttaches) {
+		if (host != a.Host) continue;
+		const std::string header = std::string(a.Title) + "###attached" + a.Section;
+		if (!MenuWidgets::SubHeader(header.c_str(), false)) continue;
+		SettingManager::Configuration::SettingList rows;
+		TheSettingManager->FillMenuSettings(&rows, a.Section);
+		ImGui::PushID(a.Section);
+		gMenu.page = a.Section;
+		PageOrder(rows);
+		RenderSettingsList(rows);
+		gMenu.page = page;
+		ImGui::PopID();
+	}
+}
+
+static bool HiddenFromSidebar(const std::string& path, const std::string& name);
+
+// ---- Simple view: the whole effect on one page -------------------------------------------------------------------------------
+// 2026-11-05 (user, of a simple page with four rows: "can we make it so we utilize all this dead space with simple mode on better so it
+// doesn't look so barren?"). While Advanced is off, a page of an effect with a simple view shows every page of that effect at once, each
+// as a card (its plain name, its simple rows, how many more Advanced has), two cards a row when the page is wide enough: one screen per
+// effect, as a game's graphics menu has, instead of a few rows per page. The page picked in the sidebar comes first. Pages with no simple
+// view and the ray tracing pages (on their own page) are left out of the cards.
+static std::string SimplePageTitle(const std::string& name) {
+	static const char* const kNames[][2] = { { "Main", "General" }, { "Exteriors", "Outdoors" }, { "Exterior", "Outdoors" },
+		{ "Interiors", "Indoors" }, { "Night", "At night" }, { "Rain", "In the rain" }, { "NightRain", "At night in the rain" },
+		{ "Default", "General" }, { "FirstPersonView", "First person" }, { "ThirdPersonView", "Third person" }, { "VanityView", "Idle camera" } };
+	for (const auto& n : kNames) if (name == n[0]) return n[1];
+	return name;
+}
+
+static void RenderSimpleCard(const std::string& section) {
+	SettingManager::Configuration::SettingList rows;
+	TheSettingManager->FillMenuSettings(&rows, section.c_str());
+	ImGui::PushID(section.c_str());
+	ImGui::PushStyleColor(ImGuiCol_Text, MenuSkin::Heading(0.25f));
+	MenuWidgets::Title(SimplePageTitle(section.substr(section.rfind('.') + 1)).c_str(), 1.1f);
+	ImGui::PopStyleColor();
+	ImGui::Separator();
+	const std::string page = gMenu.page;
+	gMenu.page = section;
+	PageOrder(rows);
+	RenderSettingsList(rows);	// (Advanced off: RenderSimpleList)
+	gMenu.page = page;
+	ImGui::PopID();
+}
+
+// Whether this page is drawn as the whole effect's cards; draws them.
+static bool RenderSimpleEffectPage() {
+	if (AdvancedShown() || !HasSimpleView(gMenu.page) || IsRtSection(gMenu.page)) return false;
+	const std::string effect = ShaderOfPage(gMenu.page);
+	if (effect.empty()) return false;
+	std::vector<std::string> cards = { gMenu.page };
+	StringList children;
+	TheSettingManager->FillMenuSections(&children, ("Shaders." + effect).c_str());
+	for (const std::string& child : children) {
+		const std::string section = "Shaders." + effect + "." + child;
+		if (section != gMenu.page && HasSimpleView(section) && !IsRtSection(section) && !HiddenFromSidebar(section, child)) cards.push_back(section);
+	}
+	RenderPageHeader(gMenu.page);
+	RenderSectionHelp(gMenu.page);
+	const int columns = cards.size() > 1 && ImGui::GetContentRegionAvail().x > ImGui::GetFontSize() * 55.0f ? 2 : 1;
+	if (!ImGui::BeginTable("##simplecards", columns, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_PadOuterX)) return true;
+	for (const std::string& section : cards) {
+		ImGui::TableNextColumn();
+		RenderSimpleCard(section);
+		ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 2.0f));
+	}
+	ImGui::EndTable();
+	return true;
+}
+
 // ---- The page -----------------------------------------------------------------------------------------------------------
 // The search results, the New-in-patch page, or the selected section: title, help, the LUT pickers (LUT page) and the rows.
 static void RenderContent() {
 	if (SearchActive()) return RenderSearchResults();
 	if (gMenu.page == kNewTabId) return RenderNewInPatch();
+	if (gMenu.page == kRtTabId) return RenderRayTracingPage();
 	if (gMenu.page.empty()) {
 		ImGui::TextDisabled("Select a section from the left panel.");
 		return;
@@ -2839,11 +4327,13 @@ static void RenderContent() {
 		ImGui::TextDisabled("No settings in this section.");
 		return;
 	}
+	if (RenderSimpleEffectPage()) return;	// 2026-11-05: Advanced off: the effect's pages as cards on one page
 	PageOrder(rows);
 	RenderPageHeader(gMenu.page);
 	RenderSectionHelp(gMenu.page);	// UNOFFICIAL 2026-11-01: what the page is for, in plain words (kSectionHelp)
 	if (gMenu.page == "Shaders.LUT.Main") RenderLutPage();
 	RenderSettingsList(rows);
+	RenderAttachedSections(gMenu.page);	// 2026-11-05
 }
 
 // ---- The sidebar ---------------------------------------------------------------------------------------------------------
@@ -2890,7 +4380,7 @@ static bool DrawShaderEntryRow(const std::string& path, const std::string& name)
 	}
 	else {
 		ImGui::BeginDisabled(forced);
-		if (MenuWidgets::Toggle("##on", &on)) {
+		if (MenuWidgets::Toggle("##on", &on) && (!on || ConfirmEffectOn(name))) {	// (2026-11-05: conflicts ask first)
 			TheShaderManager->SwitchShaderStatus(shader);
 			TheSettingManager->LoadSettings();
 		}
@@ -2936,10 +4426,13 @@ static void DrawMovedPages(const std::string& path) {
 
 // What sits under an open entry: its sub-sections (less the shader entries shown elsewhere), the moved pages, and the shader
 // entries nested under it (kMenuNests) with their own switches.
+static void DrawEffectGroups(const StringList& children);
+
 static void DrawChildren(const std::string& path) {
 	StringList children;
 	TheSettingManager->FillMenuSections(&children, path.c_str());
 	const bool shaders = path == "Shaders";
+	if (shaders) return DrawEffectGroups(children);	// 2026-11-05: the effects in groups of their kind
 	for (const std::string& child : children)
 		if (!(shaders && IsMovedShaderEntry(child)))	// UNOFFICIAL 2026-10-25: drawn under the entry it belongs with
 			RenderSectionNode(path + "." + child, child, shaders);
@@ -2950,6 +4443,14 @@ static void DrawChildren(const std::string& path) {
 
 static bool HiddenFromSidebar(const std::string& path, const std::string& name) {
 	if (ShouldHideSection(name)) return true;
+	if (IsRtSection(path)) return true;	// 2026-11-05: on the Ray tracing page instead
+	// 2026-11-05 (user: "remove blood lens, sleeping mode, move gun fx ... under a relevant category"): their settings stay in the
+	// file and keep working; GunFX's page is in the effects list's "Particles and gun effects" group
+	if (path == "Shaders.BloodLens" || path == "Main.SleepingMode" || path == "Main.GunFX") return true;
+	// (user: camera mode and fly camera under Main > Misc; frame rate options under Performance "if they do anything at all": they do
+	// not: FrameRateManager::PerformSync is never called and the Stuttering pair is read by nothing)
+	if (path == "Main.CameraMode" || path == "Main.FlyCam" || path == "Main.Transitions" || path == "Main.FrameRate") return true;
+	if (path == "Main.Main.Precipitations") return true;	// (user: "remove the precipitations menu from main"; the setting stays)
 	return !DevOptionsShown() && IsDevOnlySetting(path, std::string());	// UNOFFICIAL 2026-10-25: a "Section.*" DevOnly entry
 }
 
@@ -2966,6 +4467,115 @@ static void RenderSectionNode(const std::string& path, const std::string& name, 
 		ImGui::TreePop();
 	}
 	ImGui::PopID();
+}
+
+// 2026-11-05 (user: "organize all of the effects into groups of similar effects with collapsible menus", and the Ray tracing page
+// "in the list with the rest of the effects"; docs/next/SETTINGS-GAME-MENU-PLAN.md): the Shaders list as folding groups of effects of a
+// kind, as a game's graphics menu groups them. Only the sidebar changes: each effect keeps its row, switch and pages. An effect no
+// group names goes under "Other", so a new one never goes missing. Ray tracing is a row of its own here (the page above).
+struct EffectGroup { const char* Name; const char* Entries; const char* Page = nullptr; const char* PageLabel = nullptr; };	// Page: a settings page that is no effect entry
+static const EffectGroup kEffectGroups[] = {
+	{ "Lighting", "AmbientLight, AmbientOcclusion, BounceLight, Specular, PBR, Reflections, Flashlight" },
+	{ "Shadows", "ShadowsExteriors, ShadowsInteriors, ContactHardening" },
+	{ "Ray tracing", nullptr },
+	{ "Sky and atmosphere", "Sky, VolumetricClouds, VolumetricFog, VolumetricLight, GodRays, Sandstorm, HeatHaze" },
+	{ "Weather and water", "Precipitations, Snow, SnowAccumulation, WetnessEffects, HudRaindrops, WetWorld, Water, Underwater, WaterLens" },
+	{ "Ground and plants", "Terrain, POM, Grass, Plants" },
+	{ "Characters", "Skin, Cloth, PipboyFit, BloodFlow, HandBlood, Blood" },
+	{ "Camera and colour", "Tonemapping, Exposure, HDR, Bloom, BloomLegacy, Lens, LUT, Coloring, ImageAdjust, Cinema, Bodycam, DepthOfField, MotionBlur, LowHF" },
+	{ "Anti-aliasing and sharpening", "TAA, SMAA, Sharpening, DitherBuster, SkyDither" },
+	{ "Particles and gun effects", "Particles, GPUParticles", "Main.GunFX.Main", "Gun effects (smoke, barrel glow)##GunFX" },
+	{ "Developer", "Debug" },
+};
+
+static bool InAnyEffectGroup(const std::string& name) {
+	for (const EffectGroup& g : kEffectGroups) if (g.Entries && KeyInList(g.Entries, name.c_str())) return true;
+	return false;
+}
+
+// One group's folding row: its name and how many of its effects are on; open while a test shot shows one of its pages.
+static bool DrawEffectGroupRow(const char* name, const std::vector<std::string>& entries) {
+	int on = 0, switches = 0;
+	bool reveal = false;
+	for (const std::string& e : entries) {
+		if (TheSettingManager->GetMenuShaderSwitch(e.c_str()) != SettingManager::MenuSwitch::None) {
+			switches++;
+			if (TheSettingManager->GetMenuShaderEnabled(e.c_str())) on++;
+		}
+		reveal = reveal || (gMenu.revealPage && LeadsToSelected("Shaders." + e));
+	}
+	if (reveal) ImGui::SetNextItemOpen(true);
+	const ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_FramePadding;
+	const bool open = ImGui::TreeNodeEx((std::string(name) + "###effectgroup" + name).c_str(), flags);
+	if (switches) {
+		ImGui::SameLine();
+		ImGui::TextDisabled("%d of %d on", on, switches);
+	}
+	return open;
+}
+
+// The Ray tracing group (2026-11-05, user: "its own little drop down like the others"): the overview page (status, one switch, debug
+// views) and the five RT sections' own pages, which have no effect entry of their own in the list. "n of 5 on" as the other groups.
+static void DrawRayTracingGroup() {
+	static const char* const kOnKeys[][2] = { { "Shaders.ShadowsExteriors.RT", "Enabled" }, { "Shaders.ShadowsInteriors.RT", "Enabled" },
+		{ "Shaders.AmbientOcclusion.RT", "Enabled" }, { "Shaders.Reflections.RT", "Enabled" }, { "Main.Main.RayTracing", "PTRealtime" } };
+	int on = 0;
+	for (const auto& k : kOnKeys) if (RtOn(k[0], k[1]) || (!strcmp(k[1], "PTRealtime") && RtOn(k[0], "ReferencePT"))) on++;
+	if (gMenu.revealPage && (gMenu.page == kRtTabId || IsRtSection(gMenu.page))) ImGui::SetNextItemOpen(true);
+	const ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_FramePadding;
+	const bool open = ImGui::TreeNodeEx("Ray tracing###effectgroupRT", flags);
+	ImGui::SameLine();
+	ImGui::TextDisabled("%d of %d on", on, (int)_countof(kOnKeys));
+	if (!open) return;
+	const bool shown = gMenu.page == kRtTabId;
+	ImGui::PushID(kRtTabId);
+	ImGui::PushStyleColor(ImGuiCol_Text, shown ? ImGui::GetStyleColorVec4(ImGuiCol_Text) : MenuWidgets::MutedText(0.35f));
+	if (ImGui::Selectable("Overview (status, one switch, debug views)", shown)) gMenu.page = kRtTabId;
+	ImGui::PopStyleColor();
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Every ray-traced effect in one place: what runs, what stops it, one switch for all and the debug views.");
+	ImGui::PopID();
+	for (const RtSection& section : kRtSections) {
+		ImGui::PushID(section.Section);
+		DrawLeafSection(section.Section, std::string(section.Title) + "##" + section.Section);
+		ImGui::PopID();
+	}
+	ImGui::TreePop();
+}
+
+static void DrawEffectGroups(const StringList& children) {
+	auto shown = [](const std::string& child) { return !IsMovedShaderEntry(child) && !HiddenFromSidebar("Shaders." + child, child); };
+	std::vector<std::string> other;
+	for (const std::string& child : children)
+		if (shown(child) && !InAnyEffectGroup(child)) other.push_back(child);
+	auto drawGroup = [&](const char* name, const std::vector<std::string>& entries, const EffectGroup* group) {
+		if (entries.empty() && !(group && group->Page)) return;
+		if (DrawEffectGroupRow(name, entries)) {
+			for (const std::string& e : entries) RenderSectionNode("Shaders." + e, e, true);
+			if (group && group->Page) {
+				ImGui::PushID(group->Page);
+				DrawLeafSection(group->Page, group->PageLabel);
+				ImGui::PopID();
+			}
+			ImGui::TreePop();
+		}
+	};
+	for (const EffectGroup& g : kEffectGroups) {
+		if (!g.Entries) {
+			DrawRayTracingGroup();
+			continue;
+		}
+		std::vector<std::string> entries;	// in the group's own order
+		for (const char* p = g.Entries; *p; ) {
+			while (*p == ' ' || *p == ',') p++;
+			const char* end = p;
+			while (*end && *end != ',') end++;
+			const std::string name(p, end);
+			if (!name.empty() && std::find(children.begin(), children.end(), name) != children.end() && shown(name)) entries.push_back(name);
+			p = end;
+		}
+		drawGroup(g.Name, entries, &g);
+	}
+	drawGroup("Other", other, nullptr);
 }
 
 // "New in this patch (N)" at the top of the sidebar, in the heading colour; the page shown while nothing else is picked.
@@ -3295,7 +4905,6 @@ static const ImVec4 kWarnAmber(1.0f, 0.75f, 0.2f, 1.0f);
 
 static void DrawFileMenu() {
 	if (!ImGui::BeginMenu("File")) return;
-	if (ImGui::MenuItem("Save")) SaveSettingsNow();
 	if (ImGui::MenuItem("Save Copy")) SaveSettingsCopy();
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Writes a dated copy of the settings next to the DLL, named after where you are.");
 	ImGui::Separator();
@@ -3426,12 +5035,24 @@ static void DrawGlobalSwitches() {
 			"Your own settings are kept: turn it off and restart to get them back exactly.\n"
 			"Takes effect after Save and a game restart.%s",
 			MaxQuality::Active ? "\nIt is ON now: red values in the menu are its own. You can change them: those changes are saved to VegasShaders.maxquality.user.toml, not to your own settings." : "");
+
+	// 2026-11-05: Advanced (simple views off: every setting under its own name)
+	bool advanced = gMenu.advanced;
+	ImGui::SameLine(0.0f, ImGui::GetStyle().ItemSpacing.x * 2.0f);
+	if (LabelledToggle("Advanced", "##advanced", &advanced)) {
+		TheSettingManager->SetSetting("Main.Menu.Developer", "AdvancedSettings", advanced);
+		TheSettingManager->LoadSettings();
+		gMenu.advanced = advanced;
+	}
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Off: pages with a simple view show the main settings with plain names, and choices that set several at once.\n"
+			"On: every setting under its own name, as in guides and logs. Nothing changes in your saved settings either way.");
 }
 
 static float GlobalSwitchesWidth() {
 	const ImGuiStyle& style = ImGui::GetStyle();
-	return ImGui::CalcTextSize("Effects").x + ImGui::CalcTextSize("Max Quality").x + MenuWidgets::ToggleWidth() * 2.0f +
-		style.ItemInnerSpacing.x * 2.0f + style.ItemSpacing.x * 2.0f;
+	return ImGui::CalcTextSize("Effects").x + ImGui::CalcTextSize("Max Quality").x + ImGui::CalcTextSize("Advanced").x + MenuWidgets::ToggleWidth() * 3.0f +
+		style.ItemInnerSpacing.x * 3.0f + style.ItemSpacing.x * 4.0f;
 }
 
 static void DrawUnsavedMarker() {
@@ -3637,6 +5258,7 @@ static void DrawMenuFrame() {
 	if (!gOverlay.open) return;
 
 	gMenu.devOptions = TheSettingManager->GetSettingI("Main.Menu.Developer", "DeveloperOptions") != 0;	// UNOFFICIAL 2026-10-25
+	gMenu.advanced = TheSettingManager->GetSettingI("Main.Menu.Developer", "AdvancedSettings") != 0;	// 2026-11-05
 	MenuTools::FrameUpdate();
 	if (MenuTools::ScreenshotMode) return;
 	PixelInspector::DrawUI();	// UNOFFICIAL 2026-10-26: [Main.Develop.PixelInspector] / shader counters window (only while one is on)
@@ -3654,6 +5276,7 @@ static void DrawMenuFrame() {
 		DrawTwoPanels();
 		DrawStatusBar();
 		DrawDiskReloadPopup();
+		DrawConflictPopup();	// 2026-11-05
 	}
 	ImGui::End();
 	if (!keepOpen) {

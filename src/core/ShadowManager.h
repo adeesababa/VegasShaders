@@ -34,6 +34,17 @@ public:
 	std::vector<std::pair<NiAVObject*, unsigned>> SunContainers;
 	ShadowsExteriorEffect::FormsStruct* SunForms[4] = {};
 	NiFrustumPlanes*		SunPlanes[4] = {};
+	// UNOFFICIAL 2026-11-04 (from Physically-Based-Reloaded) CasterCulling and SkipCoveredCasters for the one walk, per sun cascade (bit c):
+	// SunCastView the cascades culled against the view slice's sides and their own sphere, SunCovering their earlier cascades drawn
+	// fresh this frame (centre camera-relative, w the radius they alone answer for), set by RenderShadowMaps around WalkSunCascades.
+	unsigned				SunCastView = 0, SunCastAny = 0;
+	D3DXVECTOR4				SunCastSphere[4] = {};
+	D3DXVECTOR4				SunCovering[4][4] = {};
+	int						SunCoveringCount[4] = {};
+	D3DXVECTOR3				SunCastDir = D3DXVECTOR3(0.0f, 0.0f, -1.0f);	// the way the light travels
+	float					SunCastPerHeight = 1.0f;						// a shadow's length per unit of height
+	UInt32					SunCastersCulled = 0, SunCastersCovered = 0;
+	unsigned				SunCastMask(const NiBound* Bound, unsigned mask);
 	void					WalkSunCascades(unsigned mask);
 	void					WalkSunCell(TESObjectCELL* Cell, unsigned mask);
 	void					WalkSunChildren(NiAVObject* Object, unsigned mask, bool isLand, bool isLOD);
@@ -52,6 +63,8 @@ public:
 	// after the sun cascades from the same sun direction; actors only (the player, optionally other actors inside it). Sets
 	// Constants.CharacterData.w = 1 when the map holds this frame's draw.
 	void					RenderCharacterShadowMap(const D3DXVECTOR3& SunDir);
+	bool					RenderViewModelShadowMap(NiCamera* FirstPersonCamera);	// UNOFFICIAL 2026-11-04 ViewModelShadows: the first-person arms and weapon into the character map
+	static void				ViewModelLogDraw(NiGeometry* Geometry);	// UNOFFICIAL 2026-11-04 CharacterShadowMapLog: a first-person draw against this frame's viewmodel map
 	void					ClearShadowCascade(D3DVIEWPORT9* Rect, D3DXVECTOR4* Color);	// fills a map's rectangle with a colour (ShadowMapClear.pso)
 	void                    BlurShadowAtlas(unsigned cascadeMask);
 

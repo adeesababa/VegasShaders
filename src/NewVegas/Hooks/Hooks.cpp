@@ -88,6 +88,7 @@ void AttachHooks() {
 	kSkinPrepareGeometryDetour.ReplaceVirtualFunc(0x10BB980 + 27 * 4, SkinShader__PrepareGeometryForRendering);
 	kSkinPostGeometryDetour.ReplaceVirtualFunc(0x10BB980 + 35 * 4, SkinShader__PostGeometry);
 	InstallFaceGenInteriorPatch();
+	kPipboyPostProcessDetour.ReplaceVirtualFunc(0x10780AC + 20 * 4, FOPipboyManager__RenderPostProcess);	// UNOFFICIAL 2026-11-04: raindrops on the Pip-Boy screen (HudRaindrops)
 
 	// UNOFFICIAL KeepLampsInView (PointShadowForward.h): the game's one lamp view test call, with forward shadows, unless another
 	// plugin has taken it.

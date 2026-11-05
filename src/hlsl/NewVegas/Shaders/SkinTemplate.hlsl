@@ -5,7 +5,7 @@
 //     smooth vertex normal and the skin's edge softness and reach: SHADOW_SKIN_SOFTNESS),
 //   - the lamps' shadows indoors from Includes/PointShadowForward.hlsl (INTERIOR_SHADOWS records),
 //   - the lamps' falloff from Includes/LampFalloff.hlsl, linear lighting from Includes/LinearLight.hlsl,
-//   - rain on the first-person arms from Includes/HudRain.hlsl (HudDrops),
+//   - rain drops on the first-person arms (and, AllObjects, on anyone out in the rain) from Includes/HudRain.hlsl (Wetness Effects HudRaindrops),
 //   - and the screen-space skin blur's inputs (Effects/SkinScattering.fx.hlsl): COLOR1 / COLOR2 below.
 //
 // The engine's side, read off the vanilla shaders (shaderpackage010.sdp); only this has to match them:
@@ -89,6 +89,9 @@
     #if defined(SMITH_CORRELATED_ON) && SMITH_CORRELATED_ON
         #define PBR_SMITH_CORRELATED 1
     #endif
+#endif
+#ifdef PS
+    #define SHADOW_CLOUD_IN 1   // UNOFFICIAL 2026-11-04 ForwardCloudShadows (Includes/Shadow.hlsl): the clouds' shadow on the sun term (compiled in only when on at startup)
 #endif
 #include "includes/Shadow.hlsl"	// shared code
 #define CAPTURED_ACTOR	// UNOFFICIAL 2026-10-28: every skin draw is an actor's (CapturedNormals alpha 2)
@@ -478,7 +481,7 @@ PS_OUTPUT main(PS_INPUT pin) {
     #if HUD_RAIN
         skinSpecScale = lerp(skinSpecScale, max(skinSpecScale, 1.0f), hudRainGloss);
     #endif
-    const float3 albedo = LinColor(texColor.rgb);
+    const float3 albedo = LinColor(HudRainAlbedo(texColor.rgb));   // darker under the rain drops
 
     // --- the sun's shadow (top level: derivatives), and vanilla's projected actor shadow
     #ifndef DIFFUSE
@@ -523,8 +526,6 @@ PS_OUTPUT main(PS_INPUT pin) {
         const float3 sunLight = PBRLight(PSLightColor[0].rgb) * projShadow;
         diffuseLight += SkinLight(albedo, N, Nsoft, sunTS.z, V, sunTS, sunLight, sunVis, sunShadowEdge, selfLit, specular);
         specularLight += specular;
-        // The sun focused through each rain drop into a bright spot on its far side (Includes/HudRain.hlsl).
-        diffuseLight += sunLight * (sunVis * HudRainLens(sunTS).y) * albedo;
     #endif
 
     #if POINTS > 0

@@ -12,12 +12,6 @@ uniform float3 DiffuseDir   : register(c0);
 uniform float3 DiffuseColor : register(c1);
 uniform float3 ScaleMask    : register(c2);
 uniform float4 WindData     : register(c4);
-#ifdef GRASS_POINT_LIGHT
-// UNOFFICIAL 2026-10-27 [Shaders.Grass.Main] PointLights: the game's 1POINT grass (GRASS23x004-007.vso, grass by a lamp or fire)
-// includes this file: the same shader plus the lamp's attenuation coordinates, as the game's 1POINT VS writes them (there in
-// TEXCOORD1, which is shadowWorldPos here: so in TEXCOORD2, and GRASS23x001TMS/003TMS.pso read it there).
-uniform float4 LightPosition : register(c3);   // xyz world position, w radius
-#endif
 uniform float4 AlphaParam   : register(c5);
 uniform float4 AmbientColor : register(c6);
 uniform float4 AddlParams   : register(c7);
@@ -32,9 +26,20 @@ uniform float4 TESR_Translucency : register(c18);
 // multisampling), 0 = the game's own GRASS23x000.pso (no transparency multisampling, the INI default). Never written reads 0.
 // UNOFFICIAL 2026-10-18 sandport: y and z carry the sandstorm's wind (SandstormEffect::GrassStorm; 0 = no storm).
 uniform float4 GrassPairing : register(c19);
-// UNOFFICIAL 2026-10-19 grass collision ([Shaders.Grass.Collision], effects/GrassCollision.cpp): the push round the camera, a
-// vertex texture (vertex sampler 0, bound by GrassShaders::SetForDraw). TESR_Translucency.w is 1 / its width (0 = off).
-uniform sampler2D NVR_GrassPush : register(s0);
+// UNOFFICIAL 2026-11-04 (from Physically-Based-Reloaded) the player walking through the grass ([Shaders.Grass.Interaction],
+// GrassShaders, as There Stands The Grass NVSE does it): xyz the bend origin, camera-relative, w 1 / its reach; the push per unit of
+// blade height is TESR_Translucency.w. c16 and c17 are free here (the game writes none of c16-c19 for grass).
+uniform float4 TESR_GrassBend : register(c16);
+// Per grass shape (GrassShaders::SetBatchConstants, from the hooked per-shape setup): x, y the size fade ([Shaders.Grass.LOD], folded
+// on the CPU: GrassLODFade), z 1 for a shape that stands still (rocks: no sway, no bending), w 1 for the bend's debug tint.
+uniform float4 GrassBatch : register(c17);
+// UNOFFICIAL 2026-11-04 the flashlight caster (GRASS_SHADOW_CASTER 2, core/GrassShadows.h BeginSpot): c13-c16 camera-relative world -> the spot
+// shadow map's clip space (ShaderManager SpotLightWorldToLightMatrix[0]), c18 the light (camera-relative) and w its reach. Free registers
+// in the caster build only (set and put back per draw).
+#if defined(GRASS_SHADOW_CASTER) && GRASS_SHADOW_CASTER == 2
+row_major float4x4 GrassSpotCaster : register(c13);
+float4 GrassSpotCasterLight : register(c18);
+#endif
 
 #ifndef GRASS_INSTANCE_COUNT
     #define GRASS_INSTANCE_COUNT 228
@@ -55,10 +60,9 @@ struct VtxVaryings {
     float4 f_shadow_world_pos : TEXCOORD1;
     float4 f_ambient        : TEXCOORD4;
     float4 f_sun            : TEXCOORD5;   // .w = distance fade
-#ifdef GRASS_POINT_LIGHT
-    float4 f_att            : TEXCOORD2;   // the lamp's AttMap coordinates (xy, z with w = 0.5)
-#endif
-    float2 f_amount         : TEXCOORD6;   // UNOFFICIAL: x ambient amount, y sun amount (plain numbers, see below)
+    float4 f_light_normal   : TEXCOORD2;   // UNOFFICIAL 2026-11-04: xyz the normal the sun lights the grass by, w its N.L (the PS bends it by a normal map)
+    float3 f_sun_dir        : TEXCOORD3;   // DiffuseDir, for the PS
+    float4 f_amount         : TEXCOORD6;   // UNOFFICIAL: x ambient amount, y sun amount, z the sun amount before N.L, w the translucency (plain numbers, see below)
     float4 f_fog            : COLOR0;      // .w = fog amount
 };
 
@@ -98,9 +102,7 @@ VtxVaryings main(VtxAttrs va) {
     // 0 (never written) = every tuft, the game's order. A dropped tuft is folded into one point outside the view (no pixels).
     [branch] if (GrassPairing.w > 0.5f && ((inst_dist > AlphaParam.z) == (GrassPairing.w < 1.5f))) {
         VtxVaryings gone = (VtxVaryings)0;
-#ifndef GRASS_POINT_LIGHT   // 1POINT variants: left at 0 (every corner on one point: no pixels either), no literal register
         gone.f_position = float4(2.0f, 2.0f, 0.5f, 1.0f);
-#endif
         return gone;
     }
 
@@ -112,14 +114,12 @@ VtxVaryings main(VtxAttrs va) {
     // flutters. c19.y (GrassPairing.y, written by GrassShaders::SetForDraw from SandstormEffect): the extra sway S, 0 with no
     // storm (the branch is not taken: the game's sway exactly). c19.z: the gust clock u (0..8 pi), gusts at u / 4, flutter at u.
     // No literal is added: this shader's free registers are full of them, and one more spills past c255 (shader refused).
-#ifndef GRASS_POINT_LIGHT   // 1POINT variants (PointLights): no sandstorm gusts, their literals would push the shader past c255
     [branch] if (GrassPairing.y > 0.0f) {
         float gust_f = 0.75f + 0.25f * sin(GrassPairing.z * 0.25f - dot(inst_id.xy, WindData.xy) * 0.0078125f);
         float flutter_f = sin(GrassPairing.z + (inst_id.x - inst_id.y) * 0.0078125f);
         swing_f = swing_f * (1.0f + GrassPairing.y) + 1.5f * GrassPairing.y * (0.75f * gust_f + 0.25f * flutter_f);
     }
-#endif
-    float sway_f = swing_f * WindData.z * (va.f_color.w * va.f_color.w);
+    float sway_f = swing_f * WindData.z * (va.f_color.w * va.f_color.w) * (1.0f - GrassBatch.z);   // GrassBatch.z 1: a static shape (rocks), no sway
 
     float3 scl = (0.01f * inst_id.w) * ScaleMask.xyz + 1.0f;
     float3 pos_w = va.f_position.xyz * scl + float3(sway_f * WindData.xy, 0.0f);
@@ -130,10 +130,21 @@ VtxVaryings main(VtxAttrs va) {
     // Lanes xy 0 (the effect off: that column is the matrix's own 0 0 0 1) = the branch is not taken, the line above alone: the game's
     // sway exactly. Taken, the position is worked out again from the vertex with the field wind in place of the game's sway.
     const float4 wind_lanes = float4(TESR_InvViewTransform._m03, TESR_InvViewTransform._m13, TESR_InvViewTransform._m23, TESR_InvViewTransform._m33);
-    [branch] if (dot(wind_lanes.xy, wind_lanes.xy) > 0.0f) {
+    [branch] if (dot(wind_lanes.xy, wind_lanes.xy) > 0.0f && GrassBatch.z < 0.5f) {
         pos_w = va.f_position.xyz * scl + GrassWindMove(inst_id, wind_lanes, GrassPairing.z, swing_f, WindData,
             va.f_color.w * va.f_color.w, va.f_position.z * scl.z);
     }
+
+    // UNOFFICIAL 2026-11-04 (from Physically-Based-Reloaded) [Shaders.Grass.LOD]: the tuft faded by its size on screen; gone, it is
+    // dropped below. [Shaders.Grass.Interaction]: pushed away from the player (Includes/GrassWind.hlsl GrassBend), at the tuft's root
+    // carried back to the camera-relative world (GrassCameraRelative). Not in the shadow caster, whose c252-c255 hold the cascade's
+    // transform: its tufts cast unbent.
+    float lod_fade = GrassLODFade(inst_clip, scl.z, GrassBatch);
+    vr.f_sun.w *= lod_fade;
+    float bend_reach = 0.0f;
+#ifndef GRASS_SHADOW_CASTER
+    pos_w += GrassBend(GrassCameraRelative(inst_clip), pos_w, TESR_GrassBend, TESR_Translucency.w, bend_reach) * (1.0f - GrassBatch.z);
+#endif
 
     float4 world_pos = float4(pos_w + inst_id.xyz, 1.0f);
     vr.f_position = mul(ModelViewProj, world_pos);
@@ -145,37 +156,24 @@ VtxVaryings main(VtxAttrs va) {
     // c252-c255 (the grass wind lanes in their w are kept), so the shadow-position transform below lands on the tuft's place in the
     // map, the same transform the shadow lookups use. No lighting, fog or collision push here (the push reads those registers too).
     float caster_fade = vr.f_sun.w;
+#if GRASS_SHADOW_CASTER == 2
+    // the flashlight's map: the tuft through its perspective, writing the distance to the light over its reach (as the spot map holds it);
+    // the position as the card shaders place it (GrassCameraRelative: exact at any depth, round the player's feet too)
+    float3 caster_rel = GrassCameraRelative(vr.f_position);
+    float4 caster_clip = mul(float4(caster_rel, 1.0f), GrassSpotCaster);
+    float3 caster_light = float3(0.0f, 0.0f, length(caster_rel - GrassSpotCasterLight.xyz) / GrassSpotCasterLight.w);
+#else
     float3 caster_light = GetShadowWorldPos(vr.f_position);
+#endif
     vr = (VtxVaryings)0;
     vr.f_position = float4(caster_light, 1.0f);
+#if GRASS_SHADOW_CASTER == 2
+    vr.f_position = caster_clip;
+#endif
     vr.f_uv = va.f_uv;
     vr.f_shadow_world_pos = float4(caster_light, 1.0f);   // the caster PS writes z, as ShadowMap.pso does
     vr.f_sun.w = caster_fade;
 #else
-    // UNOFFICIAL 2026-10-19 grass collision ([Shaders.Grass.Collision]; after Community Shaders' Grass Collision, GPL-3.0): the player
-    // and the people and creatures near them push the grass aside, and it springs back as they pass (GrassCollision.cpp). The push
-    // at a blade's tip is read at the TUFT'S ROOT (its clip position, instClip, carried back to the camera-relative world), so the whole
-    // tuft leans away as one (2026-10-20: read where each vertex stood, a tuft straddling someone's feet had its corners pushed
-    // apart -- the user's 'garbled twisted pieces of grass flying around my character'); the vertex moves
-    // by its height above the root (2026-10-20, user: 'not doing anything i can see': it used the sway's alpha squared, 0.02-0.5 at
-    // the tips of the Mojave's grass models, so most grass hardly moved): none at the root, the full push from 50 units up
-    // (GrassPushWeight, NewGrass.vso takes the same at the same height), and drops as it leans so the blade bends, not stretches.
-    // Only literals this shader already holds are used: its free constant registers are all taken by them.
-    // Past the texture's half-width round the camera (its edge texels are 0, clamped) and wherever no one pushes, the push is 0
-    // and the vertex stays where it was: those (most of the grass on screen) skip the read and the second transform.
-    [branch] if (TESR_Translucency.w > 0.0f) {
-        float2 push_uv = GrassCameraRelative(inst_clip).xy * TESR_Translucency.w;   // (not GetShadowWorldPos: see GrassCameraRelative)
-        [branch] if (max(abs(push_uv.x), abs(push_uv.y)) < 0.5f) {
-            float2 push_v = tex2Dlod(NVR_GrassPush, float4(push_uv + 0.5f, 0.0f, 0.0f)).xy * GrassPushWeight(pos_w.z);
-            [branch] if (dot(push_v, push_v) > 0.0f) {
-                float hgt = max(pos_w.z, 1e-6f);
-                world_pos.xy += push_v;
-                world_pos.z -= min(dot(push_v, push_v) * 0.5f / hgt, hgt);
-                vr.f_position = mul(ModelViewProj, world_pos);
-            }
-        }
-    }
-
     float light_scale = frac(inst_id.w) * 0.75f + 0.25f;
     float n_dot_l = saturate(dot(DiffuseDir, va.f_normal));
 
@@ -183,9 +181,13 @@ VtxVaryings main(VtxAttrs va) {
     // UNOFFICIAL 2026-10-17: the game's grass PS reads no shadow position: skip its two matrix transforms unless NVR's PS or the
     // translucency needs it.
     float3 shadow_world_pos = 0.0f;
-    [branch] if (GrassPairing.x > 0.5f || TESR_Translucency.x > 0.0f) shadow_world_pos = GetShadowWorldPos(vr.f_position);
+    // UNOFFICIAL 2026-11-04: GrassCameraRelative (Includes/GrassWind.hlsl), exact, and it reads only _11 and _22 of the inverse
+    // projection, so the compiler keeps c248-c249 of it and the literals get c250-c251 (the bend and the size fade took c16-c17).
+    [branch] if (GrassPairing.x > 0.5f || TESR_Translucency.x > 0.0f) shadow_world_pos = GrassCameraRelative(vr.f_position);
+    float translucent_f = 0.0f;
     [branch] if (TESR_Translucency.x > 0.0f) {
-        n_dot_l += FoliageTranslucency(va.f_normal, DiffuseDir, shadow_world_pos, DiffuseDir);
+        translucent_f = FoliageTranslucency(va.f_normal, DiffuseDir, shadow_world_pos, DiffuseDir);
+        n_dot_l += translucent_f;
     }
 
     // UNOFFICIAL linear lighting (2026-10-14): colours and plain numbers apart. The PS decodes the colours (sun, vertex colour,
@@ -202,7 +204,11 @@ VtxVaryings main(VtxAttrs va) {
         vr.f_ambient = light_scale * AmbientColor;
         vr.f_sun.xyz = ((light_scale * va.f_color.rgb) * DiffuseColor) * n_dot_l * AddlParams.x;
     }
-    vr.f_amount = float2(light_scale, light_scale * n_dot_l * AddlParams.x);
+    // UNOFFICIAL 2026-11-04 [Shaders.Grass.Interaction] Debug: the grass the bend reaches, in red.
+    vr.f_ambient.rgb = lerp(vr.f_ambient.rgb, float3(1.0f, 0.0f, 0.0f), bend_reach * GrassBatch.w);
+    vr.f_amount = float4(light_scale, light_scale * n_dot_l * AddlParams.x, light_scale * AddlParams.x, translucent_f);
+    vr.f_light_normal = float4(va.f_normal, n_dot_l - translucent_f);
+    vr.f_sun_dir = DiffuseDir;
 
     float fog_dist = length(float3(vr.f_position.xy, vr.f_position.w - vr.f_position.z));
     float fog_strength = 1.0f - saturate((FogParam.x - fog_dist) / FogParam.y);
@@ -211,12 +217,8 @@ VtxVaryings main(VtxAttrs va) {
 
     vr.f_uv = va.f_uv;
     vr.f_shadow_world_pos = float4(shadow_world_pos, SHADOW_VS_SENTINEL);
-#ifdef GRASS_POINT_LIGHT
-    vr.f_att = float4((LightPosition.xyz - world_pos.xyz) / LightPosition.w * 0.5f + 0.5f, 0.5f);
-    // The game's own grass PS (no transparency multisampling, c19.x 0) reads them in TEXCOORD1, as from its own VS.
-    if (GrassPairing.x < 0.5f) vr.f_shadow_world_pos = vr.f_att;
-#endif
 
 #endif   // GRASS_SHADOW_CASTER
+    if (lod_fade <= 0.0f) vr.f_position = float4(2.0f, 2.0f, 0.5f, 1.0f);   // faded out by its size: off the screen whole
     return vr;
 };

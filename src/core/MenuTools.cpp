@@ -4,6 +4,8 @@
 #include "../base/PluginVersion.h"
 #include "imgui_internal.h"	// ImMax / ImClamp; brings imgui.h
 #include <algorithm>
+#include <fstream>
+#include <iterator>
 
 // Tool windows of the settings menu. Everything here is drawn from MenuTools::DrawWindows, after the main menu window, and only
 // while the menu is open. Window titles come from Branding.h (their ### IDs keep each window's saved place in imgui.ini).
@@ -991,6 +993,238 @@ void DevJump() {
 	}
 }
 
+// 2026-11-05 (user: "weather manipulation in the dev menu too with common weathers as an option"): force a weather with fw,
+// back to the game's own with rw. The quick buttons take the first loaded weather whose editor name holds one of their words (any
+// weather mod's names count too); greyed when the load order has none. The list below holds every weather loaded.
+struct QuickWeather { const char* Label; const char* Words; };	// Words: comma separated, matched case-insensitively
+const QuickWeather kQuickWeathers[] = {
+	{ "Clear", "clear,pleasant,sunny" }, { "Cloudy", "cloud,overcast" }, { "Rain", "rain" }, { "Storm", "storm,thunder" },
+	{ "Sandstorm", "sand,dust" }, { "Fog", "fog,mist" }, { "Snow", "snow" }, { "Radstorm", "rad" },
+};
+
+std::string Lower(const char* text) {
+	std::string s(text ? text : "");
+	std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)tolower(c); });
+	return s;
+}
+
+TESWeather* FindQuickWeather(const QuickWeather& q) {
+	if (!DataHandler) return nullptr;
+	const std::string words = q.Words;
+	for (auto* entry = &DataHandler->weathers.First; entry && entry->item; entry = entry->next) {
+		const std::string name = Lower(entry->item->GetEditorName());
+		size_t start = 0;
+		while (start < words.size()) {
+			const size_t end = words.find(',', start);
+			const std::string word = words.substr(start, end == std::string::npos ? std::string::npos : end - start);
+			if (!word.empty() && name.find(word) != std::string::npos) return entry->item;
+			if (end == std::string::npos) break;
+			start = end + 1;
+		}
+	}
+	return nullptr;
+}
+
+void ForceWeatherNow(TESWeather* weather) {
+	char line[32];
+	snprintf(line, sizeof(line), "fw %08X", weather->refID);
+	Console(line);
+}
+
+// 2026-11-05 (user: "also allow for you to turn on and off weathers so it saves to your hdrweatherandcolor.ini"): DN Weathers' own
+// list of which of its weathers may come up ([Weathers] in Data\config\HDRWeatherAndColor\HDRWeatherAndColor.ini: AADN<name> = 1 / 0,
+// under "; ------- WEATHER TOGGLES <region> -------" and "; --- <kind> ---" comment lines). A switch rewrites only its own line (a line
+// the file has commented out, "; AADN... = 1", counts as off and is written back uncommented); every other line, comment and the line
+// ends stay as they were. The first change keeps a copy of the file as .backup-vegasshaders. DN Weathers reads the file itself.
+const char* const kDnwPath = "Data\\config\\HDRWeatherAndColor\\HDRWeatherAndColor.ini";
+
+struct DnwToggle { size_t Line; std::string Key, Group; bool On; };
+struct DnwFile {
+	bool Loaded = false, Missing = false;
+	std::string Eol = "\r\n", Error;
+	bool FinalEol = true;
+	std::vector<std::string> Lines;
+	std::vector<DnwToggle> Toggles;
+};
+DnwFile gDnw;
+
+std::string Trim(const std::string& s) {
+	const size_t a = s.find_first_not_of(" \t"), b = s.find_last_not_of(" \t");
+	return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
+}
+
+// "AADNName = 1" (or with a leading ';'): the key and its value; false for any other line
+bool DnwParseToggle(std::string text, std::string& key, bool& on) {
+	text = Trim(text);
+	if (!text.empty() && text[0] == ';') text = Trim(text.substr(1));
+	if (text.compare(0, 4, "AADN") != 0) return false;
+	const size_t eq = text.find('=');
+	if (eq == std::string::npos) return false;
+	key = Trim(text.substr(0, eq));
+	const std::string value = Trim(text.substr(eq + 1));
+	if (key.find_first_of(" \t;") != std::string::npos || (value != "0" && value != "1")) return false;
+	on = value == "1";
+	return true;
+}
+
+void DnwLoad() {
+	gDnw = DnwFile();
+	gDnw.Loaded = true;
+	std::ifstream in(kDnwPath, std::ios::binary);
+	if (!in) {
+		gDnw.Missing = true;
+		return;
+	}
+	const std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	gDnw.Eol = all.find("\r\n") != std::string::npos ? "\r\n" : "\n";
+	gDnw.FinalEol = !all.empty() && all.back() == '\n';
+	size_t start = 0;
+	while (start < all.size()) {
+		size_t end = all.find('\n', start);
+		if (end == std::string::npos) end = all.size();
+		std::string line = all.substr(start, end - start);
+		if (!line.empty() && line.back() == '\r') line.pop_back();
+		gDnw.Lines.push_back(line);
+		start = end + 1;
+	}
+	bool weathers = false;
+	std::string region, kind;
+	for (size_t i = 0; i < gDnw.Lines.size(); i++) {
+		const std::string text = Trim(gDnw.Lines[i]);
+		if (!text.empty() && text[0] == '[') {
+			weathers = text == "[Weathers]";
+			continue;
+		}
+		if (!weathers) continue;
+		std::string key;
+		bool on = false;
+		const bool commented = !text.empty() && text[0] == ';';
+		if (DnwParseToggle(text, key, on)) {
+			gDnw.Toggles.push_back({ i, key, region + (kind.empty() ? "" : ": " + kind), on && !commented });
+			continue;
+		}
+		if (!commented) continue;
+		std::string body = Trim(text.substr(1));
+		const size_t toggles = body.find("WEATHER TOGGLES");
+		if (toggles != std::string::npos) {
+			region = Trim(body.substr(toggles + 15));
+			while (!region.empty() && region.back() == '-') region.pop_back();
+			region = Trim(region);
+			kind.clear();
+		}
+		else if (body.compare(0, 3, "---") == 0) {	// "; --- HEAVY OVERCAST ---"
+			while (!body.empty() && body.front() == '-') body.erase(body.begin());
+			while (!body.empty() && body.back() == '-') body.pop_back();
+			kind = Trim(body);
+		}
+	}
+}
+
+bool DnwSave() {
+	std::ifstream exists(std::string(kDnwPath) + ".backup-vegasshaders");
+	if (!exists) CopyFileA(kDnwPath, (std::string(kDnwPath) + ".backup-vegasshaders").c_str(), TRUE);
+	std::ofstream out(kDnwPath, std::ios::binary | std::ios::trunc);
+	if (!out) return false;
+	for (size_t i = 0; i < gDnw.Lines.size(); i++) {
+		out << gDnw.Lines[i];
+		if (i + 1 < gDnw.Lines.size() || gDnw.FinalEol) out << gDnw.Eol;
+	}
+	return (bool)out;
+}
+
+void DnwSet(DnwToggle& t, bool on) {
+	std::string& line = gDnw.Lines[t.Line];
+	const size_t first = line.find_first_not_of(" \t;");
+	std::string kept;	// the line's indent, without a comment mark
+	for (size_t i = 0; i < (first == std::string::npos ? 0 : first); i++) if (line[i] != ';') kept += line[i];
+	line = kept + t.Key + " = " + (on ? "1" : "0");
+	t.On = on;
+	gDnw.Error = DnwSave() ? std::string() : std::string("Could not write ") + kDnwPath + " (read-only, or open in another program?)";
+	Logger::Log("UNOFFICIAL Dev Tools: DN Weathers %s set to %d in HDRWeatherAndColor.ini%s", t.Key.c_str(), on ? 1 : 0,
+		gDnw.Error.empty() ? "" : " (FAILED to write)");
+}
+
+// The loaded weather a DN Weathers key names: its editor name is the key, or the key without its "AADN" prefix.
+TESWeather* DnwWeather(const std::string& key) {
+	if (!DataHandler) return nullptr;
+	const std::string a = Lower(key.c_str()), b = Lower(key.substr(4).c_str());
+	for (auto* entry = &DataHandler->weathers.First; entry && entry->item; entry = entry->next) {
+		const std::string name = Lower(entry->item->GetEditorName());
+		if (name == a || name == b) return entry->item;
+	}
+	return nullptr;
+}
+
+void DevDnwToggles() {
+	if (!ImGui::TreeNode("Which weathers can come up (DN Weathers)")) return;
+	if (!gDnw.Loaded) DnwLoad();
+	if (gDnw.Missing) {
+		ImGui::TextDisabled("DN Weathers' HDRWeatherAndColor.ini was not found (Data\\config\\HDRWeatherAndColor).");
+		if (ImGui::SmallButton("Look again")) DnwLoad();
+		ImGui::TreePop();
+		return;
+	}
+	ImGui::PushTextWrapPos(ImGui::GetFontSize() * 26.0f);
+	ImGui::TextDisabled("Saved to HDRWeatherAndColor.ini at once (a copy of the original is kept as .backup-vegasshaders). DN Weathers "
+		"reads its file itself: if a change does not show, load a save. DLC weathers cannot be switched off.");
+	ImGui::PopTextWrapPos();
+	if (!gDnw.Error.empty()) ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "%s", gDnw.Error.c_str());
+	if (ImGui::SmallButton("Read the file again")) DnwLoad();
+	std::string group;
+	for (DnwToggle& t : gDnw.Toggles) {
+		if (t.Group != group) {
+			group = t.Group;
+			ImGui::Spacing();
+			ImGui::SeparatorText(group.empty() ? "Weathers" : group.c_str());
+		}
+		ImGui::PushID((int)t.Line);
+		bool on = t.On;
+		if (ImGui::Checkbox(t.Key.c_str() + 4, &on)) DnwSet(t, on);	// (shown without the "AADN" prefix)
+		if (TESWeather* weather = DnwWeather(t.Key)) {
+			Beside();
+			if (ImGui::SmallButton("Show")) ForceWeatherNow(weather);
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Force this weather now (fw), to see it");
+		}
+		ImGui::PopID();
+	}
+	ImGui::TreePop();
+}
+
+void DevWeather() {
+	if (!ImGui::CollapsingHeader("Weather")) return;
+	if (!DataHandler) {
+		ImGui::TextDisabled("Weathers not loaded yet.");
+		return;
+	}
+	int inRow = 0;
+	for (const QuickWeather& q : kQuickWeathers) {
+		TESWeather* weather = FindQuickWeather(q);
+		if (inRow++ % 4) Beside();
+		GreyedOut none(!weather);
+		if (ImGui::Button(q.Label, ImVec2(90.0f, 0.0f)) && weather) ForceWeatherNow(weather);
+		if (weather && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", weather->GetEditorName());
+	}
+	ImGui::Spacing();
+	if (ImGui::Button("Back to the game's weather  (rw)")) Console("rw");
+	ImGui::Spacing();
+
+	static ImGuiTextFilter narrow;
+	narrow.Draw("##weatherfilter", 200.0f);
+	Beside();
+	ImGui::TextDisabled("every weather loaded");
+	Boxed("##weatherlist", 120.0f, 0, [&] {
+		for (auto* entry = &DataHandler->weathers.First; entry && entry->item; entry = entry->next) {
+			const char* name = entry->item->GetEditorName();
+			if (!name || !name[0] || !narrow.PassFilter(name)) continue;
+			ImGui::PushID(entry->item);
+			if (ImGui::Selectable(name)) ForceWeatherNow(entry->item);
+			ImGui::PopID();
+		}
+	});
+	ImGui::Spacing();
+	DevDnwToggles();
+}
+
 void DevPresets() {
 	if (!ImGui::CollapsingHeader("Presets")) return;
 	if (ImGui::Button("Refresh All Presets")) {
@@ -1029,7 +1263,7 @@ void DevBody(TimeGlobals* time) {
 	ImGui::Separator();
 	ImGui::Spacing();
 	if (ImGui::CollapsingHeader("Time & World", ImGuiTreeNodeFlags_DefaultOpen)) DevTime(time);
-	void (*const groups[])() = { DevDisplay, DevJump, DevPresets, DevLog };
+	void (*const groups[])() = { DevWeather, DevDisplay, DevJump, DevPresets, DevLog };
 	for (auto group : groups) {
 		ImGui::Spacing();
 		group();

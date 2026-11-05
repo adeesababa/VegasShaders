@@ -199,12 +199,6 @@ static const char* const ShadowMapsSection = "Shaders.ShadowsExteriors.ShadowMap
 static int ShadowSettingI(const char* section, const char* key) { return TheSettingManager->GetSettingI(section, key); }
 static float ShadowSettingF(const char* section, const char* key) { return TheSettingManager->GetSettingF(section, key); }
 
-// The suffix of a cascade's forms section (Shaders.ShadowsExteriors.Forms + suffix); index = ShadowMapTypeEnum.
-static const char* CascadeFormsSuffix(int type) {
-	static const char* const suffixes[] = { "Near", "Middle", "Far", "Lod", "Ortho" };
-	return suffixes[type];
-}
-
 // Every key of one forms section, in the order the settings were always read.
 static void ReadShadowForms(ShadowsExteriorEffect::FormsStruct& forms, const char* section) {
 	forms.AlphaEnabled = ShadowSettingI(section, "AlphaEnabled");
@@ -258,6 +252,11 @@ bool ShadowsExteriorEffect::UpdateSettingsFromQuality(int quality) {
 	maps.LodSkipLoaded = ShadowSettingI(ShadowMapsSection, "LodSkipLoaded");
 	// UNOFFICIAL 2026-10-28 CasterFadeMin (distant trees' leaves under a fade node at 0.00 were drawn but never cast): every quality.
 	maps.CasterFadeMin = std::clamp(ShadowSettingF(ShadowMapsSection, "CasterFadeMin"), 0.0f, 1.0f);
+	// UNOFFICIAL 2026-11-04 (from Physically-Based-Reloaded) caster culling (ShadowManager::SunCastMask), every quality.
+	maps.CasterCulling = ShadowSettingI(ShadowMapsSection, "CasterCulling") != 0;
+	maps.CasterMargin = std::clamp(ShadowSettingF(ShadowMapsSection, "CasterMargin"), 0.0f, 4096.0f);
+	maps.CasterDrop = std::clamp(ShadowSettingF(ShadowMapsSection, "CasterDrop"), 0.0f, 65536.0f);
+	maps.SkipCoveredCasters = ShadowSettingI(ShadowMapsSection, "SkipCoveredCasters") != 0;
 
 	if (quality < 0 || quality > 3) {
 		// Custom: Mode and Format are not read any more; PCF is forced below.
@@ -288,9 +287,30 @@ bool ShadowsExteriorEffect::UpdateSettingsFromQuality(int quality) {
 		maps.MSAA = 0;	// (PCF: below)
 		maps.Prefilter = 0;	// (PCF: below)
 
+		// UNOFFICIAL 2026-11-04 (from Physically-Based-Reloaded): one [Shaders.ShadowsExteriors.Forms] for the four sun cascades, with the
+		// per-cascade differences built in (it was FormsNear / FormsMiddle / FormsFar / FormsLod): distant LOD objects only in the Far and
+		// Lod cascades (hidden up close anyway), ten times MinRadius there, and the Lod cascade without actors, activators, furniture and
+		// misc objects (too small to show that far out).
+		const char* forms = "Shaders.ShadowsExteriors.Forms";
 		for (int type = 0; type <= MapLod; type++) {
-			const std::string section = std::string("Shaders.ShadowsExteriors.Forms") + CascadeFormsSuffix(type);
-			ReadShadowForms(ShadowMaps[type].Forms, section.c_str());
+			FormsStruct& f = ShadowMaps[type].Forms;
+			const bool farCascade = type >= MapFar;
+			const bool lod = type == MapLod;
+			f.AlphaEnabled = ShadowSettingI(forms, "AlphaEnabled");
+			f.Activators = !lod && ShadowSettingI(forms, "Activators");
+			f.Actors = !lod && ShadowSettingI(forms, "Actors");
+			f.Apparatus = ShadowSettingI(forms, "Apparatus");
+			f.Books = ShadowSettingI(forms, "Books");
+			f.Containers = ShadowSettingI(forms, "Containers");
+			f.Doors = ShadowSettingI(forms, "Doors");
+			f.Furniture = !lod && ShadowSettingI(forms, "Furniture");
+			f.Misc = !lod && ShadowSettingI(forms, "Misc");
+			f.Statics = ShadowSettingI(forms, "Statics");
+			f.Terrain = ShadowSettingI(forms, "Terrain");
+			f.Trees = ShadowSettingI(forms, "Trees");
+			f.Lod = farCascade && ShadowSettingI(forms, "Lod");
+			f.MinRadius = ShadowSettingF(forms, "MinRadius") * (farCascade ? 10.0f : 1.0f);
+			f.OrigMinRadius = f.MinRadius;
 		}
 	}
 	else {
@@ -896,11 +916,17 @@ void ShadowsExteriorEffect::RegisterTextures() {
 	ShadowMaps[MapOrtho].ShadowMapResolution = (float)orthoRes;
 	ShadowMaps[MapOrtho].ShadowMapInverseResolution = 1.0f / (float)orthoRes;
 
-	// the spot light maps, one per light
+	// the spot light maps, one per light. UNOFFICIAL 2026-11-04 (user: "make the flashlight shadows softer, and higher quality"): their own
+	// size, [Shaders.Flashlight.Deferred] ShadowMapSize (restart; missing key: 2048), not the lamp cube faces' (ShadowCubeMapSize: 256 for
+	// the user, a blocky flashlight shadow)
+	SettingManager::Configuration::ConfigNode spotNode;
+	const int spotWanted = TheSettingManager->Config.FillNode(&spotNode, "Shaders.Flashlight.Deferred", "ShadowMapSize") ? spotNode.IntValue : 2048;
+	SpotMapSize = spotWanted >= 4096 ? 4096 : spotWanted >= 2048 ? 2048 : spotWanted >= 1024 ? 1024 : 512;
 	for (int light = 0; light < SpotLightsMax; light++) {
 		const std::string name = "TESR_ShadowSpotlightBuffer" + std::to_string(light);
-		TheTextureManager->InitTexture(name.c_str(), &Textures.ShadowSpotlightTexture[light], &Textures.ShadowSpotlightSurface[light], cubeSize, cubeSize, D3DFMT_R32F);
+		TheTextureManager->InitTexture(name.c_str(), &Textures.ShadowSpotlightTexture[light], &Textures.ShadowSpotlightSurface[light], SpotMapSize, SpotMapSize, D3DFMT_R32F);
 	}
+	Logger::Log("UNOFFICIAL flashlight shadow map: %u x %u", SpotMapSize, SpotMapSize);
 
 	// Point-light cube maps: the screen-space passes' 12 here, the rest on first use (EnsureCubeMap).
 	CubeMapSizeCreated = cubeSize;
@@ -930,8 +956,10 @@ void ShadowsExteriorEffect::RegisterTextures() {
 		TheTextureManager->RegisterTexture(name.c_str(), (IDirect3DBaseTexture9**)&Textures.ShadowCubeMapTexture[slot]);
 	}
 	// The stencil surface for drawing cube maps: as large as the largest cube (a smaller cube's faces draw into its top-left part).
-	const UINT cubeDepthSize = (std::max)((UINT)cubeSize, NearCubeSize);
-	TheRenderManager->device->CreateDepthStencilSurface(cubeDepthSize, cubeDepthSize, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, true, &Textures.ShadowCubeMapDepthSurface, NULL);
+	const UINT cubeDepthSize = (std::max)((std::max)((UINT)cubeSize, NearCubeSize), SpotMapSize);	// (2026-11-04: and the flashlight's map)
+	// UNOFFICIAL 2026-11-04 not discardable: after the flashlight's map (drawn last) it keeps that map's depth for the GPU grass strands drawn
+	// into it later in the frame (GpuGrass.cpp, depth-tested against it)
+	TheRenderManager->device->CreateDepthStencilSurface(cubeDepthSize, cubeDepthSize, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, false, &Textures.ShadowCubeMapDepthSurface, NULL);
 
 	// UNOFFICIAL 2026-10-23 CharacterShadowMap: the shaders get the lookup only when the setting is on at startup (CHARACTER_SHADOW_MAP in
 	// ShaderRecord::BuildDefines, read from the same setting). The texture is made now so every shader binds TESR_CharShadowMap from its first draw.
@@ -1474,6 +1502,26 @@ D3DXMATRIX ShadowsExteriorEffect::GetCascadeViewProj(ShadowMapSettings* ShadowMa
 		const D3DXVECTOR3 farStep = edge * sliceFar;
 		corners[i + 4] = corners[i] + farStep;
 		corners[i] = corners[i] + nearStep;
+	}
+
+	// UNOFFICIAL 2026-11-04 (from Physically-Based-Reloaded) the view slice's four sides, for leaving out casters whose shadow cannot reach
+	// what this cascade shades (ShadowManager::SunCastMask): facing inward, pushed out by CasterMargin. Its depth range is the cascade
+	// sphere (ShadowMapCascadeCenterRadius), since Shadow.hlsl picks a cascade by distance to its centre, not by depth.
+	{
+		static const int sides[4][3] = { { 0, 1, 5 }, { 1, 2, 6 }, { 2, 3, 7 }, { 3, 0, 4 } };
+		D3DXVECTOR3 middle(0.0f, 0.0f, 0.0f);
+		for (auto i = 0; i < 8; ++i) middle += corners[i];
+		middle *= 1.0f / 8.0f;
+		ShadowMap->CasterPlanesValid = true;
+		for (int p = 0; p < 4; p++) {
+			D3DXPLANE& plane = ShadowMap->CasterPlanes[p];
+			D3DXPlaneFromPoints(&plane, &corners[sides[p][0]], &corners[sides[p][1]], &corners[sides[p][2]]);
+			const float length = sqrtf(plane.a * plane.a + plane.b * plane.b + plane.c * plane.c);
+			if (!(length > 1e-6f)) { ShadowMap->CasterPlanesValid = false; break; }
+			plane /= length;
+			if (D3DXPlaneDotCoord(&plane, &middle) < 0.0f) plane = -plane;
+			plane.d += Settings.ShadowMaps.CasterMargin;
+		}
 	}
 
 	// The centre of the slice.

@@ -1,5 +1,6 @@
 #include "ShaderWarmUp2.h"	// UNOFFICIAL 2026-10-18: ShaderWarmUp2 device hooks go in with the render manager
 #include "DxvkCompute.h"	// UNOFFICIAL 2026-10-23 (NVR DXVK)
+#include "DxvkLoader.h"	// UNOFFICIAL 2026-11-04: the d3d9.dll in use may be a mod's (DxvkLoader.h)
 #include "RtLampShadows.h"	// UNOFFICIAL 2026-10-28 RT lamp shadows
 #include "MixCheck.h"	// UNOFFICIAL 2026-10-30 NvrDxvkMixCheck
 #include "TestTools.h"
@@ -177,14 +178,16 @@ void NvrDepthWarningTick() {
 	InterfaceManager->ShowMessage("Vegas Shaders: no depth under this DXVK on NVIDIA. Add d3d9.customVendorId = 1002 to dxvk.conf (see the Vegas Shaders log).");
 }
 
-// True when the d3d9.dll the process loads has the ProductName "DXVK".
+// True when the d3d9.dll the game's Direct3D comes from has the ProductName "DXVK".
 static bool getDXVKPresent() {
+	char path[MAX_PATH] = {};
+	if (!GetModuleFileNameA(DxvkLoader::Runtime(), path, MAX_PATH)) return false;
 	DWORD ignored = 0;
-	const DWORD infoSize = GetFileVersionInfoSizeA("d3d9.dll", &ignored);
+	const DWORD infoSize = GetFileVersionInfoSizeA(path, &ignored);
 	if (infoSize == 0) return false;
 
 	std::vector<char> info(infoSize);
-	if (!GetFileVersionInfoA("d3d9.dll", ignored, infoSize, info.data())) {
+	if (!GetFileVersionInfoA(path, ignored, infoSize, info.data())) {
 		Logger::Log("couldn't find file version info");
 		return false;
 	}
@@ -215,7 +218,7 @@ const char* RenderManager::D3D9RuntimeDescription() {
 	static char text[MAX_PATH + 64] = {};
 	if (!text[0]) {
 		char path[MAX_PATH] = {};
-		HMODULE module = GetModuleHandleA("d3d9.dll");
+		HMODULE module = DxvkLoader::Runtime();
 		if (module) GetModuleFileNameA(module, path, MAX_PATH);
 		_snprintf_s(text, sizeof(text), _TRUNCATE, "%s (%s)", getDXVKPresent() ? "DXVK" : "system Direct3D 9 or another wrapper", path[0] ? path : "path unknown");
 	}

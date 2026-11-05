@@ -45,7 +45,6 @@
 #include "Hooks/ShaderIO.h"
 #include "Hooks/Shaders.h"
 #include "Hooks/Render.h"
-#include "Hooks/MaterialPass.h"
 #include "Hooks/Shadows.h"
 #include "Hooks/FlyCam.h"
 #include "../Core/ReShadeIntegration.h"

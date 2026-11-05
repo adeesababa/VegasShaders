@@ -27,6 +27,7 @@ public:
 		bool	JitterFix;       // UNOFFICIAL 2026-10-31: positions rebuilt on the ray the jittered depth was drawn on (SunFar.fx.hlsl)
 		bool	SkipCascadeCheck;	// UNOFFICIAL 2026-10-31, test only: no re-read of the sun cascades (the clouds darken their shadows too)
 		bool	OldSunModel;     // UNOFFICIAL 2026-10-25, test only: the light split as before that day's fix (SunFar.fx.hlsl)
+		bool	PlantShadows;    // UNOFFICIAL 2026-11-04 [Shaders.VolumetricClouds.Main] PlantShadows (off: the factor is 1 on plants, SunFar.cpp UnshadePlants)
 	};
 	SettingsStruct	Settings = {};
 

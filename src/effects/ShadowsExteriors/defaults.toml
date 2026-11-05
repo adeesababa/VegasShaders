@@ -62,66 +62,19 @@ MaxJumpAngle = 5.0					 # [5.0-30.0] A maximum angle difference for which smooth
 GlideSeconds = 3.0                   # [0.0-10.0] UNOFFICIAL: real seconds each step of the sun slides over, instead of all sun shadows jumping at once about every in-game hour. Bigger jumps (waiting, sleeping, loading) stay instant. 0 = the original behaviour.
 CrossFade = false                    # UNOFFICIAL, needs a game restart: instead of turning the shadows over GlideSeconds, fade from the old shadows to the new ones over that time, so shadow edges never crawl while the sun moves. Costs a second copy of the shadow maps in video memory (about 72 MB at the default CascadeResolution) and a little GPU time during each fade only. Needs ForwardShadows (the default).
 
-[_Shaders.ShadowsExteriors.FormsNear]
+[_Shaders.ShadowsExteriors.Forms]
+# What casts sun shadows, for all four cascades. The farthest one also leaves out actors, activators, furniture and misc objects.
 Activators = true                    # Whether to include objects with "Activator" flag when rendering shadowmaps.
-Actors = true                        # Whether to include objects with "Actors" flag when rendering shadowmaps.
+Actors = true                        # Whether to include actors in the shadows (never in the farthest cascade).
 AlphaEnabled = true                  # Whether to take into account alpha of objects when rendering shadowmaps.
 Apparatus = false                    # Whether to include objects with "Apparatus" flag when rendering shadowmaps.
 Books = false                        # Whether to include objects with "Books" flag when rendering shadowmaps.
 Containers = true                    # Whether to include objects with "Containers" flag when rendering shadowmaps.
 Doors = true                         # Whether to include objects with "Doors" flag when rendering shadowmaps.
 Furniture = true                     # Whether to include objects with "Furniture" flag when rendering shadowmaps.
-Lod = false                          # Whether to include objects with "Lod" flag when rendering shadowmaps.
-MinRadius = 1.0                      # Whether to include objects with a radius of less than x pixels on the screen in the shadowmaps.
+Lod = true                           # Whether to include distant LOD objects (only in the two farthest cascades; hidden up close anyway).
+MinRadius = 1.0                      # Objects smaller than this many pixels on screen are left out of the shadows (ten times this in the two farthest cascades).
 Misc = true                          # Whether to include objects with misc flags when rendering shadowmaps.
-Statics = true                       # Whether to include objects with "Statics" flag when rendering shadowmaps.
-Terrain = true                       # Whether to include Terrain when rendering shadowmaps.
-Trees = true                         # Whether to include Trees when rendering shadowmaps.
-
-[_Shaders.ShadowsExteriors.FormsMiddle]
-Activators = true                    # Whether to include objects with "Activator" flag when rendering shadowmaps.
-Actors = true                        # Whether to include objects with "Actors" flag when rendering shadowmaps.
-AlphaEnabled = true                  # Whether to take into account alpha of objects when rendering shadowmaps.
-Apparatus = false                    # Whether to include objects with "Apparatus" flag when rendering shadowmaps.
-Books = false                        # Whether to include objects with "Books" flag when rendering shadowmaps.
-Containers = true                    # Whether to include objects with "Containers" flag when rendering shadowmaps.
-Doors = true                         # Whether to include objects with "Doors" flag when rendering shadowmaps.
-Furniture = true                     # Whether to include objects with "Furniture" flag when rendering shadowmaps.
-Lod = false                          # Whether to include objects with "Lod" flag when rendering shadowmaps.
-MinRadius = 1.0                      # Whether to include objects with a radius of less than x pixels on the screen in the shadowmaps.
-Misc = true                          # Whether to include objects with misc flags when rendering shadowmaps.
-Statics = true                       # Whether to include objects with "Statics" flag when rendering shadowmaps.
-Terrain = true                       # Whether to include Terrain when rendering shadowmaps.
-Trees = true                         # Whether to include Trees when rendering shadowmaps.
-
-[_Shaders.ShadowsExteriors.FormsFar]
-Activators = true                    # Whether to include objects with "Activator" flag when rendering shadowmaps.
-Actors = true                        # Whether to include objects with "Actors" flag when rendering shadowmaps.
-AlphaEnabled = true                  # Whether to take into account alpha of objects when rendering shadowmaps.
-Apparatus = false                    # Whether to include objects with "Apparatus" flag when rendering shadowmaps.
-Books = false                        # Whether to include objects with "Books" flag when rendering shadowmaps.
-Containers = true                    # Whether to include objects with "Containers" flag when rendering shadowmaps.
-Doors = true                         # Whether to include objects with "Doors" flag when rendering shadowmaps.
-Furniture = true                     # Whether to include objects with "Furniture" flag when rendering shadowmaps.
-Lod = true                           # Whether to include objects with "Lod" flag when rendering shadowmaps.
-MinRadius = 1.0                      # Whether to include objects with a radius of less than x pixels on the screen in the shadowmaps. UNOFFICIAL 2026-10-27: 1 (was 10): small objects 25-80 m away keep their sun shadow; no measurable GPU cost (desert, Goodsprings).
-Misc = true                          # Whether to include objects with misc flags when rendering shadowmaps.
-Statics = true                       # Whether to include objects with "Statics" flag when rendering shadowmaps.
-Terrain = true                       # Whether to include Terrain when rendering shadowmaps.
-Trees = true                         # Whether to include Trees when rendering shadowmaps.
-
-[_Shaders.ShadowsExteriors.FormsLod]
-Activators = false                   # Whether to include objects with "Activator" flag when rendering shadowmaps.
-Actors = false                       # Whether to include objects with "Actors" flag when rendering shadowmaps.
-AlphaEnabled = true                  # Whether to take into account alpha of objects when rendering shadowmaps.
-Apparatus = false                    # Whether to include objects with "Apparatus" flag when rendering shadowmaps.
-Books = false                        # Whether to include objects with "Books" flag when rendering shadowmaps.
-Containers = false                   # Whether to include objects with "Containers" flag when rendering shadowmaps.
-Doors = true                         # Whether to include objects with "Doors" flag when rendering shadowmaps.
-Furniture = false                    # Whether to include objects with "Furniture" flag when rendering shadowmaps.
-Lod = true                           # Whether to include objects with "Lod" flag when rendering shadowmaps.
-MinRadius = 1.0                      # Whether to include objects with a radius of less than x pixels on the screen in the shadowmaps. UNOFFICIAL 2026-10-27: 1 (was 10): small objects 25-80 m away keep their sun shadow; no measurable GPU cost (desert, Goodsprings).
-Misc = false                         # Whether to include objects with misc flags when rendering shadowmaps.
 Statics = true                       # Whether to include objects with "Statics" flag when rendering shadowmaps.
 Terrain = true                       # Whether to include Terrain when rendering shadowmaps.
 Trees = true                         # Whether to include Trees when rendering shadowmaps.
@@ -178,6 +131,10 @@ CharacterShadowMapDebug = 0          # UNOFFICIAL (2026-10-24), diagnostic view,
 SmoothFilter = false					 # UNOFFICIAL (2026-10-15), PCF shadows (Mode 3): a smoother, slightly wider filter on the sun shadow maps (a 4 x 4 cubic B-spline instead of 3 x 3). Rounds off the stair steps that show where one shadow-map texel covers several pixels: shadows on your character in third person, a low sun across steep surfaces. Costs a little (16 compares per lookup instead of 9).
 LimitFrequency = true				 # Limit the update frequency of the furthest cascade (once per four frames).
 CasterFadeMin = 0.75                 # UNOFFICIAL (2026-10-28) [0-1], live: things the game is fading (in or out with distance) cast their sun shadow only from this much of their fade on. 0.75 = as before. Found with CasterView: distant trees' leaves sit at fade 0 while drawn on screen, so they never cast, and their shadow snaps on as you come nearer. 0 = they always cast (more shadow-map draws in tree-heavy places).
+CasterCulling = true                 # UNOFFICIAL (2026-11-04, from Physically-Based-Reloaded), live: skip shadow casters whose shadow cannot fall anywhere you can see (e.g. behind you with the sun in front). Saves shadow-map draw calls. Only on the cascades redrawn every frame (not a cached, staggered or SunLayers cascade, nor the furthest one while LimitFrequency is on: turning would show what was left out).
+CasterMargin = 256.0                 # [0.0-4096.0] Game units added around the view when deciding, so shadows at the screen edges and in the cascade cross-fade bands stay.
+CasterDrop = 2048.0                  # [0.0-65536.0] How far below an object its shadow is followed (terrain dropping away). Larger is safer, culls less.
+SkipCoveredCasters = true            # UNOFFICIAL (2026-11-04, from Physically-Based-Reloaded), live: leave a caster out of a cascade when its whole shadow falls where an earlier (sharper) cascade already answers for every pixel. Nearby NPCs and objects were drawn into the near, middle and far maps alike. Same cascades as CasterCulling.
 LodSkipLoaded = true				 # Distant-object LOD inside the loaded cells casts no shadow: the full objects there already do. Removes doubled shadows and ghost shadows of swapped or removed objects, and saves drawing them twice. false: the old behaviour.
 
 [_Shaders.ShadowsExteriors.Ortho]

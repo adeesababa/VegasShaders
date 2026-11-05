@@ -8,6 +8,8 @@
 #include <cstring>
 #include <string>
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
+#include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-11-04 PlantShadows (TESR_MaterialBuffer's plant class)
+#include "../../core/ForwardCloudShadows.h"	// UNOFFICIAL 2026-11-04 ForwardCloudShadows (Active)
 
 // UNOFFICIAL 2026-10-19 SunFar: see SunFar.h and Effects\SunFar.fx.hlsl.
 
@@ -39,6 +41,7 @@ void SunFarEffect::UpdateSettings() {
 	Settings.JitterFix = TheSettingManager->GetSettingI(CloudShadowsSection, "JitterFix") != 0;
 	Settings.SkipCascadeCheck = TheSettingManager->GetSettingI(CloudShadowsSection, "SkipCascadeCheck") != 0;
 	Settings.OldSunModel = TheSettingManager->GetSettingI(CloudShadowsSection, "OldSunModel") != 0;
+	Settings.PlantShadows = TheSettingManager->GetSettingI("Shaders.VolumetricClouds.Main", "PlantShadows") != 0;
 }
 
 void SunFarEffect::RegisterConstants() {
@@ -104,7 +107,8 @@ void SunFarEffect::UpdateConstants() {
 	VolumetricCloudsEffect* volumetric = TheShaderManager->Effects.VolumetricClouds;
 	const bool volumetricShadows = volumetric && volumetric->Enabled && volumetric->Constants.Extra.x > 0.0f;
 	Constants.Volume = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
-	if (volumetric && TheShaderManager->GameState.isExterior) {
+	// UNOFFICIAL 2026-11-04 ForwardCloudShadows: the surface shaders took the clouds' shadow this frame: not here as well.
+	if (volumetric && TheShaderManager->GameState.isExterior && !ForwardCloudShadows::Active) {
 		const float strength = volumetric->ShadowStrengthForSunFar();
 		if (strength > 0.0f) Constants.Volume = D3DXVECTOR4(strength, (std::max)(volumetric->Constants.Extra.y, 1000.0f),
 			(std::max)(volumetric->Constants.Detail.z, 256.0f), volumetric->Constants.Shape.x);
@@ -247,6 +251,67 @@ void SunFarEffect::BeforeDraw(IDirect3DDevice9* Device) {
 	hazard.lastStates = text;
 }
 
+// UNOFFICIAL 2026-11-04 [Shaders.VolumetricClouds.Main] PlantShadows off (user: the bushes should look under the clouds as with them off):
+// the factor drawn into Target is put back to 1 by each pixel's plant share, from MaterialBuffer (class 5: the textures the plant wind's
+// Keywords name). The buffer is resolved from the game's MSAA as an average, its alpha the share of samples an NVR template wrote: r - 4a
+// is a pixel's plant share where plants meet the land or the sky (land 4, plants 5); against other objects (1-3) it reads 0, and skin (6) is
+// left out. Only rgb: the sun's share in alpha (the Specular effect's) stays.
+static void UnshadePlants(IDirect3DDevice9* Device, IDirect3DSurface9* Target) {
+	static IDirect3DPixelShader9* shader = nullptr;
+	static IDirect3DStateBlock9* state = nullptr;
+	static bool failed = false, told = false;
+	IDirect3DTexture9* material = CapturedNormals::MaterialTexture;
+	if (failed || !Target || !material || CapturedNormals::MaterialData.x < 0.5f) return;
+	D3DSURFACE_DESC t = {}, m = {};
+	if (FAILED(Target->GetDesc(&t)) || FAILED(material->GetLevelDesc(0, &m)) || t.Width != m.Width || t.Height != m.Height) return;
+	if (!shader) {
+		static const char* source = "sampler2D M : register(s0); float4 main(float2 uv : TEXCOORD0) : COLOR0 { float4 c = tex2D(M, uv); "
+			"return float4(1, 1, 1, c.r <= 5.5 * c.a ? saturate(c.r - 4.0 * c.a) : 0.0); }";
+		ID3DXBuffer* code = nullptr; ID3DXBuffer* errors = nullptr;
+		if (FAILED(D3DXCompileShader(source, (UINT)strlen(source), NULL, NULL, "main", "ps_3_0", 0, &code, &errors, NULL)) || !code ||
+			FAILED(Device->CreatePixelShader((const DWORD*)code->GetBufferPointer(), &shader))) shader = nullptr;
+		if (!shader) Logger::Log("UNOFFICIAL sun far shadows: PlantShadows' pass failed (%s): plants shaded as before", errors ? (const char*)errors->GetBufferPointer() : "?");
+		if (errors) errors->Release();
+		if (code) code->Release();
+		if (!shader) { failed = true; return; }
+	}
+	if (!state && FAILED(Device->CreateStateBlock(D3DSBT_ALL, &state))) { failed = true; return; }
+	state->Capture();
+	IDirect3DSurface9* targets[4] = {};
+	IDirect3DSurface9* depth = nullptr;
+	for (DWORD i = 0; i < 4; i++) Device->GetRenderTarget(i, &targets[i]);
+	Device->GetDepthStencilSurface(&depth);
+	Device->SetRenderTarget(0, Target);
+	for (DWORD i = 1; i < 4; i++) if (targets[i]) Device->SetRenderTarget(i, nullptr);
+	Device->SetDepthStencilSurface(nullptr);
+	static const D3DRENDERSTATETYPE kStates[] = { D3DRS_ZENABLE, D3DRS_ZWRITEENABLE, D3DRS_STENCILENABLE, D3DRS_ALPHATESTENABLE, D3DRS_ALPHABLENDENABLE,
+		D3DRS_SRCBLEND, D3DRS_DESTBLEND, D3DRS_BLENDOP, D3DRS_SEPARATEALPHABLENDENABLE, D3DRS_CULLMODE, D3DRS_COLORWRITEENABLE, D3DRS_SCISSORTESTENABLE,
+		D3DRS_CLIPPLANEENABLE, D3DRS_FOGENABLE, D3DRS_SRGBWRITEENABLE };
+	const DWORD want[] = { D3DZB_FALSE, FALSE, FALSE, FALSE, TRUE, D3DBLEND_SRCALPHA, D3DBLEND_INVSRCALPHA, D3DBLENDOP_ADD, FALSE, D3DCULL_NONE, 0x7, FALSE, 0, FALSE, FALSE };
+	for (unsigned i = 0; i < sizeof(kStates) / sizeof(kStates[0]); i++) Device->SetRenderState(kStates[i], want[i]);
+	const D3DVIEWPORT9 full = { 0, 0, t.Width, t.Height, 0.0f, 1.0f };
+	Device->SetViewport(&full);
+	Device->SetTexture(0, material);
+	Device->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+	Device->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+	Device->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+	Device->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+	Device->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+	Device->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
+	Device->SetVertexShader(nullptr);
+	Device->SetPixelShader(shader);
+	Device->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+	const float x0 = -0.5f, y0 = -0.5f, x1 = (float)t.Width - 0.5f, y1 = (float)t.Height - 0.5f;
+	const float quad[4][6] = { { x0, y0, 0.0f, 1.0f, 0.0f, 0.0f }, { x1, y0, 0.0f, 1.0f, 1.0f, 0.0f }, { x0, y1, 0.0f, 1.0f, 0.0f, 1.0f }, { x1, y1, 0.0f, 1.0f, 1.0f, 1.0f } };
+	Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(quad[0]));
+	for (DWORD i = 0; i < 4; i++) if (i == 0 || targets[i]) Device->SetRenderTarget(i, targets[i]);
+	Device->SetDepthStencilSurface(depth);
+	state->Apply();	// (the viewport and everything else; SetRenderTarget reset the viewport)
+	for (DWORD i = 0; i < 4; i++) if (targets[i]) targets[i]->Release();
+	if (depth) depth->Release();
+	if (!told) { told = true; Logger::Log("UNOFFICIAL sun far shadows: PlantShadows off: plants keep their sunlight (MaterialBuffer's plant class)"); }
+}
+
 void SunFarEffect::RenderFactor(IDirect3DDevice9* Device, IDirect3DSurface9* Scene) {
 	Constants.Apply.x = 0.0f;
 	VolumetricCloudsEffect* volumetric = TheShaderManager->Effects.VolumetricClouds;
@@ -321,6 +386,7 @@ void SunFarEffect::RenderFactor(IDirect3DDevice9* Device, IDirect3DSurface9* Sce
 		}
 	}
 	TheShaderManager->RenderEffectToRT(Surface, this, false, 0);
+	if (!Settings.PlantShadows && (Settings.DebugView == 0 || Settings.DebugView == 4)) UnshadePlants(Device, Surface);
 	if (Settings.TargetFix)
 		for (int i = 0; i < 7; i++) Device->SetRenderState(fixStates[i], savedStates[i]);
 	ClearPassTextures();

@@ -2,6 +2,7 @@
 #include "../../core/TemporalBackbone.h"	// UNOFFICIAL 2026-11-01 SharedNoise
 #include "../../core/GpuProfiler.h"
 #include "../../core/ReflMaterial.h"
+#include "../../core/FlashlightLamp.h"	// UNOFFICIAL 2026-11-04
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
 #include "../../core/RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
 #include "../../core/HiZ.h"	// UNOFFICIAL 2026-10-26 (NVR DXVK, deep/fork-hiz)
@@ -114,6 +115,7 @@ namespace {
 		for (auto* e = SceneNode->lights.start; e; e = e->next) {
 			NiPointLight* light = e->data ? e->data->sourceLight : nullptr;
 			if (!light || light->Spec.r <= 0.0f || (light->Diff.r + light->Diff.g + light->Diff.b) * light->Dimmer <= 5.0f / 255.0f) continue;
+			if (FlashlightLamp::Is(light)) continue;	// UNOFFICIAL 2026-11-04: the flashlight's game lamp (core/FlashlightLamp.h)
 			const NiPoint3& p = light->m_worldTransform.pos;
 			const float dx = p.x - eye.x, dy = p.y - eye.y, dz = p.z - eye.z;
 			const float key = sqrtf(dx * dx + dy * dy + dz * dz) - light->Spec.r;	// how far its light starts from the camera
@@ -493,6 +495,7 @@ bool ReflectionsEffect::ShouldRender() {
 	// dry ground with GroundSheen 0 (nothing else on screen reflects) it was skipped with it. RT Weapon above 0 keeps the pass on while
 	// the weapon rays can run (RtTrace's weaponFrame: the helper up, not a rect frame). Weapon 0 or RT off: as before.
 	const bool weapon = Settings.RtWeapon > 0.0f && RtWanted() && RtCoreClient::Ready() && !RenderRect::Active();
+	nothingReflects = !surfaces;
 	if (!surfaces && Settings.RtEnabled) {
 		static bool told = false;
 		if (!told) {

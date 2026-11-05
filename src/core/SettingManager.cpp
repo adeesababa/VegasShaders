@@ -444,8 +444,7 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 				parent, fromPath.c_str(), parent);
 		};
 		copyToInteriors("Shaders.Sharpening", "Main", { "Strength", "Clamp", "Offset" });
-		copyToInteriors("Shaders.Flashlight", "Main", { "ColorR", "ColorG", "ColorB", "Dimmer", "Angle", "Distance",
-			"NearFade", "HotspotLimit", "CookieStrength" });
+		// (2026-11-04: the flashlight's copy is gone with its Interiors section)
 	}
 	// 64: volumetric light got its own night look ([Shaders.VolumetricLight.Night]) in place of Main's NightStrength,
 	// which scaled the strength and the darkening by moonlight. A saved Main carries over to Night as it looked.
@@ -735,7 +734,6 @@ void SettingManager::LoadSettings() {
 		SettingsMain.Main.HDRScreenshot = GetSettingI(sec, "HDRScreenshot");
 		SettingsMain.Main.ReplaceIntro = GetSettingI(sec, "ReplaceIntro");
 		SettingsMain.Main.ForceMSAA = GetSettingI(sec, "ForceMSAA");
-		SettingsMain.Main.BlockGameMSAA = GetSettingI(sec, "BlockGameMSAA");
 		SettingsMain.Main.SkipFog = GetSettingI(sec, "SkipFog");
 		SettingsMain.Main.RenderEffects = GetSettingI(sec, "RenderEffects");
 		SettingsMain.Main.RenderPreTonemapping = GetSettingI(sec, "RenderPreTonemapping");
@@ -1009,12 +1007,6 @@ void SettingManager::LoadSettings() {
 	{
 		const char* sec = "Main.GrassMode.Main";
 		SettingsMain.GrassMode.Enabled = GetSettingI(sec, "Enabled");
-	}
-
-	{
-		const char* sec = "Main.SleepingMode.Main";
-		SettingsMain.SleepingMode.Enabled = GetSettingI(sec, "Enabled");
-		SettingsMain.SleepingMode.Mode = GetSettingI(sec, "Mode");
 	}
 
 	{
@@ -1760,6 +1752,9 @@ SettingManager::MenuSwitch SettingManager::GetMenuShaderSwitch(const char* Name)
 
 
 bool SettingManager::GetMenuShaderEnabled(const char* name) {
+	// UNOFFICIAL 2026-11-04 HudRaindrops has no section of its own: it is switched under Wetness Effects (HudRaindropsEffect::UpdateSettings).
+	if (!strcmp(name, "HudRaindrops")) return GetSettingI("Shaders.WetnessEffects.HudRaindrops", "Enabled") != 0;
+
 	char section[256];
 
 	switch (GetMenuShaderSwitch(name)) {
@@ -1794,6 +1789,7 @@ bool SettingManager::GetMenuShaderEnabled(const char* name) {
 
 
 void SettingManager::SetMenuShaderEnabled(const char* name, bool enabled) {
+	if (!strcmp(name, "HudRaindrops")) { SetSetting("Shaders.WetnessEffects.HudRaindrops", "Enabled", enabled); return; }	// UNOFFICIAL 2026-11-04 (above)
 	const MenuSwitch kind = GetMenuShaderSwitch(name);
 	if (kind == MenuSwitch::None) return;
 	char switchSection[256];
@@ -1915,7 +1911,7 @@ void SettingManager::FilterMenuSections(StringList* sections, const char* parent
 	const int quality = GetSettingI("Shaders.ShadowsExteriors.Main", "Quality");
 	if (quality < 0 || quality >= 4) return;
 
-	static const char* const advanced[] = { "FormsNear", "FormsMiddle", "FormsFar", "FormsLod", "ShadowMaps" };
+	static const char* const advanced[] = { "Forms", "ShadowMaps" };	// UNOFFICIAL 2026-11-04: one Forms for the four cascades (was FormsNear, FormsMiddle, FormsFar, FormsLod)
 	StringList shown;
 	for (const std::string& entry : *sections) {
 		bool hide = false;

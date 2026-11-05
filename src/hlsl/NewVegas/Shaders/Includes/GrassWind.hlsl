@@ -25,13 +25,29 @@
 // grass groups without a seam. Flutter: per tuft, its phase from its random size step and brightness (inst.w) and its place.
 // Only literals the grass shaders already hold (0.25 0.5 0.75 2 1/128 1e-6): one more spills past c255 and the game refuses the shader.
 
-// Grass collision ([Shaders.Grass.Collision], effects/GrassCollision.cpp), shared by the card shaders and NewGrass.vso so a strand is
-// pushed as its card is at the same height: how much of the push (the grid's value, the push at a blade's tip) a point takes, by its
-// height above the tuft's root: none at the root, all of it from 50 units up (2026-10-20: it was the card's vertex alpha squared,
-// 0.02-0.5 at the tips of the Mojave's grass models, so most grass hardly moved). Written with the literals the card shaders already
-// hold (0.01, 2; the inner saturate keeps the compiler from folding them into a new one): GRASS23x002/003 have no literal slot left.
-float GrassPushWeight(float height) {
-    return saturate(saturate(height * 0.01f) * 2.0f);
+// UNOFFICIAL 2026-11-04 (from Physically-Based-Reloaded; in place of Grass Collision, whose version is in VegasShaders-backups/
+// before_grass_port_20261104) the player walking through the grass ([Shaders.Grass.Interaction], effects/Grass/Grass.cpp): There Stands
+// The Grass NVSE's grass patch (features/GrassBend.cpp, Into-The-Rough), the same arithmetic. Each vertex is pushed away from the bend
+// origin, horizontally, by (1 - distance / reach)^2 times the strength per unit of height times its own height above its tuft's root --
+// so the root stays planted and every blade leans by the same angle. The distance is measured at the vertex itself (with 1 added under
+// the root, as TSTG does, so it never divides by zero). rootWorld: the tuft's root, camera-relative; offset: the vertex from its root,
+// after the wind; bend: xyz the origin (camera-relative), w 1 / the reach; push: the strength per unit of height. reached: the falloff.
+float3 GrassBend(float3 rootWorld, float3 offset, float4 bend, float push, out float reached) {
+    float2 away = rootWorld.xy + offset.xy - bend.xy;
+    float inverse = rsqrt(dot(away, away) + 1.0f);
+    float falloff = max(1.0f - bend.w / inverse, 0.0f);
+    falloff *= falloff;
+    reached = falloff;
+    return float3(away * inverse * (falloff * push * max(offset.z, 0.0f)), 0.0f);
+}
+
+// UNOFFICIAL 2026-11-04 (from Physically-Based-Reloaded) [Shaders.Grass.LOD]: how much of a tuft shows by its size on screen (after
+// Community Shaders' Grass Optimizations): its height in pixels is the mesh's radius times its scale over its depth, gone below
+// MinPixels (raised for detailed meshes), full FadePixels above that. PBR NVR's per-draw and per-frame terms are folded per shape on
+// the CPU (GrassShaders::SetBatchConstants): batch.x radius x pixels per unit / FadePixels, batch.y MinPixels x detail / FadePixels.
+// 1 when off, or for a shape whose size did not come (batch.x 0).
+float GrassLODFade(float4 rootClip, float height, float4 batch) {
+    return batch.x > 0.0f ? saturate(batch.x * height / max(rootClip.w, 1.0f) - batch.y) : 1.0f;
 }
 
 // The camera-relative world position of a point from its clip position, for the card shaders' collision lookup (2026-10-20, user:

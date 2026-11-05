@@ -16,7 +16,8 @@ float4 TESR_DustColor : register(c193);	// rgb the dust's colour (linear), w Pat
 float4 TESR_DustOrigin : register(c195);	// xyz the camera's world position (the pattern stays on the world as the camera moves)
 // Per draw, not by name (core/DustDraw.h): x 1 = a static mesh in the world scene; 0 = skinned (people, creatures, armour, the
 // first-person arms), first person, reflections. A pixel shader cannot tell skinned from static by itself (SKIN is a vertex define).
-float4 NVR_DustDraw : register(c169);
+bool NVR_DustDraw : register(b14);	// (2026-11-05: was c169.x, which ForwardCloudShadows' NVR_CloudSun took (X4500 with both on); every float
+									// register below ps_3_0's c224 is taken: a bool register, as SmoothCutouts' b15)
 
 // A hash without sin (after Dave Hoskins' hash12, MIT): steady for the large cell numbers of world positions.
 float DustHash(float2 p) {
@@ -36,8 +37,8 @@ float DustNoise(float2 p) {
 
 // albedo: the surface colour as it goes into the lighting; worldNormal: its world-space normal (z up); cameraRelative: the pixel's
 // camera-relative world position; valid: the position came from this build's vertex shader.
-float3 DustCover(float3 albedo, float3 worldNormal, float3 cameraRelative, bool valid) {
-    [branch] if (TESR_DustData.x <= 0.0f || NVR_DustDraw.x < 0.5f || !valid) return albedo;
+float3 DustCoverDraw(float3 albedo, float3 worldNormal, float3 cameraRelative, bool valid) {
+    [branch] if (TESR_DustData.x <= 0.0f || !valid) return albedo;
     const float up = smoothstep(TESR_DustData.z, TESR_DustData.w, worldNormal.z);
     [branch] if (up <= 0.0f) return albedo;
     const float2 w = (cameraRelative.xy + TESR_DustOrigin.xy) * TESR_DustData.y;
@@ -47,4 +48,10 @@ float3 DustCover(float3 albedo, float3 worldNormal, float3 cameraRelative, bool 
     // a third of the texture's own light and dark kept under the dust (a coat, not paint)
     const float detail = luma(albedo) / max(luma(TESR_DustColor.rgb), 1e-3f);
     return lerp(albedo, TESR_DustColor.rgb * lerp(1.0f, clamp(detail, 0.25f, 2.0f), 0.33f), cover);
+}
+
+float3 DustCover(float3 albedo, float3 worldNormal, float3 cameraRelative, bool valid) {
+    float3 result = albedo;
+    if (NVR_DustDraw) result = DustCoverDraw(albedo, worldNormal, cameraRelative, valid);	// a bool register: a static branch round it all
+    return result;
 }

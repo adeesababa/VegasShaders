@@ -184,6 +184,9 @@
     #define PBR_SPEC_FADE
 #endif
 #include "includes/Object.hlsl"	// shared code
+#ifdef PS
+    #define SHADOW_CLOUD_IN 1   // UNOFFICIAL 2026-11-04 ForwardCloudShadows (Includes/Shadow.hlsl): the clouds' shadow on the sun term (compiled in only when on at startup)
+#endif
 #include "includes/Shadow.hlsl"	// shared code
 // 2026-11-04 dust on top surfaces ([Shaders.PBR.Dust], Includes/ObjectDust.hlsl): compiled in only when on at startup (DUST_ON).
 #ifndef DUST_ON
@@ -192,6 +195,19 @@
 #if defined(PS) && DUST_ON
 #include "includes/ObjectDust.hlsl"
 #endif
+// UNOFFICIAL 2026-11-04 Wetness Effects (Includes/Wetness.hlsl; as ObjectTemplate.hlsl): the sunlit passes of the material get the water
+// layer. c146-c157 (the sun cross-fade's), the cover map on s12 (free outdoors).
+#if defined(PS) && defined(WETNESS_EFFECTS) && FORWARD_SHADOWS && !SUN_CROSSFADE && !(defined(INTERIOR_SHADOWS) && INTERIOR_SHADOWS) && \
+    !defined(DIFFUSE) && !defined(POINT) && !defined(ONLY_SPECULAR) && !defined(PAR_LAMP_FIRST)
+    #define PARALLAX_WETNESS
+    #define WETNESS_ORTHO_REG s12
+    #include "includes/Wetness.hlsl"
+#endif
+// UNOFFICIAL 2026-11-04 Wetness Effects' HudRaindrops (includes/HudRain.hlsl, as ObjectTemplate.hlsl; compiled in only when on at startup).
+#if defined(PS) && defined(HUD_RAIN_ON) && HUD_RAIN_ON
+    #define HUD_RAIN 1
+#endif
+#include "includes/HudRain.hlsl"
 #include "includes/CapturedNormals.hlsl"	// UNOFFICIAL 2026-10-28 CapturedNormals (COLOR3, see there)
 // UNOFFICIAL 2026-11-03 SmoothCutouts (Includes/AlphaHash.hlsl): the alpha test hashed under TAA / FSR / DLSS.
 #if defined(PS) && defined(ALPHA_HASH_ON) && defined(PAR_FULL) && defined(PAR_TOGGLES)
@@ -631,15 +647,24 @@ PS_OUTPUT main(PS_INPUT pin)
     gy = ddy(pin.texc.xy);
     
     float2 offsetUV = getParallaxCoords(viewDist, pin.texc.xy, gx, gy, viewDir.xyz, HeightMap);
+    // UNOFFICIAL 2026-11-04: rain drops (includes/HudRain.hlsl), placed on the surface itself: the relief flattened under them.
+    HudRain(pin.texc.xy, pin.shadowWorldPos.xyz, PAR_WP_PRESENT(pin.shadowWorldPos.w));
+    offsetUV = lerp(offsetUV, pin.texc.xy, hudRainStrength) + hudRainOffset;
 
     #ifdef PAR_AMBIENT
         float4 albedoPx = tex2D(BaseMap, offsetUV.xy);
-    
+        #ifdef PARALLAX_WETNESS
+            const float3 wetDryTexture = albedoPx.rgb;	// UNOFFICIAL 2026-11-04 Wetness Effects: the colour a light-only pass's light is multiplied by later
+        #endif
+
         #ifdef ONLY_LIGHT	// light-only pass
             albedoPx.rgb = 1.f;
         #endif
     #else
         float4 albedoPx = 1.f;
+        #ifdef PARALLAX_WETNESS
+            const float3 wetDryTexture = 1.0f;
+        #endif
     #endif
     
     // Vertex color.
@@ -651,7 +676,7 @@ PS_OUTPUT main(PS_INPUT pin)
             albedoPx.xyz = albedoPx.xyz * pin.vertexColor.rgb;
         #endif
     #endif
-    albedoPx.rgb = LinColor(albedoPx.rgb);	// UNOFFICIAL linear litSum: the albedo decoded for the litSum
+    albedoPx.rgb = LinColor(HudRainAlbedo(albedoPx.rgb));	// UNOFFICIAL linear litSum: the albedo decoded for the litSum (darker under the rain drops)
     
     // Shadows.
     float3 sunAndProj = 1.0;
@@ -701,14 +726,27 @@ PS_OUTPUT main(PS_INPUT pin)
         litSum = albedoPx.rgb;
     #else
         float4 nmap = tex2D(NormalMap, offsetUV.xy);
-        nmap.xyz = normalize(expand(nmap.xyz));
+        nmap.xyz = HudRainNormal(normalize(expand(nmap.xyz)));	// UNOFFICIAL: the rain drops' tilt
 
         #ifdef RMAOS
             RmaosRead(offsetUV.xy);	// UNOFFICIAL _rmaos map (Object.hlsl)
         #endif
-        float rough = getRoughness(nmap.a);
+        float rough = HudRainRoughness(getRoughness(nmap.a));	// UNOFFICIAL: wet under the rain drops
         SetDiffuseEnergyKeep(nmap.xyz, pin.viewDir.xyz, rough);	// UNOFFICIAL 2026-10-16 EnergySplit (Includes/PBR.hlsl): once per pixel, every lamp reuses it
-    
+
+        #ifdef PARALLAX_WETNESS	// UNOFFICIAL 2026-11-04 Wetness Effects: the albedo darkened before any light sees it (as ObjectTemplate.hlsl)
+            Wetness wet = (Wetness)0;
+            wet.roughness = 1.0f;
+            wet.normal = sunShadowNormal;
+            [branch] if (shadowWorldPosValid > 0.0f) wet = GetWetness(pin.shadowWorldPos.xyz, sunShadowNormal, sunShadowNormal);
+            const float3 wetDry = max(LinColor(wetDryTexture), 1.0f / 256.0f);
+            #ifdef ONLY_LIGHT
+                albedoPx.rgb *= WetAlbedo(wetDry, wet.darkening, 1.0f) / wetDry;
+            #else
+                albedoPx.rgb = WetAlbedo(albedoPx.rgb, wet.darkening, 1.0f);
+            #endif
+        #endif
+
         #ifndef PAR_LAMP_FIRST
             if (PAR_SELF_SHADOW)
                 litSum = getSunLighting(pin.lightDir.xyz, PSLightColor[0].rgb * sunAndProj, pin.viewDir.xyz, nmap.xyz, albedoPx.rgb, rough);
@@ -740,6 +778,19 @@ PS_OUTPUT main(PS_INPUT pin)
                 litSum += getAmbientLighting(AmbientColor.rgb, albedoPx.rgb, sunShadowNormal, shadowWorldPosValid);
             else
                 litSum += albedoPx.rgb * AmbientColor.rgb;
+        #endif
+        #ifdef PARALLAX_WETNESS	// the water film: the sun's highlight on it and its reflection, over the material
+            [branch] if (wet.gloss > 0.001f) {
+                float3 wetV = -normalize(pin.shadowWorldPos.xyz);
+                float3 film = WetSpecular(wet.normal, wetV, TESR_WetnessSun.xyz, PSLightColor[0].rgb * sunAndProj * LIN_SCALE_LIGHT, wet.roughness) * smoothstep(0.0f, 0.2f, wet.gloss);
+                float3 wetR = reflect(-wetV, wet.normal);
+                float wetHorizon = saturate(1.0f + 1.2f * dot(wetR, sunShadowNormal));
+                film += WetSkyReflection(wetR) * WetReflectance(saturate(dot(wet.normal, wetV)), wet.roughness, wet.gloss) * wetHorizon * wetHorizon;
+                #ifdef ONLY_LIGHT
+                    film /= wetDry;	// the texture pass multiplies this pass's light by the texture
+                #endif
+                litSum += film;
+            }
         #endif
     
         // Other light sources.

@@ -23,6 +23,11 @@
 #ifndef INTERIOR_SHADOWS
     #define INTERIOR_SHADOWS 0
 #endif
+// UNOFFICIAL 2026-11-04 POINT_LAMP_EXTRA(k): one more per-pixel factor on light k in POINT_SHADOW / SHADOWED (ObjectTemplate.hlsl: the
+// flashlight's game lamp's cone, core/FlashlightLamp.h); 1 unless the includer defines it before the include.
+#ifndef POINT_LAMP_EXTRA
+    #define POINT_LAMP_EXTRA(k) 1.0f
+#endif
 
 // UNOFFICIAL 2026-10-31 LampCapsCensus view ([Main.Main.Misc] LampCapsCensus at startup, development builds; ShaderRecord::BuildDefines
 // LAMP_CAPS_VIEW; docs/next/DEFERRED-RENDERING-PLAN.md stage 0b): NVR_CapsUnshadowed counts, per pixel, the lamps that light it with NO shadow
@@ -789,21 +794,22 @@ float PointShadow5(float3 worldPos, float3 normal, float att) { return PointShad
 //                                world position, 0 under a vanilla one) must be in scope -- see ObjectTemplate.hlsl.
 //   POINT_SHADOW(k, att), SHADOWED(colour, k, att): light k's shadow, light k's colour with it (att is only there to
 //                                keep the call sites readable; the lookup already used it).
+//   POINT_LAMP_EXTRA(k): UNOFFICIAL 2026-11-04 one more per-pixel factor on light k (defined at the top of this file).
 #ifdef POINT_SHADOW_SCALAR
 // UNOFFICIAL 2026-10-14 (ObjectTemplate.hlsl): float ptShadow0..5, the debug tint applied at each use (same result, fewer
 // temp registers held across the lighting).
 #define POINT_SHADOW_LOOKUP(k, att) PointShadow##k(ptWorldPos, ptNormal, (att) * ptValid)
-#define POINT_SHADOW(k, att) PointShadowFactor(ptShadow##k, NVR_PointShadowTint[k])
+#define POINT_SHADOW(k, att) (PointShadowFactor(ptShadow##k, NVR_PointShadowTint[k]) * POINT_LAMP_EXTRA(k))
 #define SHADOWED(color, k, att) ((color) * POINT_SHADOW(k, att))
 #else
 #define POINT_SHADOW_LOOKUP(k, att) PointShadowFactor(PointShadow##k(ptWorldPos, ptNormal, (att) * ptValid), NVR_PointShadowTint[k])
-#define POINT_SHADOW(k, att) ptShadow##k
-#define SHADOWED(color, k, att) ((color) * ptShadow##k)
+#define POINT_SHADOW(k, att) (ptShadow##k * POINT_LAMP_EXTRA(k))
+#define SHADOWED(color, k, att) ((color) * POINT_SHADOW(k, att))
 #endif
 
 #else
 
-#define POINT_SHADOW(k, att) 1.0f
-#define SHADOWED(color, k, att) (color)
+#define POINT_SHADOW(k, att) POINT_LAMP_EXTRA(k)
+#define SHADOWED(color, k, att) ((color) * POINT_LAMP_EXTRA(k))
 
 #endif

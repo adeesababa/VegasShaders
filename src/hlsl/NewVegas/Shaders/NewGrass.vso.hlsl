@@ -39,8 +39,6 @@ float4 NG_Prof2 : register(c255); // x Spread: how far from the clump's centre a
 // c253 is the one register this shader leaves free (its literals fill c3-c19 and c252); the clock and the card's weight line ride in
 // AddlParams.yzw (c7: the game reads only x, the grass dimmer; NewGrass.h sets y-w for its own draw and puts the game's c7 back).
 float4 NG_WindLanes : register(c253); // the field wind's lanes, as the card shaders get them: xy the gust wave vector, z gust lean, w flutter
-// UNOFFICIAL 2026-10-20 grass collision on the strands: the push round the camera (GrassCollision::Bind, as for the card shaders).
-sampler2D NVR_GrassPush : register(s0);
 
 #include "Includes/GrassWind.hlsl"
 
@@ -162,23 +160,6 @@ VS_OUTPUT main(VS_INPUT IN) {
         float rise = dot(pos - base, up);
         float weight = saturate(AddlParams.z + AddlParams.w * rise / scale.z);
         pos += GrassWindMove(inst, NG_WindLanes, AddlParams.y, sin(phase), WindData, weight, rise);
-    }
-
-    // UNOFFICIAL 2026-10-20 grass collision on the strands ([Shaders.Grass.Collision], effects/GrassCollision.cpp; user: 'not doing
-    // anything i can see': only the cards took the push, and with NewGrass the strands round each clump hid it). The same push the card
-    // takes at the same height (GRASS23x00*.vso, GrassPushWeight; read at the tuft's root), from the same texture (vertex sampler 0) round the
-    // camera: AlphaParam.xy = the camera's world xy (its centre), AmbientColor.w = 1 / its width (0: off), both set by NewGrass.h for
-    // this draw only (the game reads neither there; its c5 and c6 are put back after the draw).
-    [branch] if (AmbientColor.w > 0.0f) {
-        float2 pushUV = (inst.xy - AlphaParam.xy) * AmbientColor.w;   // at the tuft's root, as the card (its whole clump leans as one)
-        [branch] if (max(abs(pushUV.x), abs(pushUV.y)) < 0.5f) {
-            float rise = dot(pos - base, up);
-            float2 push = tex2Dlod(NVR_GrassPush, float4(pushUV + 0.5f, 0.0f, 0.0f)).xy * GrassPushWeight(rise);
-            [branch] if (dot(push, push) > 0.0f) {
-                float h = max(rise, 1e-6f);
-                pos += float3(push, -min(dot(push, push) * 0.5f / h, h));
-            }
-        }
     }
 
     float3 normal = normalize(cross(sideVec, tangent));

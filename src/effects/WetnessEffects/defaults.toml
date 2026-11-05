@@ -1,0 +1,58 @@
+[_Shaders.WetnessEffects.Status]
+Enabled = false                     # UNOFFICIAL (2026-11-04), restart: Wetness Effects (from Physically-Based-Reloaded, after Community Shaders), in place of WetWorld's screen-space wet pass: in the rain surfaces darken and gain a glossy water film, puddles form on flat ground, drops ripple on the land, nothing gets wet under cover. Needs the sun cross-fade off ([Shaders.ShadowsExteriors.SunSmoothing] CrossFade). While on, WetWorld draws nothing (its rain tracking still drives the weapon drops, the persistent wet cover and PBR's rain).
+
+[_Shaders.WetnessEffects.Main]
+MaxRainWetness = 1.0                # [0.0-2.5] Rain Wetness: how wet surfaces open to the sky get in the rain (darker, with a glossy water film).
+MaxPuddleWetness = 1.5              # [0.0-6.0] Puddle Wetness: how much the puddles on flat ground fill.
+PuddleRadius = 1.0                  # [0.1-3.0] Puddle size.
+PuddleMaxAngle = 0.95               # [0.6-1.0] How flat ground must be to hold a puddle (the up component of its normal).
+PuddleMinWetness = 0.85             # [0.0-1.0] The wetness at which puddles start to form.
+MinRainWetness = 0.65               # [0.0-0.9] The least a surface gets wet in the rain: walls and undersides, which the rain does not fall straight on.
+WeatherTransitionSpeed = 3.0        # [0.2-8.0] How fast things get wet when the rain starts and dry after it stops (3: about 20 seconds; puddles take three times as long to dry).
+HeightAwareness = 1.0               # [0.0-1.0] Terrain only: how much the land textures' height maps shape the wetness. Water runs off the ridges and gathers in the crevices, which fill with standing water first. 0 off.
+CreviceFill = 0.5                   # [0.0-1.0] Terrain only: how high the standing water rises in the crevices at full wetness, as a height (0 the deepest point of a texture, 1 its highest). Higher floods more of the ground.
+NormalAwareness = 0.5               # [0.0-1.0] Terrain only: how much the land textures' normal maps decide how wet each spot gets. The tops of bumps and stones soak like flat ground, their steep sides less, and puddles keep off rough patches. 0 goes by the ground's slope alone.
+
+[_Shaders.WetnessEffects.Raindrops]
+EnableRaindropFx = true             # Raindrop effects on the ground open to the sky near the camera (the terrain only, not objects).
+EnableRipples = true                # Ripples: rings spreading where drops land on puddles and flat wet ground.
+RaindropFxRange = 1000.0            # [0-4096] Raindrop effects up to this distance, in game units.
+RaindropGridSize = 4.0              # [1-32] Raindrop spacing in game units: at most one drop per cell this size per interval.
+RaindropInterval = 1.0              # [0.1-4.0] Seconds between drops in a cell.
+RaindropChance = 1.0                # [0.0-1.0] Chance a cell gets a drop each interval, at full rain.
+RippleStrength = 1.0                # [0.0-3.0] How strongly ripples bend the water's surface.
+RippleRadius = 1.0                  # [0.1-2.0] How far a ripple spreads, in cells.
+RippleBreadth = 0.5                 # [0.05-1.0] Width of a ripple's ring, in cells.
+RippleLifetime = 0.5                # [0.05-4.0] How long a ripple lasts, in seconds.
+
+[_Shaders.WetnessEffects.Debug]
+WetnessOverride = -1.0              # [-1.0-1.0] Force the wetness, whatever the weather (for testing: vanilla New Vegas has almost no rain). -1 off.
+PuddleOverride = -1.0               # [-1.0-1.0] Force the puddle wetness. -1 off.
+RainOverride = -1.0                 # [-1.0-1.0] Force the rain intensity (ripples). -1 off.
+ShowCover = false                   # Debug view of what counts as under cover: green open to the sky, red covered, yellow outside the top-down map (counted open), blue no map, dark blue land with no map slot.
+
+[_Shaders.WetnessEffects.HudRaindrops]
+Enabled = true                       # Raindrops on the first-person arms and weapon in the rain (after Screen Space Shaders' HUD raindrops), drawn in their own shaders so they stay on the surface: they magnify the surface under them and catch the light. They gather while you stand in the rain (not under cover) and dry off afterwards. UNOFFICIAL VegasShaders: restart to switch on (compiled into the object, parallax and skin shaders); not indoors with the lamps' shadows on. In place of Wet World's HudDrops.
+AllObjects = true                    # Drops on every object out in the rain too (buildings, props, people; never the ground itself), not just your arms and weapon. Objects under cover stay dry (the top-down ortho map).
+AnimSpeed = 1.0                      # [0-8] How fast the drops come and go while it rains (faster in heavy rain).
+Darkness = 0.3                       # [0-1] How much a drop darkens the surface under it, as water soaking in. 0 leaves the colour as it is.
+Density = 0.6                       # [0-1] How many drops gather at full wetness.
+DebugView = 0                        # [0-1] 1 keeps the arms and weapon wet without rain, to try it out.
+DropSize = 8.0                       # [0.5-64] The drop pattern's tile in game units: the biggest drops are about a fortieth of it across. Bigger gives bigger drops.
+Gloss = 0.8                          # [0-1] How glossy the drops are.
+Reflection = 2.5                     # [0-8] How strongly the drops tilt the surface's normal: their highlights and reflections.
+Refraction = 1.0                     # [0-4] How strongly the drops bend and magnify the surface under them.
+WetGloss = 0.3                       # [0-1] How much glossier the wet surface between the drops gets.
+WetTime = 20.0                       # [0.5-600] Seconds in heavy rain for the arms and weapon to wet through (lighter rain takes longer), and for the drops to dry off again after the rain, under cover or indoors.
+
+[_Shaders.WetnessEffects.Reflections]
+Enabled = true                      # Screen-space reflections on the water film and puddles: wet ground and objects reflect what is around them on screen, not just the sky. Needs Wetness Effects on and [Shaders.PBR.Main] SkylightingMode 0.
+Strength = 1.0                    # [0.0-2.0] How much of what wet surfaces reflect comes from the scene on screen instead of the sky.
+MaxDistance = 1500.0                # [100-10000] How far a reflected ray looks, in game units. Longer finds farther things, at more cost per step.
+Thickness = 30.0                    # [1-500] How far behind a surface on screen a ray may pass and still count as hitting it. Too low and thin things go missing; too high and reflections smear under objects.
+Steps = 24                          # [4-64] Ray steps per wet pixel. More is finer and costs more.
+RoughnessCutoff = 0.5               # [0.05-1.0] Water films rougher than this reflect only the sky (fading in from half of it). Puddles are the smoothest.
+EdgeFade = 0.1                      # [0.01-0.5] Reflections fade out near the screen's edges, over this share of the screen, where what they show runs out.
+MaxCameraDistance = 4000.0          # [500-50000] No screen-space reflections on wet surfaces farther than this from the camera.
+DebugView = false                   # Shows the reflections alone.
+

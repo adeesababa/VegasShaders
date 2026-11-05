@@ -2,6 +2,7 @@
 #include "LinearPreDecode.h"
 #include "GpuProfiler.h"
 #include "PointShadowForward.h"
+#include "FlashlightLamp.h"	// UNOFFICIAL 2026-11-04 (the table leaves the flashlight's game lamp out)
 #include <unordered_map>
 
 // Ported 2026-10-28 from Conor (mrfury97)'s fork onto P84 v3 (github.com/mrfury97/NVR-Unofficial-Optimized pull request 1, branch
@@ -413,6 +414,7 @@ namespace ManyLamps {
 			const ShadowSceneLight* light = e->data;
 			const NiPointLight* source = light ? light->sourceLight : nullptr;
 			if (!source || !light->bPointLight || TableIndex.count(light)) continue;
+			if (FlashlightLamp::Is(source)) continue;	// UNOFFICIAL 2026-11-04: the flashlight's game lamp (the light pass is the flashlight here)
 			float* p = t + n * 8;
 			p[0] = source->m_worldTransform.pos.x; p[1] = source->m_worldTransform.pos.y; p[2] = source->m_worldTransform.pos.z;
 			p[3] = source->Spec.r;

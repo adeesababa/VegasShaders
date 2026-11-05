@@ -5,6 +5,7 @@
 #include "../../core/GpuProfiler.h"
 #include "../../core/NewGrass.h"	// the card's model (height, width, sway) and colour ramp / silhouette, read once per grass model
 #include "../../core/GrassWind.h"	// [Shaders.Grass.Wind]: the field wind's lanes and clock (the card shaders get the same)
+#include "../../core/GrassShadows.h"	// UNOFFICIAL 2026-11-04 Enabled ([Shaders.Grass.Main] CastShadows) for the flashlight casters
 
 // UNOFFICIAL 2026-10-27 GPU grass: see GpuGrass.h. Shaders: src\hlsl\NewVegas\Compute\GpuGrass* (.glsl, Cull.comp, .vert, .frag).
 
@@ -36,18 +37,22 @@ namespace {
 	};
 	static_assert(sizeof(DrawRec) == 128, "GGDraw layout");
 
-	struct FrameBlock {				// GpuGrass.glsl GG_FRAME_BLOCK (std140, 336 bytes)
+	struct FrameBlock {				// GpuGrass.glsl GG_FRAME_BLOCK (std140, 768 bytes)
 		float rows[4][4];
 		float cam[4], sunDir[4], wind[4], fade[4], fogParam[4], fogColor[4], lod[4], shape[4], shape2[4], shape3[4], lanes[4], misc[4], look[4];
 		float planes[4][4];
+		float bend[4];				// UNOFFICIAL 2026-11-04 the player's bend (GrassShaders::Constants.Bend, BendPush)
+		float lampData[4], lampPos[8][4], lampColor[8][4];	// UNOFFICIAL 2026-11-04 the grass lamps (GrassShaders::UpdateLights)
+		float spot[3][4];			// UNOFFICIAL 2026-11-04 the deferred flashlight (GrassShaders::Spot)
+		float spotShadowRows[4][4], spotShadowShift[4], spotShadowParams[4];	// and its shadow map (GpuGrass.frag)
 	};
-	static_assert(sizeof(FrameBlock) == 336, "GG_FRAME_BLOCK layout");
+	static_assert(sizeof(FrameBlock) == 768, "GG_FRAME_BLOCK layout");
 
 	const unsigned kMaxDraws = 1024;		// grass draws a frame (the draw index has 12 bits; d30 noon has ~210 early draws)
 	const unsigned kMaxTufts = 524288;		// tufts a frame (d30 noon ~48k)
 	const unsigned kStatsBytes = 64;		// the indirect arguments (2 x 16) and the cull pass's counters
 	// Buffer slots: ONE number per buffer, never shared between a uniform and a storage buffer (they meet in the same DXVK slot).
-	enum : UINT { SlotFrame = 0, SlotTufts = 1, SlotTuftDraw = 2, SlotDraws = 3, SlotBlades = 4, SlotArgs = 5 };
+	enum : UINT { SlotFrame = 0, SlotTufts = 1, SlotTuftDraw = 2, SlotDraws = 3, SlotBlades = 4, SlotArgs = 5, SlotSpotShadow = 6 };	// (6: 2026-11-04, the fragment's image)
 
 	ID3D9NvrExtGeometry*		Geometry = nullptr;
 	ID3D9NvrExtGeometryScene*	Scene = nullptr;
@@ -55,6 +60,11 @@ namespace {
 	ID3D9NvrExtPipeline*		CullPipeline = nullptr;
 	ID3D9NvrExtPipeline*		NearPipeline = nullptr;
 	ID3D9NvrExtPipeline*		FarPipeline = nullptr;
+	ID3D9NvrExtPipeline*		NearCasterPipeline = nullptr;	// UNOFFICIAL 2026-11-04 the strands into the flashlight's shadow map (nullptr: none)
+	ID3D9NvrExtPipeline*		FarCasterPipeline = nullptr;
+	FrameBlock					LastBlock = {};		// the last strand frame's block and eye (DrawFlashlightCasters)
+	double						LastEye[3] = {};
+	UInt32						LastBlockFrame = 0;
 	ID3D9NvrExtBuffer*			FrameBuf = nullptr;
 	ID3D9NvrExtBuffer*			DrawBuf = nullptr;
 	ID3D9NvrExtBuffer*			TuftBuf = nullptr;
@@ -164,6 +174,9 @@ namespace {
 				{ 0, 3, NVR_EXT_BIND_STORAGE_BUFFER, SlotDraws,  NVR_EXT_VIEW_2D, FALSE, 0 },
 				{ 0, 4, NVR_EXT_BIND_STORAGE_BUFFER, SlotBlades, NVR_EXT_VIEW_2D, FALSE, 0 },
 			};
+			const NVR_EXT_BINDING_DESC fsBindings[] = {
+				{ 0, 6, NVR_EXT_BIND_SAMPLED_IMAGE, SlotSpotShadow, NVR_EXT_VIEW_2D, FALSE, 0 },
+			};
 			for (int isFar = 0; isFar < 2; isFar++) {
 				const std::vector<char>& vs = isFar ? farVs : nearVs;
 				NVR_EXT_GEOMETRY_PIPELINE_DESC draw = {};
@@ -174,6 +187,8 @@ namespace {
 				draw.Graphics.ColorTargetCount = 1;
 				draw.Graphics.Blend = NVR_EXT_BLEND_NONE;
 				draw.Graphics.ColorWriteMask = 1 | 2 | 4;	// RGB, as the game's grass draws (colorwrite 0x7)
+				draw.Graphics.BindingCount = _countof(fsBindings);	// UNOFFICIAL 2026-11-04 the flashlight's shadow map (GpuGrass.frag)
+				draw.Graphics.pBindings = fsBindings;
 				draw.Graphics.pDebugName = isFar ? "GpuGrassFar" : "GpuGrassNear";
 				draw.VertexBindingCount = _countof(vsBindings);
 				draw.pVertexBindings = vsBindings;
@@ -182,6 +197,27 @@ namespace {
 					return false;
 				}
 			}
+			// UNOFFICIAL 2026-11-04 the strands into the flashlight's shadow map: the GG_CASTER vertex shaders, the distance over the reach in R
+			// (no bindings in the fragment stage). Missing or refused: the strands just cast no flashlight shadow.
+			std::vector<char> casterFs, nearCasterVs, farCasterVs;
+			if (DxvkCompute::LoadSpirv("GpuGrassCaster", casterFs) && DxvkCompute::LoadSpirv("GpuGrassNearCasterVS", nearCasterVs) && DxvkCompute::LoadSpirv("GpuGrassFarCasterVS", farCasterVs)) {
+				for (int isFar = 0; isFar < 2; isFar++) {
+					const std::vector<char>& vs = isFar ? farCasterVs : nearCasterVs;
+					NVR_EXT_GEOMETRY_PIPELINE_DESC draw = {};
+					draw.Graphics.pVertexSpirv = vs.data();
+					draw.Graphics.VertexSpirvSize = (UINT)vs.size();
+					draw.Graphics.pFragmentSpirv = casterFs.data();
+					draw.Graphics.FragmentSpirvSize = (UINT)casterFs.size();
+					draw.Graphics.ColorTargetCount = 1;
+					draw.Graphics.Blend = NVR_EXT_BLEND_NONE;
+					draw.Graphics.ColorWriteMask = 1;	// R: the map's value
+					draw.Graphics.pDebugName = isFar ? "GpuGrassFarCaster" : "GpuGrassNearCaster";
+					draw.VertexBindingCount = _countof(vsBindings);
+					draw.pVertexBindings = vsBindings;
+					if (FAILED(Geometry->CreateGeometryPipeline(&draw, isFar ? &FarCasterPipeline : &NearCasterPipeline))) (isFar ? FarCasterPipeline : NearCasterPipeline) = nullptr;
+				}
+			}
+			Logger::Log("UNOFFICIAL GPU grass: flashlight shadow casters %s", NearCasterPipeline && FarCasterPipeline ? "ready" : "not made (no GpuGrass*Caster*.spv, or refused): the strands cast no flashlight shadow");
 
 			if (!MakeBuffer(sizeof(FrameBlock), NVR_EXT_BUFFER_UNIFORM | NVR_EXT_BUFFER_TRANSFER_DST, "GpuGrass frame", FrameBuf) ||
 				!MakeBuffer(kMaxDraws * sizeof(DrawRec), NVR_EXT_BUFFER_STORAGE | NVR_EXT_BUFFER_TRANSFER_DST, "GpuGrass draws", DrawBuf) ||
@@ -374,6 +410,55 @@ namespace {
 			if (GrassWind::On) memcpy(f.lanes, GrassWind::Lanes, 16);
 			f.misc[0] = GrassWind::ClockNow; f.misc[1] = (float)BladeCapacity; f.misc[2] = (float)S.DebugView;
 			f.look[0] = S.Variation; f.look[1] = S.TipLift; f.look[2] = S.Saturation;
+			// UNOFFICIAL 2026-11-04 the player's bend ([Shaders.Grass.Interaction], effects/Grass/Grass.cpp), as the card grass bends: the origin
+			// relative to this frame's camera (eye, from the grass matrix), 1 / reach, the push per unit of height (0 while nothing bends).
+			if (const GrassShaders* grass = TheShaderManager->Shaders.Grass) {
+				f.bend[0] = (float)((double)grass->BendCentre.x - eye[0]); f.bend[1] = (float)((double)grass->BendCentre.y - eye[1]);
+				f.bend[2] = 1.0f / (std::max)(grass->Interaction.Radius, 1.0f); f.bend[3] = grass->Enabled ? grass->BendPush : 0.0f;
+			}
+			// UNOFFICIAL 2026-11-04 [Shaders.Grass.Main] Brightness and NightBrightness (eased by the day / night curve, Grass.cpp), as the card
+			// grass takes them (GRASS23x000TMS.pso: both on its lit colour; GPU grass has no lamps or highlight): one factor, made a gamma-space one
+			// with linear lighting on (the cards multiply in linear light, the strands light in the stored curve).
+			float brightness = 1.0f;
+			if (const GrassShaders* grass = TheShaderManager->Shaders.Grass) brightness = (std::max)(grass->Constants.Brightness.x * grass->Constants.Brightness.y, 0.0f);
+			if (const PBRShaders* pbr = TheShaderManager->Shaders.PBR) if (pbr->Constants.Linear.x > 1.0f) brightness = powf(brightness, pbr->Constants.Linear.y);
+			f.look[3] = brightness;
+			// UNOFFICIAL 2026-11-04 the grass lamps ([Shaders.Grass.Lights]): the card shaders' lamps (camera-relative to the renderer's camera)
+			// moved to this frame's camera (eye), and Brightness alone for them (gamma space with linear lighting, as above).
+			if (const GrassShaders* grass = TheShaderManager->Shaders.Grass) {
+				const int lamps = grass->Enabled ? (std::min)((int)grass->Constants.LightData.x, (int)GrassShaders::MaxGrassLights) : 0;
+				const D3DXVECTOR4& camera = TheRenderManager->CameraPosition;
+				for (int i = 0; i < lamps; i++) {
+					const D3DXVECTOR4& p = grass->LightPosition[i];
+					f.lampPos[i][0] = (float)((double)p.x + camera.x - eye[0]); f.lampPos[i][1] = (float)((double)p.y + camera.y - eye[1]);
+					f.lampPos[i][2] = (float)((double)p.z + camera.z - eye[2]); f.lampPos[i][3] = p.w;
+					memcpy(f.lampColor[i], &grass->LightColor[i], 16);
+				}
+				float lampBrightness = (std::max)(grass->Constants.Brightness.x, 0.0f);
+				if (const PBRShaders* pbr = TheShaderManager->Shaders.PBR) if (pbr->Constants.Linear.x > 1.0f) lampBrightness = powf(lampBrightness, pbr->Constants.Linear.y);
+				f.lampData[0] = (float)lamps; f.lampData[1] = grass->Constants.LightData.y; f.lampData[2] = lampBrightness;
+				// UNOFFICIAL 2026-11-04 the deferred flashlight: moved to this frame's camera as the lamps, times Brightness (linear, as the cards
+				// multiply it), added in linear light through misc.w's gamma (1 with linear lighting off, as the cards then add it as it is)
+				if (grass->Enabled && grass->Spot[0].w > 0.0f) {
+					const D3DXVECTOR4& s = grass->Spot[0];
+					f.spot[0][0] = (float)((double)s.x + camera.x - eye[0]); f.spot[0][1] = (float)((double)s.y + camera.y - eye[1]);
+					f.spot[0][2] = (float)((double)s.z + camera.z - eye[2]); f.spot[0][3] = s.w;
+					memcpy(f.spot[1], &grass->Spot[1], 16);
+					const float b = (std::max)(grass->Constants.Brightness.x, 0.0f);
+					f.spot[2][0] = grass->Spot[2].x * b; f.spot[2][1] = grass->Spot[2].y * b; f.spot[2][2] = grass->Spot[2].z * b; f.spot[2][3] = grass->Spot[2].w;
+					f.misc[3] = 1.0f;
+					f.spotShadowParams[3] = grass->SpotFalloff.x;	// the beam's Falloff (with or without its shadow)
+					if (const PBRShaders* pbr = TheShaderManager->Shaders.PBR) if (pbr->Constants.Linear.x > 1.0f) f.misc[3] = pbr->Constants.Linear.x;
+					// its shadow (GrassShaders::SpotShadow, as the card grass): the map's matrix as drawn this frame, which takes points relative to
+					// the renderer's camera (a strand point is relative to this frame's eye: the shift is eye - camera)
+					if (grass->SpotShadow.x > 0.5f && grass->SpotShadow.y > 0.0f) {
+						memcpy(f.spotShadowRows, &TheShaderManager->SpotLightWorldToLightMatrix[0], sizeof(f.spotShadowRows));
+						f.spotShadowShift[0] = (float)(eye[0] - camera.x); f.spotShadowShift[1] = (float)(eye[1] - camera.y);
+						f.spotShadowShift[2] = (float)(eye[2] - camera.z); f.spotShadowShift[3] = 1.0f;
+						f.spotShadowParams[0] = grass->SpotShadow.z; f.spotShadowParams[1] = grass->SpotShadow.w; f.spotShadowParams[2] = 1.0f / grass->SpotShadow.y;
+					}
+				}
+			}
 			// the side planes: w + x >= 0, w - x >= 0, w + y >= 0, w - y >= 0 (D3D clip space), normalized
 			for (int p = 0; p < 4; p++) {
 				const int axis = p < 2 ? 0 : 1;
@@ -389,6 +474,8 @@ namespace {
 		if (ok) ok = SUCCEEDED(ext->UpdateBuffer(FrameBuf, 0, sizeof(f), &f)) && Upload(DrawBuf, Draws.data(), (UINT)(Draws.size() * sizeof(DrawRec))) &&
 			Upload(TuftBuf, Tufts.data(), tufts * 16) && Upload(TuftDrawBuf, TuftDraw.data(), tufts * 4) &&
 			SUCCEEDED(ext->UpdateBuffer(ArgsBuf, 0, kStatsBytes, init));
+		// UNOFFICIAL 2026-11-04 kept for the next frame's flashlight casters (DrawFlashlightCasters): its strands are where this frame put them
+		if (ok) { LastBlock = f; memcpy(LastEye, eye, sizeof(LastEye)); LastBlockFrame = TheFrameRateManager->FrameNumber; }
 
 		if (ok) {
 			const UINT clumps = (UINT)ceilf((std::min)((std::max)(S.Density, 1.0f), 6.0f));
@@ -442,10 +529,15 @@ namespace {
 			depth.DepthTest = TRUE;
 			depth.DepthWrite = TRUE;
 			depth.DepthCompare = compare;
+			// UNOFFICIAL 2026-11-04 the flashlight's shadow map for the fragment shader (bound always; read only while the frame block says it is
+			// there); without it at all (no ShadowsExteriors) the depth buffer stands in, never read
+			IDirect3DBaseTexture9* spotShadow = TheShaderManager->Effects.ShadowsExteriors ? TheShaderManager->Effects.ShadowsExteriors->Textures.ShadowSpotlightTexture[0] : nullptr;
+			if (!spotShadow) { std::string depthName = "TESR_DepthBuffer"; IDirect3DBaseTexture9** slot = TheTextureManager->GetTextureSlotByName(depthName); spotShadow = slot ? *slot : nullptr; }
 			const NVR_EXT_RESOURCE_BINDING drawRes[] = {
 				{ SlotFrame,  NVR_EXT_BIND_UNIFORM_BUFFER, FrameBuf, 0, 0, 0, FALSE },
 				{ SlotDraws,  NVR_EXT_BIND_STORAGE_BUFFER, DrawBuf, 0, 0, 0, FALSE },
 				{ SlotBlades, NVR_EXT_BIND_STORAGE_BUFFER, BladeBuf, 0, 0, 0, FALSE },
+				{ SlotSpotShadow, NVR_EXT_BIND_SAMPLED_IMAGE, spotShadow, 0, 0, 0, FALSE },
 			};
 			const bool vpInside = vp.Width && vp.Height && vp.X + vp.Width <= rtDesc.Width && vp.Y + vp.Height <= rtDesc.Height;
 			for (int isFar = 0; isFar < 2 && ok; isFar++) {
@@ -544,6 +636,77 @@ void Arm(void* Pass, int Part, float Nearest) {
 }
 
 void Disarm() { Armed = Replaced = false; ArmPass = nullptr; }
+
+// UNOFFICIAL 2026-11-04 (terrain blending: GrassFirst's late replay, Render.cpp GrassListHook) whether the armed pass's card draw was taken,
+// and whether its cards are kept anyway.
+bool Took() { return Armed && Replaced; }
+bool KeepsCards() { return S.KeepCards; }
+float FlashlightCasterReach() {
+	const bool strands = !Off && S.Enabled && !S.KeepCards && Frames > 0 && NearCasterPipeline && FarCasterPipeline && TheShaderManager->GameState.isExterior;
+	return strands ? S.BladeDistance : 0.0f;
+}
+
+// UNOFFICIAL 2026-11-04 the strands into the flashlight's shadow map, early in the frame (Render.cpp DrawGrassShadows, before the land):
+// the light pass at the main list's end reads the map, and this frame's strands are only culled and drawn after it (terrain blending's
+// late replay), so the strands are LAST frame's (their buffers and counts still hold them; only the sway lags a frame), moved into this
+// frame's light: the map's matrix as drawn this frame, their eye's place against this frame's camera, the light against their eye.
+// Depth-tested against the map's own depth (a standard projection cleared to 1: LESS_EQUAL, whatever the scene's depth), so a strand
+// lands only where it is nearer the light than what the map holds.
+void DrawFlashlightCasters(IDirect3DDevice9* Device) {
+	if (FlashlightCasterReach() <= 0.0f || !Scene || !GrassShadows::Enabled || !Device) return;
+	const UInt32 now = TheFrameRateManager->FrameNumber;
+	if (LastBlockFrame != now && LastBlockFrame + 1 != now) return;	// this frame's (no terrain blending: drawn before the land) or the last (no stale strands)
+	const GrassShaders* grass = TheShaderManager->Shaders.Grass;
+	ShadowsExteriorEffect* shadowFx = TheShaderManager->Effects.ShadowsExteriors;
+	if (!grass || grass->SpotShadow.x < 0.5f || !(grass->Spot[0].w > 0.0f) || !shadowFx || !shadowFx->Textures.ShadowSpotlightSurface[0] ||
+		!shadowFx->Textures.ShadowCubeMapDepthSurface) return;
+	ID3D9NvrExt* ext = DxvkCompute::Extension();
+	if (!ext) return;
+
+	FrameBlock fb = LastBlock;
+	const D3DXVECTOR4& camera = TheRenderManager->CameraPosition;
+	memcpy(fb.spotShadowRows, &TheShaderManager->SpotLightWorldToLightMatrix[0], sizeof(fb.spotShadowRows));
+	fb.spotShadowShift[0] = (float)(LastEye[0] - camera.x); fb.spotShadowShift[1] = (float)(LastEye[1] - camera.y);
+	fb.spotShadowShift[2] = (float)(LastEye[2] - camera.z); fb.spotShadowShift[3] = 1.0f;
+	const D3DXVECTOR4& light = grass->Spot[0];	// camera-relative: against the strands' eye
+	fb.spot[0][0] = (float)((double)light.x + camera.x - LastEye[0]); fb.spot[0][1] = (float)((double)light.y + camera.y - LastEye[1]);
+	fb.spot[0][2] = (float)((double)light.z + camera.z - LastEye[2]); fb.spot[0][3] = light.w;
+	if (FAILED(ext->UpdateBuffer(FrameBuf, 0, sizeof(fb), &fb))) return;
+
+	D3DSURFACE_DESC mapDesc = {};
+	shadowFx->Textures.ShadowSpotlightSurface[0]->GetDesc(&mapDesc);
+	NVR_EXT_DEPTH_STENCIL mapDepth = {};
+	mapDepth.pResource = shadowFx->Textures.ShadowCubeMapDepthSurface;
+	mapDepth.DepthTest = TRUE;
+	mapDepth.DepthWrite = TRUE;
+	mapDepth.DepthCompare = NVR_EXT_COMPARE_LESS_EQUAL;
+	const NVR_EXT_RESOURCE_BINDING casterRes[] = {
+		{ SlotFrame,  NVR_EXT_BIND_UNIFORM_BUFFER, FrameBuf, 0, 0, 0, FALSE },
+		{ SlotDraws,  NVR_EXT_BIND_STORAGE_BUFFER, DrawBuf, 0, 0, 0, FALSE },
+		{ SlotBlades, NVR_EXT_BIND_STORAGE_BUFFER, BladeBuf, 0, 0, 0, FALSE },
+	};
+	for (int isFar = 0; isFar < 2; isFar++) {
+		NVR_EXT_GEOMETRY_SCENE_DESC draw = {};
+		draw.Geometry.Draw.pPipeline = isFar ? FarCasterPipeline : NearCasterPipeline;
+		draw.Geometry.Draw.TargetCount = 1;
+		draw.Geometry.Draw.Targets[0].pResource = shadowFx->Textures.ShadowSpotlightSurface[0];
+		draw.Geometry.Draw.ViewportWidth = mapDesc.Width; draw.Geometry.Draw.ViewportHeight = mapDesc.Height;
+		draw.Geometry.Draw.BindingCount = _countof(casterRes);
+		draw.Geometry.Draw.pBindings = casterRes;
+		draw.pDepthStencil = &mapDepth;
+		draw.CullMode = NVR_EXT_CULL_NONE;
+		draw.Multisample = FALSE;
+		draw.pIndirectArgs = ArgsBuf;
+		draw.IndirectOffset = isFar ? 16 : 0;
+		if (FAILED(Scene->DrawGeometryScene(&draw))) {
+			Logger::Log("UNOFFICIAL GPU grass: a flashlight shadow draw failed (DXVK's log says why): the strands cast no flashlight shadow from now on");
+			NearCasterPipeline = FarCasterPipeline = nullptr;
+			return;
+		}
+	}
+	static unsigned drawn = 0;
+	if (++drawn <= 3 || drawn % 3600 == 0) Logger::Log("UNOFFICIAL GPU grass: frame %u: last frame's strands drawn into the flashlight's shadow map", now);
+}
 
 void EndEarly(IDirect3DDevice9* Device) {
 	Armed = Replaced = false;

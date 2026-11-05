@@ -1,4 +1,5 @@
 #pragma once
+#include "DxvkLoader.h"
 
 // UNOFFICIAL 2026-10-28 CapturedNormals (docs/next/CAPTURED-NORMALS.md; macintroll's proposal, first reader: SnowAccumulation,
 // [Shaders.SnowAccumulation.Main] CapturedNormals). Every screen-space effect reads TESR_NormalsBuffer, rebuilt from the depth buffer:
@@ -26,6 +27,7 @@
 #include "DrawState.h"	// UNOFFICIAL 2026-10-29 SharedDrawState: the tracked state lives there
 #include "PassSums.h"
 #include "FailOnce.h"	// UNOFFICIAL 2026-11-02 RetryFailedEffects
+#include "FlashlightLamp.h"	// UNOFFICIAL 2026-11-04 the flashlight's game lamp: which objects the G-buffer holds
 #include "GpuProfiler.h"	// UNOFFICIAL ShadowContrast step timer	// UNOFFICIAL 2026-10-29 lean hook: AfterStateBlock
 
 namespace CapturedNormals {
@@ -650,7 +652,7 @@ namespace CapturedNormals {
 		BodyFailed = true;	// (until it worked)
 		if (!SharedDrawState::ObserversLive) { Logger::Log("DrawStateTracking: ConstantFilter's device detours are not in: off (the per-draw device queries, as before)"); return; }
 		void** table = *(void***)d;
-		HMODULE runtime = GetModuleHandleA("d3d9.dll"), owner37 = nullptr, owner57 = nullptr;
+		HMODULE runtime = DxvkLoader::Runtime(), owner37 = nullptr, owner57 = nullptr;
 		GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)table[37], &owner37);
 		GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)table[57], &owner57);
 		if (!runtime || owner37 != runtime || owner57 != runtime) {
@@ -769,6 +771,7 @@ namespace CapturedNormals {
 			SetMask(d, D3DRS_COLORWRITEENABLE3, 0xF);
 			Writes++;
 			Drawn = true;
+			FlashlightLamp::NoteWrite();	// UNOFFICIAL 2026-11-04: the light pass lights this object (core/FlashlightLamp.h)
 		}
 		else if (Bound) {
 			SetMask(d, D3DRS_COLORWRITEENABLE3, 0);

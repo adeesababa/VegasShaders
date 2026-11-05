@@ -181,10 +181,50 @@ static const float SHADOW_FORMAT = TESR_ShadowFormatData.y;
 #else
     #define SHADOW_CHARACTER_MAP 0
 #endif
+
+// ---------------------------------------------------------------------------
+// UNOFFICIAL 2026-11-04 ForwardCloudShadows ([Shaders.VolumetricClouds.Main] ForwardShadows, restart: FORWARD_CLOUD_SHADOWS from
+// ShaderRecord::BuildDefines; core/ForwardCloudShadows.h). The volumetric clouds' shadow taken off the SUN term inside the surface
+// shaders, per MSAA sample, instead of SunFar's factor over the finished picture (that factor is one per pixel: with the game's MSAA it
+// darkened a whole edge pixel by its nearest sample's sun share, and it darkened grass and plants, which nothing could tell apart).
+// Grass and the speedtree leaves do not include it: they keep their sunlight under a cloud. The object passes of plants get strength 0
+// from the DLL ([Shaders.VolumetricClouds.Main] PlantShadows off).
+//   SHADOW_CLOUD_IN (the object, skin and LOD-land pixel shaders): the clouds' shadow map (TESR_CloudShadow, s8: free in every outdoor
+//     record; the Interior records' s8 is a lamp's) looked up here, on NVR_CloudSun (c169, set per draw).
+//   SHADOW_CLOUD_VALUE (the land: every sampler is taken): its vertex shader looks the map up (CloudSunVertex, the vertex sampler s1)
+//     and the pixel shader puts the interpolated value in NvrCloudSun before GetSunShadow.
+#ifndef FORWARD_CLOUD_SHADOWS
+    #define FORWARD_CLOUD_SHADOWS 0
+#endif
+#if FORWARD_CLOUD_SHADOWS && FORWARD_SHADOWS && defined(SHADOW_CLOUD_IN) && !(defined(INTERIOR_SHADOWS) && INTERIOR_SHADOWS)
+    #define SHADOW_CLOUD_SAMPLE 1
+#else
+    #define SHADOW_CLOUD_SAMPLE 0
+#endif
+#if FORWARD_CLOUD_SHADOWS && FORWARD_SHADOWS && defined(SHADOW_CLOUD_VALUE) && !(defined(INTERIOR_SHADOWS) && INTERIOR_SHADOWS)
+    #define SHADOW_CLOUD_FROM_VALUE 1
+    static float NvrCloudSun = 1.0f;	// the includer's value for this pixel (1 lit)
+#else
+    #define SHADOW_CLOUD_FROM_VALUE 0
+#endif
+#if SHADOW_CLOUD_SAMPLE
+float4 NVR_CloudSun : register(c169); // xy: the map's uv under the camera along the light, z: map uv per world unit, w: strength (0 off)
+sampler2D TESR_CloudShadow : register(s8) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
+// How much sun the clouds let through at P (camera-relative world): the map where the light from P meets the cloud base, as
+// VolumetricClouds.fx CloudShadowAt; 1 outside the map (faded over its last tenth). TESR_SmoothedSunDir stands in for the map's light
+// for the height term only (P.z off the camera's height: a few metres, against a cloud base 1.5 km up).
+float CloudSunAt(float3 P) {
+    float3 light = normalize(TESR_SmoothedSunDir.xyz);
+    float2 suv = NVR_CloudSun.xy + (P.xy - light.xy * (P.z / max(light.z, 0.25f))) * NVR_CloudSun.z;
+    float2 edge = min(suv, 1.0f - suv);
+    float inside = saturate(min(edge.x, edge.y) * 10.0f);
+    return lerp(1.0f, tex2Dlod(TESR_CloudShadow, float4(suv, 0.0f, 0.0f)).r, inside * NVR_CloudSun.w);
+}
+#endif
 #if SHADOW_CHARACTER_MAP
 row_major float4x4 TESR_CharShadowCameraToLight : register(c206); // camera-relative world -> the map's clip space (ortho: w = 1)
 float4 TESR_CharShadowCenter : register(c213); // xyz: the box's centre (camera-relative world), w: its half-extent (world units)
-float4 TESR_CharShadowData   : register(c214); // x: 1 / resolution, y: hand-over band (share of the half-extent), z: depth bias (map depth), w: 1 = live
+float4 TESR_CharShadowData   : register(c214); // x: 1 / resolution, y: hand-over band (share of the half-extent), z: depth bias (map depth), w: 1 = live (0.5: the first-person viewmodel, tent PCF)
 // One line, like TESR_ShadowAtlas above.
 // UNOFFICIAL 2026-10-23 (P82 v4 fix): the POINT-light object shaders (SLS2051-2056) are compiled with POINT defined (empty), which emptied the filter names below: lifted round this one line.
 #ifdef POINT
@@ -223,12 +263,32 @@ float CharacterMapShadow(float3 worldPos, float3 worldNormal, float NdotL, float
     float depth = min(lightSpace.z, 0.9999f) - TESR_CharShadowData.z - 1.5f * texel * slope;
     float2 lo = texel * 0.5f;
     float2 hi = 1.0f - texel * 0.5f;
+    float lit = 0.0f;
+    // UNOFFICIAL 2026-11-04 ViewModelShadows (w 0.5: the first-person arms and weapon in the map, ShadowManager::RenderViewModelShadowMap):
+    // PCF weighed by a tent 2.5 texels in radius (6 x 6 taps, as Physically-Based-Reloaded's), so the edges come out smooth rather than
+    // stepped at the viewmodel's close range. Loops, not unrolled: every shader that reads the map carries it.
+    [branch] if (TESR_CharShadowData.w < 0.75f) {
+        float2 q = uv / texel;
+        float2 first = floor(q - 0.5f) - 2.0f;
+        float total = 0.0f;
+        [loop] for (int ty = 0; ty < 6; ty++) {
+            float y = first.y + ty;
+            float wy = max(2.5f - abs(y + 0.5f - q.y), 0.0f);
+            [loop] for (int tx = 0; tx < 6; tx++) {
+                float x = first.x + tx;
+                float w = max(2.5f - abs(x + 0.5f - q.x), 0.0f) * wy;
+                float2 tapUV = clamp((float2(x, y) + 0.5f) * texel, lo, hi);
+                lit += depth <= tex2Dlod(TESR_CharShadowMap, float4(tapUV, 0.0f, 0.0f)).x ? w : 0.0f;
+                total += w;
+            }
+        }
+        return lerp(cascadeShadow, min(cascadeShadow, lit / max(total, 0.0001f)), weight);
+    }
     float2 p = uv / texel - 0.5f;
     float2 c = floor(p + 0.5f);
     float2 f = p - c;
     float3 wx = float3(0.5f * (0.5f - f.x) * (0.5f - f.x), 0.75f - f.x * f.x, 0.5f * (0.5f + f.x) * (0.5f + f.x));
     float3 wy = float3(0.5f * (0.5f - f.y) * (0.5f - f.y), 0.75f - f.y * f.y, 0.5f * (0.5f + f.y) * (0.5f + f.y));
-    float lit = 0.0f;
     [unroll] for (int y = 0; y < 3; y++) {
         [unroll] for (int x = 0; x < 3; x++) {
             float2 tapUV = clamp((c + float2(x - 1, y - 1) + 0.5f) * texel, lo, hi);
@@ -1106,6 +1166,13 @@ float GetSunShadow(float3 P, float3 Nw) {
 
     // Fade out as the sun approaches the horizon, matching SunShadows.fx.
     sh = lerp(sh, 1.0f, saturate(TESR_ShadowFade.x));
+
+    // UNOFFICIAL 2026-11-04 ForwardCloudShadows (above): the clouds' share, after the cascades' fade (their strength has its own low-sun fade).
+#if SHADOW_CLOUD_SAMPLE
+    [branch] if (NVR_CloudSun.w > 0.0f) sh *= CloudSunAt(P);
+#elif SHADOW_CLOUD_FROM_VALUE
+    sh *= NvrCloudSun;
+#endif
 
     return sh;
 }

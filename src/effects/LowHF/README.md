@@ -49,7 +49,7 @@ All keys are in section [_Shaders.LowHF.Main] unless noted. Each is read as a fl
 - VignetteMultiplier: float, default 1.0. Scales the vignette exponent. The exponent is health strength times 20 times this value.
 - DarknessMultiplier: float, default 1.0. Scales the vignette floor. The floor is (1 minus health strength) times this value.
 - [_Shaders.LowHF.Status] Enabled: boolean, default false. The on/off switch for the effect in the menu (the defaults comment reads "Screen and sound effects when the player health is low").
-- Not read by this effect: [_Main.LowHFSound.Main] with keys FatigueCoeff (0.5), FatigueEnabled (true), HealthCoeff (0.5) and HealthEnabled (false). These are listed in the defaults and in src/core/PresetManager.cpp, but no C++ in this tree reads them (see section 9). They do not change the picture.
+- [_Main.LowHFSound.Main] (low-health / fatigue sound keys, an Oblivion Reloaded leftover that no code read) was removed on 2026-11-05.
 
 Definitions used below:
 - Health strength = 1 minus (health ratio / HealthLimit). It is 0 at the threshold and rises to 1 at zero health (with the default limit, when health is zero).
@@ -108,7 +108,7 @@ Other behaviour:
 ## 9. Open questions
 
 - Blur direction: the offset is added to both texture axes equally, so the blur runs along the diagonal. Confirm whether this is intended or whether a single-axis blur was meant. The writer should match the behaviour the owner decides on.
-- Sound keys: [_Main.LowHFSound.Main] (FatigueCoeff, FatigueEnabled, HealthCoeff, HealthEnabled) appear in the defaults and the preset list, but no C++ in this tree reads them. The sound system that would use them is not visible here. Check whether the low-health sound lives elsewhere.
+- [_Main.LowHFSound.Main] (low-health / fatigue sound keys, an Oblivion Reloaded leftover that no code read) was removed on 2026-11-05.
 - Ranges: no range is declared or clamped for HealthLimit, FatigueLimit, LumaMultiplier, BlurMultiplier, VignetteMultiplier or DarknessMultiplier. The safe range for each is not known.
 - Constant update timing: settings are re-read when the settings-changed flag is set. The per-frame timing of the health and stamina update was not traced exactly; confirm it runs on every frame the effect is considered.
 - Pre- or post-tonemapping: the effect sits in the lens group after motion blur. Whether its input is HDR or tonemapped, and what RenderPreTonemapping does to it, was not traced.

@@ -305,7 +305,9 @@ void SkinScatteringEffect::BindForSkinDraw(NiD3DPixelShaderEx* PixelShader) {
 	// at 1 and 2, a draw writes nothing at all to target 0 (no error returned; the caps claim MRT support), so every skin draw
 	// vanished from the scene (the background showed through faces and arms) with the game's MSAA on. Without MSAA it works.
 	// The skin then keeps the per-pixel diffusion (PerPixelWidth), as when ScreenSpace is off.
-	if (SceneDesc.MultiSampleType != D3DMULTISAMPLE_NONE) {
+	// UNOFFICIAL 2026-11-04: native D3D9 only. Under NVR DXVK multisampled extra targets draw (CapturedNormals relies on the same), so the
+	// multisampled skin targets made by EnsureTarget are used there.
+	if (SceneDesc.MultiSampleType != D3DMULTISAMPLE_NONE && !DxvkCompute::Available()) {
 		Scene->Release();
 		Logger::Log("[WARNING] SkinScattering: the scene is multisampled (the game's MSAA); drawing with extra multisampled targets bound draws nothing on D3D9 drivers such as NVIDIA's, so screen-space skin scattering is off (per-pixel diffusion instead). Switch MSAA off to use it.");
 		Supported = false;

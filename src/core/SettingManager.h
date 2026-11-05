@@ -10,7 +10,6 @@ struct SettingsMainStruct
 {
 	struct MainStruct {	// [Main.Main.*]
 		bool	RemoveUnderwater, ForceMSAA, ForceReflections;	// [Main.Main.Water] / [Main.Main.Misc]
-		bool	BlockGameMSAA;	// [Main.Main.Misc] UNOFFICIAL 2026-11-04: the INIs' iMultiSample / iWaterMultiSamples read as 0
 		bool	GameShadersInReflections; // [Main.Main.Water] diagnostic: the reflection pass uses the game's own shaders
 		bool	ReflectionClipFix; // [Main.Main.Water] UNOFFICIAL: the water reflection's clip plane rebuilt by NVR at every draw of the reflection pass
 		bool	RemovePrecipitations;	// [Main.Main.Precipitations]
@@ -136,11 +135,6 @@ struct SettingsMainStruct
 		NiPoint3	StaffOnBackPos, StaffOnBackRot;
 	};
 
-	struct SleepingModeStruct {	// [Main.SleepingMode.Main]
-		bool	Enabled;
-		UInt8	Mode;	// the sleeping mode
-	};
-
 	struct WeatherModeStruct {	// [Main.WeatherMode.*]: the weathers' night, fog and sun colours are scaled by these
 		bool		Enabled;
 		NiPoint3	CoeffNight, CoeffFog, CoeffSun;
@@ -209,7 +203,6 @@ struct SettingsMainStruct
 	FrameRateStruct			FrameRate;			// [Main.FrameRate.*]
 	GrassModeStruct			GrassMode;			// [Main.GrassMode.*]
 	MountedCombatStruct		MountedCombat;		// [Main.MountedCombat.*]
-	SleepingModeStruct		SleepingMode;		// [Main.SleepingMode.*]
 	WeatherModeStruct		WeatherMode;		// [Main.WeatherMode.*]
 	ShadowModeStruct		ShadowMode;			// [Main.ShadowMode.*]
 	ShadersStruct			Shaders;			// not read

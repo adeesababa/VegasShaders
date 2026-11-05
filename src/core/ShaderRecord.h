@@ -89,6 +89,7 @@ public:
 	bool					PointShadowForward = false;	// UNOFFICIAL: compiled with INTERIOR_SHADOWS (PointShadowForward.h)
 	bool					UsedOnce = false;			// UNOFFICIAL: SetCT ran once this session (ShaderWarmUp.h)
 	bool					IsLandLight = false;			// UNOFFICIAL 2026-10-25: a land pixel shader reading the game's SunDir in c18 (LandLight.h)
+	bool					CloudSunReg = false;			// UNOFFICIAL 2026-11-04 ForwardCloudShadows: declares NVR_CloudSun (c169, pixel) or NVR_CloudSunVS (c240-c241, vertex)
 	unsigned char			DisplaceFamily = 0;			// UNOFFICIAL 2026-10-28: registered for tessellation under this family (DxvkCompute::DisplaceBind)
 };
 

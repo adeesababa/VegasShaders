@@ -94,6 +94,16 @@ namespace PlantWind {
 		StaticsOn = On && CompiledIn;
 		ClothWind::PlantsOn = StaticsOn;
 		GrassWind::ClockWanted = S.Enabled;
+		// (the whole text: GetSettingS cuts a string at 79 characters, as ClothWind::BeginFrame reads its lists)
+		// UNOFFICIAL 2026-11-04: read with the wind off too: MaterialBuffer's plant class (Render.cpp MaterialForPass) uses the same lists.
+		auto readList = [&](const char* key, std::string& from, std::vector<std::string>& out) {
+			SettingManager::Configuration::ConfigNode node;
+			if (!TheSettingManager->Config.FillNode(&node, section, key)) return;
+			const std::string text = node.LongValue;
+			if (from != text) { from = text; SplitList(text.c_str(), out); ByTexture.clear(); }
+		};
+		readList("Keywords", WordsFrom, Words);
+		readList("Exclude", ExcludeFrom, Excluded);
 		if (!S.Enabled) { LeafA = LeafB = LeafC = D3DXVECTOR4(0, 0, 0, 0); return; }
 		S.Bend = std::clamp(TheSettingManager->GetSettingF(section, "Bend"), 0.0f, 100.0f);
 		S.StiffHeight = std::clamp(TheSettingManager->GetSettingF(section, "StiffHeight"), 20.0f, 5000.0f);
@@ -103,15 +113,6 @@ namespace PlantWind {
 		S.LeafLean = std::clamp(TheSettingManager->GetSettingF(section, "LeafLean"), 0.0f, 50.0f);
 		S.LeafHeight = std::clamp(TheSettingManager->GetSettingF(section, "LeafHeight"), 1.0f, 5000.0f);
 		S.Log = TheSettingManager->GetSettingI(section, "Log");
-		// (the whole text: GetSettingS cuts a string at 79 characters, as ClothWind::BeginFrame reads its lists)
-		auto readList = [&](const char* key, std::string& from, std::vector<std::string>& out) {
-			SettingManager::Configuration::ConfigNode node;
-			if (!TheSettingManager->Config.FillNode(&node, section, key)) return;
-			const std::string text = node.LongValue;
-			if (from != text) { from = text; SplitList(text.c_str(), out); ByTexture.clear(); }
-		};
-		readList("Keywords", WordsFrom, Words);
-		readList("Exclude", ExcludeFrom, Excluded);
 
 		// The grass field wind's own settings and clock (GrassWind::Update runs once a frame, whichever of the grass and the plants calls
 		// it first, with the same inputs -- the sandstorm's share as Grass.cpp gives it): the plants share its gusts even with the grass

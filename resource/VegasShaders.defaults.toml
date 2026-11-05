@@ -78,16 +78,9 @@ SmartControlFPS = 60
 BackgroundThreadPriority = 5
 SmartBackgroundProcess = false
 
-[_Main.LowHFSound.Main]
-FatigueCoeff = 0.5
-FatigueEnabled = true
-HealthCoeff = 0.5
-HealthEnabled = false
-
 [_Main.Main.Misc]
 RetryFailedEffects = true             # UNOFFICIAL BUG FIX (2026-11-02), live: a part of an effect that switched itself off after an error (a texture or target that could not be made, a pass that failed to draw: CapturedNormals, DeferredLamps frame copy, exact pass sums, GodRays dedicated / packed passes, AO and Skylighting RT passes, the wet/snow cover map) tries again after the next cell change, up to 3 times. Each failure is listed in the menu's status bar. false = as before: off until the game restarts.
 ForceMSAA = false           # Override game setting to force MSAA.
-BlockGameMSAA = true        # UNOFFICIAL (2026-11-04), restart: the game's own anti-aliasing (iMultiSample, and the water reflection's iWaterMultiSamples) is read as 0 whatever the INIs (or the launcher) set, and the game never writes those two back, so the INI files keep what they say. MSAA breaks the mod's depth-based effects (speckled shadows on grass and round the player); TAA / FSR / DLSS smooth the edges instead. false = the INIs' values are used (the mod then warns once). ForceMSAA wins over this.
 RenderEffects = true        # Toggle rendering of all effects.
 LockpickEffects = false     # UNOFFICIAL (2026-11-01), live: the mod's effects and object shaders (PBR) while the lockpick screen is open. false = the game's own picture and shaders there (the lock came out black with PBR) (the mod's effects made the lock view look wrong, above all with a real-time-menus mod that keeps the world drawing behind the lock). true = as before.
 RenderPreTonemapping = true # Toggle rendering of some effects in HDR before the game image space effects (can cause glitches).
@@ -159,7 +152,7 @@ MergedDepthNormals = false  # UNOFFICIAL, EXPERIMENTAL, keep off: reconstruct no
 SkipIdentityExposure = true # UNOFFICIAL (2026-10-17): skip the exposure pass while its MaxBrightness is 0 (the Night default): the pass then hands the picture back unchanged (a full-screen read and write for nothing, 0.15 ms). Same picture. Applies immediately.
 AvgLumaCompute = false      # UNOFFICIAL (2026-10-23), needs the DXVK fork (the fork's d3d9.dll, docs\next\NVR-DXVK-EXTENSION.md); does nothing on native D3D9 or stock DXVK: the screen's average brightness (exposure, depth of field focus) is computed by a Vulkan compute pass that reads every pixel once (exact), instead of the D3D9 pass's 112 sample points. Same smoothing, same speeds, same texture for the other effects. Applies immediately. The log says 'Vegas Shaders DXVK' at start whether the extension was found.
 AvgLumaComputeCheck = 0     # UNOFFICIAL TEST TOOL (2026-10-23), with AvgLumaCompute and the DXVK fork: N > 0 = every N frames run both the compute and the D3D9 average-luma pass and log them side by side ('AvgLuma check'); the D3D9 pass keeps the texture while this is on. Those frames wait for the graphics card: leave 0 while playing.
-NvrDxvkPasses = true        # UNOFFICIAL (2026-10-23), needs the DXVK fork (does nothing on native D3D9 or stock DXVK): the effects ported so far (Exposure, ImageAdjust, Sharpening, FXAA, LowHF, SkyDither, BloodLens, WaterLens, LUT, Lens, MotionBlur; since 2026-10-25 also Coloring, DitherBuster, BarrelHaze, HeatHaze, Cinema, DepthOfField's distant blur and autofocus, Bodycam, SkinScattering, BloomLegacy, Snow, Precipitations, ShadowsInteriors, SkyView, ShadowsExteriors, SunFar, FlashlightBeam, VolumetricLight, WetWorld, GodRays, SMAA, Specular, Underwater, Reflections, Bloom, TAA, Sandstorm, SnowAccumulation, BounceLight, PointShadows, PointShadows2, CombineDepth, Normals, VolumetricClouds, Flashlight, SunShadows, VolumetricSmoke, AmbientOcclusion, VolumetricFog, AmbientLight) run as Vulkan passes through the DXVK fork's extension instead of their D3D9 shaders, same picture by construction (the GLSL in src\hlsl\NewVegas\Compute is the .fx.hlsl line for line). The point is the route (no 16-sampler / 224-constant / instruction limits for what comes next), not speed. An effect whose pass fails falls back to its D3D9 shader for the session (logged). Applies immediately.
+NvrDxvkPasses = true        # UNOFFICIAL (2026-10-23), needs the DXVK fork (does nothing on native D3D9 or stock DXVK): the effects ported so far (Exposure, ImageAdjust, Sharpening, FXAA, LowHF, SkyDither, BloodLens, WaterLens, LUT, Lens, MotionBlur; since 2026-10-25 also Coloring, DitherBuster, BarrelHaze, HeatHaze, Cinema, DepthOfField's distant blur and autofocus, Bodycam, SkinScattering, BloomLegacy, Snow, Precipitations, ShadowsInteriors, SkyView, ShadowsExteriors, SunFar, VolumetricLight, WetWorld, GodRays, SMAA, Specular, Underwater, Reflections, Bloom, TAA, Sandstorm, SnowAccumulation, BounceLight, PointShadows, PointShadows2, CombineDepth, Normals, VolumetricClouds, SunShadows, VolumetricSmoke, AmbientOcclusion, VolumetricFog, AmbientLight) run as Vulkan passes through the DXVK fork's extension instead of their D3D9 shaders, same picture by construction (the GLSL in src\hlsl\NewVegas\Compute is the .fx.hlsl line for line). The point is the route (no 16-sampler / 224-constant / instruction limits for what comes next), not speed. An effect whose pass fails falls back to its D3D9 shader for the session (logged). Applies immediately.
 NvrDxvkVariants = true      # UNOFFICIAL (2026-10-26), needs the DXVK fork with NvrDxvkPasses on: a Vulkan pass uses its compile-time variant (Shaders\VegasShaders\Compute\<name>-<variant>.spv, the D3D9 technique's fixed switches: unused paths compiled out, as the D3D9 shaders are) where one exists, else the general shader. Same picture either way; off only to compare speed. Applies immediately.
 NvrDxvkStencil = true       # UNOFFICIAL (2026-10-26), needs the DXVK fork 1.6 with NvrDxvkPasses on: a Vulkan pass tests a stencil where its D3D9 technique does (SMAA's costly weight pass runs only on the edge pixels its edge pass marked, as on D3D9). Same picture either way; off only to compare speed. Applies immediately.
 NvrDxvkAmbientLight = false # UNOFFICIAL (2026-11-01), with NvrDxvkPasses on: AmbientLight also runs as Vulkan passes. OFF by default: a tester saw rapid flickering with AmbientLight on Vulkan (steady on D3D9; not reproduced yet). Off = AmbientLight draws its D3D9 passes, the other effects stay on Vulkan; same picture, about the same speed (measured 2026-10-26). Note: [Shaders.AmbientOcclusion.RT] feeds AmbientLight only with this on. Applies immediately.
@@ -359,12 +352,9 @@ NewExclude = ""              # UNOFFICIAL, hidden: settings the date rule would 
 NewDiagnostics = ""          # UNOFFICIAL, hidden: extra settings to put under the tab's collapsed Diagnostics group (same format). Keys ending in Check, Log, Probe, DebugView and descriptions that say diagnostic or test only go there already.
 
 [_Main.Menu.Developer]
+AdvancedSettings = false     # UNOFFICIAL (2026-11-05): the menu's "Advanced" switch (top row). Off: pages that have a simple view show a few settings with plain names and merged choices (Quality: Low / Medium / High ...); on: every setting under its own name, as before (with Developer options also the test settings). Hidden settings keep their saved values.
 DeveloperOptions = false     # UNOFFICIAL (2026-10-25): the menu's "Developer options" box (top row). Off: the menu hides what players should not need to touch (test and fault-finding switches, the bug fixes and same-picture speed-ups that are on by default, A/B test paths, measuring hooks, options that change almost nothing, the Step and -/+ buttons, Retro-Encab.). Hidden settings keep working with their saved values.
-DevOnly = "Shaders.TAA.FSR.EffectsAfterUpscale, Shaders.TAA.FSR.SmoothEffects, Main.Develop.*, Main.Main.Misc.MoreLampsPerObject, Main.Main.Misc.LampReachMargin, Main.Main.Misc.LampsInOnePass, Main.Main.Misc.SpecularLODPasses, Main.Main.Performance.SkipRedundantConstants, Main.Main.Performance.SkinnedShadowFaceTest, Main.Main.Performance.ParallelShaderCompile, Main.Main.Performance.NewEffectCompiler, Main.Main.Performance.ShaderWarmUp, Main.Main.Performance.ShaderWarmUp2, Main.Main.Performance.ShaderWarmUp2BudgetMs, Main.Main.Performance.ShaderWarmUp2MinMs, Main.Main.Performance.IOWorker2, Main.Main.Performance.HiddenObjectCulling, Main.Main.Performance.HiddenObjectCullingMaxAge, Main.Main.Performance.PreDecodeCache, Main.Main.Performance.FastCasterHash, Main.Main.Performance.CasterListCache, Main.Main.Performance.SkyOnWorker, Main.Main.Misc.LampCapsStats, Main.Main.Performance.DrawStateTracking, Main.Main.Performance.MenuHiddenLean, Main.Main.Performance.LampScissor, Main.Main.Performance.LampScissorExact, Main.Main.Performance.TrimLampPasses, Main.Main.Performance.FrameChain, Main.Main.Performance.CompositeApply, Main.Main.Performance.ChainUsesGameTexture, Main.Main.Performance.MergedDepthNormals, Main.Main.Performance.SkipIdentityExposure, Main.Main.Performance.LampMaskScissor, Main.Main.Performance.InteriorShadowFold, Main.Main.Performance.CubeFaceCopySkip, Main.Main.Performance.CubeFaceViewCull, Main.Main.Performance.SlimDepthBuffer, Main.Main.Performance.ReShadeDepthNearRemap, Main.Main.Performance.WorldSceneGuard, Main.Main.Performance.MenuSceneGuard, Main.Main.Water.ReflectionClipFix, Shaders.AmbientLight.Main.NoEdgeOutline, Shaders.Grass.Main.DrawFirst, Shaders.Grass.Main.DrawFirstCull, Shaders.Grass.Main.GameShaderFix, Shaders.GodRays.Main.SkipEmpty, Shaders.PBR.Main.UnlitShadowSkip, Shaders.PBR.Main.LampReachSkip, Shaders.PBR.Main.SpecularFade, Shaders.PBR.Main.FoldHighlights, Shaders.PBR.Main.LampDistanceFix, Shaders.PBR.Main.LampSums, Shaders.PBR.Main.HighlightSums, Shaders.PBR.Rmaos.FadeIn, Shaders.PBR.Linear.PreDecode, Shaders.PBR.Linear.ExactPassSums, Shaders.Precipitations.Main.SkipHiddenLayers, Shaders.ShadowsExteriors.Main.SkipWhenFaded, Shaders.ShadowsExteriors.Main.CasterReachEverywhere, Shaders.ShadowsExteriors.Main.SunCascadeSkipFlat, Shaders.ShadowsExteriors.Main.SunCascadeOneWalk, Shaders.ShadowsExteriors.Main.SunCascadeLeanDraws, Shaders.ShadowsExteriors.Main.OverheadSunFix, Shaders.ShadowsExteriors.ScreenSpace.FastPaths, Shaders.ShadowsExteriors.ShadowMaps.LodSkipLoaded, Shaders.CloudShadows.Main.TargetFix, Shaders.ShadowsInteriors.Main.MaskSkipFar, Shaders.ShadowsInteriors.Main.PlayerInsideLamp, Shaders.ShadowsInteriors.Main.RedrawActorsOnly, Shaders.ShadowsInteriors.Forward.KeepLampsInView, Shaders.ShadowsInteriors.Forward.ScopeFix, Shaders.VolumetricClouds.Main.FixedMarchExit, Shaders.WetWorld.Main.FastPaths, Shaders.WetWorld.Main.KeepHighlights, Shaders.BloodFlow.Main.CheapGather, Shaders.BloodFlow.Main.SplatFast, Shaders.Terrain.Parallax.IsoHeightTaps, Shaders.Terrain.Parallax.SkipEmptyLayers, Shaders.Skin.Debug.*, Main.Main.Performance.ArrivalSampler, Shaders.AmbientOcclusion.FastPaths.Enabled, Shaders.AmbientLight.Main.GridWallMemory, Shaders.AmbientLight.Main.GridFine, Shaders.DepthOfField.FirstPersonView.DistantBlur, Shaders.GodRays.Main.SkipIdle, Shaders.GodRays.Main.SunGlareEnabled, Shaders.Tonemapping.Main.HueSafeClip, Shaders.SMAA.Main.DeDither, Shaders.ShadowsExteriors.Main.TwoSidedCasters, Shaders.ShadowsExteriors.ShadowMaps.Prefilter, Shaders.ShadowsExteriors.Ortho.LimitFrequency, Shaders.ShadowsInteriors.Forward.LampGlassShadows, Shaders.ShadowsInteriors.Forward.LampModelShadows, Shaders.ContactHardening.Main.Smooth, Shaders.SkyDither.Main.SkyOnly, Shaders.Sky.Main.UseSunDiskColor, Shaders.Terrain.Blending.Smooth, Shaders.CloudShadows.Main.JitterFix, Shaders.CloudShadows.Main.SkipCascadeCheck, Main.Main.Misc.FoldFog, Main.Main.Misc.ManyLampsOnePass, Main.Main.Misc.ManyLampsGlow, Main.Main.Misc.LightCommonLamps, Main.Main.Misc.LampTableStandalone, Main.Main.Misc.ClusteredLamps, Main.Main.Misc.LandAllLamps, Main.Main.Misc.LampsDepthFirst, Main.Main.Misc.LampsDepthFirstMinLamps, Main.Main.Performance.SettingsCache, Main.Main.Performance.NvrDxvkVariants, Main.Main.Performance.NvrDxvkStencil, Main.Main.Performance.NvrDxvkKeepD3D9, Main.Main.Performance.NvrDxvkTestSuffix, Main.Main.Performance.AmbientLightSmoothCompute, Main.Main.Performance.AmbientLightBlurCompute, Main.Main.Performance.NvrSm6Shaders, Main.Main.Performance.InteriorShadowFoldRound, Main.Main.Performance.ReShadeUnderNVRMenu, Main.Main.Performance.ReShadeGameValues, Main.Main.RayTracing.ActorUpdateInterval, Main.Main.RayTracing.ActorStillSkip, Main.Main.RayTracing.ActorStillThreshold, Main.Main.RayTracing.ActorRebuildInterval, Main.Main.RayTracing.Compact, Main.Main.RayTracing.DenoiseBackbone, Main.Main.RayTracing.BuildTrianglesPerFrame, Main.Main.RayTracing.BuildNearRadius, Main.Main.RayTracing.LeafCardsOpaque, Main.Main.RayTracing.PlantSway, Main.Main.RayTracing.CullSmallAngle, Main.Main.RayTracing.GrassMaxTufts, Main.Main.RayTracing.ArenaMB, Main.Main.Quality.CapturedNormals, Main.Main.Quality.CapturedNormalsLeanHook, Main.Main.Quality.SharedDrawState, Main.Main.Quality.ObjectMotion, Main.Main.Quality.ObjectMotionSkipCameraFollow, Main.Main.Quality.MaterialBuffer, Main.Main.Quality.MaterialBufferSkin, Main.Main.Quality.MaterialBufferCheckEvery, Main.Main.Quality.AlbedoBuffer, Main.Main.Quality.BackDepth, Main.Main.ReducedQuality.SunCacheByChange, Main.Main.ReducedQuality.SunLayers, Main.Main.ReducedQuality.SunCacheMaxAge, Main.Main.ReducedQuality.SunCacheMoveShare, Shaders.AmbientLight.Main.HiZ, Shaders.AmbientLight.Main.AlbedoBuffer, Shaders.Flashlight.Main.HidePipBoyLight, Shaders.Flashlight.Main.TestForceOn, Shaders.Grass.Main.ShadowFix, Shaders.Grass.Main.SkyLightScale, Shaders.GodRays.Main.SunsetGlareFix, Shaders.TAA.FSR.ReactiveMask, Shaders.TAA.DLSS.JitterFlip, Shaders.TAA.DLSS.HelperWait, Shaders.TAA.DLSS.HelperGpuPriority, Shaders.TAA.DLSS.HelperExactInputs, Shaders.TAA.DLSS.RRNormals, Shaders.TAA.DLSS.RRDepthLinear, Shaders.TAA.DLSS.RRKeepDenoisers, Shaders.PBR.Main.GameShaderEyes, Shaders.PBR.Main.DxvkLampBranches, Shaders.PBR.Linear.LinearScene, Shaders.Precipitations.Main.ForceRain, Shaders.ShadowsExteriors.ShadowMaps.CharacterShadowMapTarget, Shaders.ShadowsExteriors.ShadowMaps.CharacterShadowMapNpcDistance, Shaders.ShadowsExteriors.ShadowMaps.CasterFadeMin, Shaders.ShadowsInteriors.Main.ForwardReachMask, Shaders.ShadowsInteriors.Main.TwoSidedCasters, Shaders.ShadowsInteriors.Forward.VisibleRanking, Shaders.ShadowsInteriors.Forward.AutoNormalOffset, Shaders.ShadowsInteriors.Forward.ShadowHold, Shaders.ShadowsInteriors.Atlas.Enabled, Shaders.ShadowsInteriors.Atlas.TableLamps, Shaders.ShadowsInteriors.Atlas.TableLampsParity, Shaders.ShadowsInteriors.Atlas.NearTiles, Shaders.ShadowsInteriors.Capsules.Enabled, Shaders.ShadowsInteriors.RT.SkipTracedCubes, Shaders.ShadowsInteriors.RT.ManyLightsOneRay, Shaders.ShadowsInteriors.RT.RankBy, Shaders.ShadowsInteriors.RT.StartOffsetPerUnit, Shaders.Reflections.RT.VisibleNormals, Shaders.VolumetricClouds.Main.Stable, Shaders.VolumetricClouds.Main.JitterWrap, Shaders.Sky.Main.TintKeepsBrightness, Shaders.SnowAccumulation.Main.FollowJitter, Shaders.Skin.Main.MuteGameHighlights, Shaders.Terrain.Displacement.FarUntessellated, Shaders.Terrain.Displacement.FarHysteresis, Shaders.Terrain.Displacement.ContactShadowsOutside, Shaders.Terrain.Displacement.IgnoreMipBias, Shaders.Terrain.Displacement.FixedFactor, Shaders.Terrain.Displacement.Winding, Shaders.POM.Displacement.SameHeight, Shaders.POM.Displacement.FixedFactor, Shaders.POM.Displacement.Winding" # UNOFFICIAL (2026-10-25), hidden, read from this file only: the settings shown only with DeveloperOptions on, besides the test switches the menu finds itself (names ending in Check, Log, Probe, DebugView; descriptions that say diagnostic or test only). The last 17 are options measured to change almost nothing (under 0.25% of pixels in a still interior and exterior, no measurable cost). Section.Key, or Section.* for a whole section (comma separated). Measured low-impact options: work/bench/menu-tidy/LOW-IMPACT-OPTIONS.md.
-
-[_Main.SleepingMode.Main]
-Enabled = false                         # Custom camera animation when player character goes to sleep.
-Mode = 0
+DevOnly = "Shaders.TAA.FSR.EffectsAfterUpscale, Shaders.TAA.FSR.SmoothEffects, Main.Develop.*, Main.Main.Misc.MoreLampsPerObject, Main.Main.Misc.LampReachMargin, Main.Main.Misc.LampsInOnePass, Main.Main.Misc.SpecularLODPasses, Main.Main.Performance.SkipRedundantConstants, Main.Main.Performance.SkinnedShadowFaceTest, Main.Main.Performance.ParallelShaderCompile, Main.Main.Performance.NewEffectCompiler, Main.Main.Performance.ShaderWarmUp, Main.Main.Performance.ShaderWarmUp2, Main.Main.Performance.ShaderWarmUp2BudgetMs, Main.Main.Performance.ShaderWarmUp2MinMs, Main.Main.Performance.IOWorker2, Main.Main.Performance.HiddenObjectCulling, Main.Main.Performance.HiddenObjectCullingMaxAge, Main.Main.Performance.PreDecodeCache, Main.Main.Performance.FastCasterHash, Main.Main.Performance.CasterListCache, Main.Main.Performance.SkyOnWorker, Main.Main.Misc.LampCapsStats, Main.Main.Performance.DrawStateTracking, Main.Main.Performance.MenuHiddenLean, Main.Main.Performance.LampScissor, Main.Main.Performance.LampScissorExact, Main.Main.Performance.TrimLampPasses, Main.Main.Performance.FrameChain, Main.Main.Performance.CompositeApply, Main.Main.Performance.ChainUsesGameTexture, Main.Main.Performance.MergedDepthNormals, Main.Main.Performance.SkipIdentityExposure, Main.Main.Performance.LampMaskScissor, Main.Main.Performance.InteriorShadowFold, Main.Main.Performance.CubeFaceCopySkip, Main.Main.Performance.CubeFaceViewCull, Main.Main.Performance.SlimDepthBuffer, Main.Main.Performance.ReShadeDepthNearRemap, Main.Main.Performance.WorldSceneGuard, Main.Main.Performance.MenuSceneGuard, Main.Main.Water.ReflectionClipFix, Shaders.AmbientLight.Main.NoEdgeOutline, Shaders.Grass.Main.DrawFirst, Shaders.Grass.Main.DrawFirstCull, Shaders.Grass.Main.GameShaderFix, Shaders.GodRays.Main.SkipEmpty, Shaders.PBR.Main.UnlitShadowSkip, Shaders.PBR.Main.LampReachSkip, Shaders.PBR.Main.SpecularFade, Shaders.PBR.Main.FoldHighlights, Shaders.PBR.Main.LampDistanceFix, Shaders.PBR.Main.LampSums, Shaders.PBR.Main.HighlightSums, Shaders.PBR.Rmaos.FadeIn, Shaders.PBR.Linear.PreDecode, Shaders.PBR.Linear.ExactPassSums, Shaders.Precipitations.Main.SkipHiddenLayers, Shaders.ShadowsExteriors.Main.SkipWhenFaded, Shaders.ShadowsExteriors.Main.CasterReachEverywhere, Shaders.ShadowsExteriors.Main.SunCascadeSkipFlat, Shaders.ShadowsExteriors.Main.SunCascadeOneWalk, Shaders.ShadowsExteriors.Main.SunCascadeLeanDraws, Shaders.ShadowsExteriors.Main.OverheadSunFix, Shaders.ShadowsExteriors.ScreenSpace.FastPaths, Shaders.ShadowsExteriors.ShadowMaps.LodSkipLoaded, Shaders.CloudShadows.Main.TargetFix, Shaders.ShadowsInteriors.Main.MaskSkipFar, Shaders.ShadowsInteriors.Main.PlayerInsideLamp, Shaders.ShadowsInteriors.Main.RedrawActorsOnly, Shaders.ShadowsInteriors.Forward.KeepLampsInView, Shaders.ShadowsInteriors.Forward.ScopeFix, Shaders.VolumetricClouds.Main.FixedMarchExit, Shaders.WetWorld.Main.FastPaths, Shaders.WetWorld.Main.KeepHighlights, Shaders.BloodFlow.Main.CheapGather, Shaders.BloodFlow.Main.SplatFast, Shaders.Terrain.Parallax.IsoHeightTaps, Shaders.Terrain.Parallax.SkipEmptyLayers, Shaders.Skin.Debug.*, Main.Main.Performance.ArrivalSampler, Shaders.AmbientOcclusion.FastPaths.Enabled, Shaders.AmbientLight.Main.GridWallMemory, Shaders.AmbientLight.Main.GridFine, Shaders.DepthOfField.FirstPersonView.DistantBlur, Shaders.GodRays.Main.SkipIdle, Shaders.GodRays.Main.SunGlareEnabled, Shaders.Tonemapping.Main.HueSafeClip, Shaders.SMAA.Main.DeDither, Shaders.ShadowsExteriors.Main.TwoSidedCasters, Shaders.ShadowsExteriors.ShadowMaps.Prefilter, Shaders.ShadowsExteriors.Ortho.LimitFrequency, Shaders.ShadowsInteriors.Forward.LampGlassShadows, Shaders.ShadowsInteriors.Forward.LampModelShadows, Shaders.ContactHardening.Main.Smooth, Shaders.SkyDither.Main.SkyOnly, Shaders.Sky.Main.UseSunDiskColor, Shaders.Terrain.Blending.Smooth, Shaders.CloudShadows.Main.JitterFix, Shaders.CloudShadows.Main.SkipCascadeCheck, Main.Main.Misc.FoldFog, Main.Main.Misc.ManyLampsOnePass, Main.Main.Misc.ManyLampsGlow, Main.Main.Misc.LightCommonLamps, Main.Main.Misc.LampTableStandalone, Main.Main.Misc.ClusteredLamps, Main.Main.Misc.LandAllLamps, Main.Main.Misc.LampsDepthFirst, Main.Main.Misc.LampsDepthFirstMinLamps, Main.Main.Performance.SettingsCache, Main.Main.Performance.NvrDxvkVariants, Main.Main.Performance.NvrDxvkStencil, Main.Main.Performance.NvrDxvkKeepD3D9, Main.Main.Performance.NvrDxvkTestSuffix, Main.Main.Performance.AmbientLightSmoothCompute, Main.Main.Performance.AmbientLightBlurCompute, Main.Main.Performance.NvrSm6Shaders, Main.Main.Performance.InteriorShadowFoldRound, Main.Main.Performance.ReShadeUnderNVRMenu, Main.Main.Performance.ReShadeGameValues, Main.Main.RayTracing.ActorUpdateInterval, Main.Main.RayTracing.ActorStillSkip, Main.Main.RayTracing.ActorStillThreshold, Main.Main.RayTracing.ActorRebuildInterval, Main.Main.RayTracing.Compact, Main.Main.RayTracing.DenoiseBackbone, Main.Main.RayTracing.BuildTrianglesPerFrame, Main.Main.RayTracing.BuildNearRadius, Main.Main.RayTracing.LeafCardsOpaque, Main.Main.RayTracing.PlantSway, Main.Main.RayTracing.CullSmallAngle, Main.Main.RayTracing.GrassMaxTufts, Main.Main.RayTracing.ArenaMB, Main.Main.Quality.CapturedNormals, Main.Main.Quality.CapturedNormalsLeanHook, Main.Main.Quality.SharedDrawState, Main.Main.Quality.ObjectMotion, Main.Main.Quality.ObjectMotionSkipCameraFollow, Main.Main.Quality.MaterialBuffer, Main.Main.Quality.MaterialBufferSkin, Main.Main.Quality.MaterialBufferCheckEvery, Main.Main.Quality.AlbedoBuffer, Main.Main.Quality.BackDepth, Main.Main.ReducedQuality.SunCacheByChange, Main.Main.ReducedQuality.SunLayers, Main.Main.ReducedQuality.SunCacheMaxAge, Main.Main.ReducedQuality.SunCacheMoveShare, Shaders.AmbientLight.Main.HiZ, Shaders.AmbientLight.Main.AlbedoBuffer, Shaders.Flashlight.Deferred.TestForceOn, Shaders.Grass.Main.ShadowFix, Shaders.Grass.Main.SkyLightScale, Shaders.GodRays.Main.SunsetGlareFix, Shaders.TAA.FSR.ReactiveMask, Shaders.TAA.DLSS.JitterFlip, Shaders.TAA.DLSS.HelperWait, Shaders.TAA.DLSS.HelperGpuPriority, Shaders.TAA.DLSS.HelperExactInputs, Shaders.TAA.DLSS.RRNormals, Shaders.TAA.DLSS.RRDepthLinear, Shaders.TAA.DLSS.RRKeepDenoisers, Shaders.PBR.Main.GameShaderEyes, Shaders.PBR.Main.DxvkLampBranches, Shaders.PBR.Linear.LinearScene, Shaders.Precipitations.Main.ForceRain, Shaders.ShadowsExteriors.ShadowMaps.CharacterShadowMapTarget, Shaders.ShadowsExteriors.ShadowMaps.CharacterShadowMapNpcDistance, Shaders.ShadowsExteriors.ShadowMaps.CasterFadeMin, Shaders.ShadowsInteriors.Main.ForwardReachMask, Shaders.ShadowsInteriors.Main.TwoSidedCasters, Shaders.ShadowsInteriors.Forward.VisibleRanking, Shaders.ShadowsInteriors.Forward.AutoNormalOffset, Shaders.ShadowsInteriors.Forward.ShadowHold, Shaders.ShadowsInteriors.Atlas.Enabled, Shaders.ShadowsInteriors.Atlas.TableLamps, Shaders.ShadowsInteriors.Atlas.TableLampsParity, Shaders.ShadowsInteriors.Atlas.NearTiles, Shaders.ShadowsInteriors.Capsules.Enabled, Shaders.ShadowsInteriors.RT.SkipTracedCubes, Shaders.ShadowsInteriors.RT.ManyLightsOneRay, Shaders.ShadowsInteriors.RT.RankBy, Shaders.ShadowsInteriors.RT.StartOffsetPerUnit, Shaders.Reflections.RT.VisibleNormals, Shaders.VolumetricClouds.Main.Stable, Shaders.VolumetricClouds.Main.JitterWrap, Shaders.Sky.Main.TintKeepsBrightness, Shaders.SnowAccumulation.Main.FollowJitter, Shaders.Skin.Main.MuteGameHighlights, Shaders.Terrain.Displacement.FarUntessellated, Shaders.Terrain.Displacement.FarHysteresis, Shaders.Terrain.Displacement.ContactShadowsOutside, Shaders.Terrain.Displacement.IgnoreMipBias, Shaders.Terrain.Displacement.FixedFactor, Shaders.Terrain.Displacement.Winding, Shaders.POM.Displacement.SameHeight, Shaders.POM.Displacement.FixedFactor, Shaders.POM.Displacement.Winding" # UNOFFICIAL (2026-10-25), hidden, read from this file only: the settings shown only with DeveloperOptions on, besides the test switches the menu finds itself (names ending in Check, Log, Probe, DebugView; descriptions that say diagnostic or test only). The last 17 are options measured to change almost nothing (under 0.25% of pixels in a still interior and exterior, no measurable cost). Section.Key, or Section.* for a whole section (comma separated). Measured low-impact options: work/bench/menu-tidy/LOW-IMPACT-OPTIONS.md.
 
 [_Main.WeatherMode.General]
 CoeffFogB = 0.86
@@ -713,61 +703,23 @@ MinBrightness = 0.3                    # Brightness treshold below which the scr
 Enabled = true                         # Modulates screen gamma to correct exposure based on average brightness. Avoids screens that are too bright/dark.
 
 [_Shaders.Flashlight.Main]
-ColorR = 2.0                           # R Channel of the color of the flashlight
-ColorG = 2.0                           # G Channel of the color of the flashlight
-ColorB = 1.0                           # B Channel of the color of the flashlight
-Dimmer = 1.0                           # Dimmer for the color of the flashlight
-Angle = 30.0                           # Angle for the flashlight cone
-Distance = 1000                        # Distance radius for the light
-OffsetX = 0.0                          # X coordinate offset for the position of the light relative to the weapon position 
-OffsetY = 0.0                          # Y coordinate offset for the position of the light relative to the weapon position
-OffsetZ = 0.0                          # Z coordinate offset for the position of the light relative to the weapon position
-RenderShadows = false                  # Wether to use rendered shadows in the flashlight cone
-AttachToWeapon = true                  # The flashlight will move with the weapon instead of being fixed to the camera. It rides the weapon while aiming either way
-NearFade = 0.0                         # Fades the light out on surfaces closer than this many units, so point blank walls don't clip to white. 0 disables
-HotspotLimit = 0.0                     # Rolls off the brightest part of the lit pool without dimming the falloff around it. 0 disables
-CookieStrength = 0.0                   # Procedural rings and mottling in the beam, for structure on flat surfaces. 0 disables
-SoftEdges = false                      # Wrap lighting instead of clamped diffuse. Removes the speckle the reconstructed normals produce on grass and foliage, at the cost of a flatter beam. Does not change overall brightness
-HidePipBoyLight = true                 # FIX (2026-10-28): the game's Pip-Boy light, which the flashlight replaces, also gets no brightness or reach while the flashlight is on (before, it was only hidden: indoors it could still take one of the few lamps each object near you is lit by, and that lamp's light and shadows went, a moment after turning the flashlight on). false = as before. Live.
-TestForceOn = false                    # TEST (2026-10-28), for automatic tests: the flashlight on as if the Pip-Boy light were. Leave off.
-EdgeFix = 1                            # UNOFFICIAL: cleans up the flashlight at the edges of grass, leaves and characters, worst with MSAA: the bright rim in the colour of what is behind them (sky, a lit wall) and the jagged edge that flickers as you move. 1: the lit surfaces - at an edge, the part of the pixel that is leaf gets the leaf's light and the part that is background gets the background's. 2: also the beam's light shaft in the air, which then no longer spills over the edges of what stands in front of it (sharper, but it can speckle on grass in third person). Only pixels at edges change. Costs about 0.1 ms at 2560x1440 (GTX 1070) with grass filling the beam, less with less. 0 off. Applies immediately
+Dimmer = 4.0                           # [0-50] How bright the flashlight is at the centre of its beam, in the lamps' units (1 is about a bright lamp up close). Its colour is your Pip-Boy's HUD colour (the game's display settings).
+Distance = 1000                        # How far the beam reaches, in game units (it fades out well before this: see Deferred's Falloff).
+AttachToWeapon = true                  # The flashlight rides the weapon instead of the camera (in third person: the head). It rides the weapon while aiming either way.
 
-[_Shaders.Flashlight.Interiors]
-ColorR = 2.0                           # UNOFFICIAL: the flashlight's look indoors (Main is outdoors). R channel of the color
-ColorG = 2.0                           # G channel of the color
-ColorB = 1.0                           # B channel of the color
-Dimmer = 1.0                           # Dimmer for the color of the flashlight
-Angle = 30.0                           # Angle for the flashlight cone
-Distance = 1000                        # Distance radius for the light
-NearFade = 0.0                         # Fades the light out on surfaces closer than this many units. 0 disables
-HotspotLimit = 0.0                     # Rolls off the brightest part of the lit pool. 0 disables
-CookieStrength = 0.0                   # Procedural rings and mottling in the beam. 0 disables
-
-[_Shaders.Flashlight.MaterialLight]
-Enabled = false                        # Re-light nearby static geometry with its own normals, normal map and specular settings, instead of relying on normals reconstructed from depth
-Intensity = 0.015                      # Strength of the re-lit contribution
-Specular = 0.5                         # Scales the specular highlight. Multiplies the material own specular strength
-NormalStrength = 1.0                   # Scales the sideways component of the normal map. 1.0 uses the map as authored
-MaxGeometry = 2048                     # Cap on the number of objects re-lit in one frame
-DebugMode = 0                          # 0 renders normally, 1 to 7 visualise the pass, 8 draws everything it captured through walls
+[_Shaders.Flashlight.Deferred]
+Shadows = true                         # Everything in front of the flashlight casts a shadow in its beam (a shadow map drawn from the light every frame while it is on).
+ShadowSoftness = 5.0                   # [0-16] How soft the shadow edges are: the PCF blur's radius in texels of a 512 map (the same width whatever ShadowMapSize is). 16 bilinear PCF samples.
+ShadowBias = 0.004                     # [0-0.1] How far a surface may be behind its shadow map depth and still count as lit, as a share of the beam's reach. Raise it if surfaces shadow themselves in stripes; lower it if shadows lift off their casters.
+ShadowMapSize = 2048                   # NEEDS A RESTART. [512, 1024, 2048, 4096] The flashlight's own shadow map resolution (it used the lamp shadows' ShadowCubeMapSize before). Higher: sharper shadow shapes, more video memory (2048: 16 MB).
+Cookie = 0.0                           # [0-1] The flashlight lens pattern (Effects\Flashlight.png) over the beam. 0 a clean beam.
+Falloff = 4.0                          # [0-32] How fast the beam fades with distance: a windowed inverse square, bright close up, about a quarter as bright halfway to the reach (Distance) at 4, nothing at the reach. Higher: a shorter beam. 0: the lamps' falloff (still three quarters as bright halfway out).
+GameLight = true                       # The flashlight is also a real game light (the Pip-Boy light, moved onto the beam), so everything a lamp lights reacts to it as to a lamp at night: leaves, your first-person view, see-through things and the env-map shine of glossy assets. What the light pass already lights gets none of it (no double light); the rest gets it as far as the object is in the beam.
+DebugView = 0                          # DIAGNOSTIC: 1 the flashlight's light alone, 2 its shadow, 3 the normals it lights by. 0 off.
+TestForceOn = false                    # TEST, for automatic tests: the flashlight on as if the Pip-Boy light were (and the game's Pip-Boy light switched on). Leave off.
 
 [_Shaders.Flashlight.Status]
-Enabled = true                          # Replace the pipboy light with a post process flashlight attached to the weapon
-
-[_Shaders.FlashlightBeam.Main]
-FirstPerson = true                     # Show the shaft in first person
-ThirdPerson = true                     # Show the shaft in third person
-Strength = 1.0                         # Amount of light scattered by the air in the beam
-Anisotropy = 0.45                      # Forward scattering. Higher makes the shaft brighter when looking along the beam
-HeightFalloff = 1.0                    # How quickly the airborne dust thins out with height
-MaxDistance = 1500.0                   # Distance in units past which the march stops
-FirstPersonStrength = 0.15             # Strength floor in first person, where the light sits on the camera and there is no parallax
-FirstPersonOffsetRight = 8.0           # Sideways offset of the virtual light the first person march uses, to create that parallax
-FirstPersonOffsetDown = 4.0            # Downward offset of the same virtual light
-
-[_Shaders.FlashlightBeam.Status]
-Enabled = true                         # Volumetric light shaft in the air along the flashlight cone. Requires the Flashlight shader
-
+Enabled = true                         # The flashlight (the Pip-Boy light's key): a real spot light, coloured by your Pip-Boy's HUD colour, that lights the world's surfaces with their own colour, roughness and metal, casts shadows, lights the grass, and is the game's lamp for what that light cannot reach. Needs [Main.Main.Quality] CapturedNormals, MaterialBuffer and AlbedoBuffer (restart) for the surfaces.
 
 [_Shaders.Foliage.Main]
 Translucency = 0.0                   # UNOFFICIAL: grass and tree leaves glow softly when the sun is behind them (light passing through). 0 = off (the default): this page does nothing until you raise it. Try 0.5 and look toward the sun. In the menu: under Plants.
@@ -783,7 +735,8 @@ DrawFirst = true                       # UNOFFICIAL (2026-10-17): the grass is d
 DrawFirstRestore = 5                   # UNOFFICIAL, diagnostic (2026-10-17): with DrawFirst, which device state is put back after the early grass (1 shader constants, 2 render states, 4 sampler states, 8 texture stage states, 16 textures). Leave at 5 (constants + sampler states).
 ShadowFix = true                       # FIX (2026-10-27): the sun shadow on grass was striped and fell on the wrong side of each tuft (its normal faced the camera, not the sun). true = the tuft takes the ground's shadow evenly. false = the old look, for comparison only.
 SkyLightScale = true                   # FIX (2026-10-27): grass in shadow was a little too bright: the mod's sky light skipped the darkening the game gives each tuft's ambient light. true = the sky light takes it too. false = the old look, for comparison only. Live.
-PointLights = false                    # UNOFFICIAL (2026-10-27): grass lit by a lamp or fire (the game's 1POINT grass shaders) also gets the mod's sun shadow, ShadowFix and the grass wind, instead of the game's own shader (no mod shadow there: tufts near a lamp look different from the rest). No sandstorm gusts on those tufts. Not tested in game yet. Restart the game after changing. false = the game's shaders, as before.
+Brightness = 1.0                       # [0.0-4.0] Multiplies how bright the grass is lit, before fog: below 1 darker, above 1 brighter. 1 leaves it as the lighting makes it.
+NightBrightness = 1.0                  # [0.0-4.0] Multiplies the moon and ambient light on outdoor grass at night, easing back to 1 through sunrise (the same curve as the other day/night transitions). Lamps on the grass are not affected. Below 1 darker grass at night, 1 as before.
 CastShadows = true                     # UNOFFICIAL (2026-10-27): the grass tufts cast sun shadows on the ground and on everything drawn after them, as the placed bushes always did (before, grass took the shadows of others but threw none). They are drawn a second time into the near sun shadow map, so it costs some graphics card time where there is a lot of grass (the F10 profile shows it as "Grass shadows"). Needs DrawFirst on and the PCF sun shadow maps ([Shaders.ShadowsExteriors.ShadowMaps] Mode 3, the default). Near the camera only (the near shadow cascade). With Terrain Blending on too (since 2026-10-28: the grass is then drawn into the shadow map only before the land, and on screen at its usual place). Live.
 CastShadowsReach = 1050.0               # UNOFFICIAL (2026-10-28) [0-4000], live: how far from you the grass casts sun shadows, in world units (70 is about 1 m; 1050 = 15 m). The nearest shadow map ends only 2-3 m out (with CascadeLambda 0.9), so the grass shadows used to fade there; now the tufts within this distance are also drawn into the next two sun shadow maps (a little softer there, as every shadow is). Costs more graphics card time the further it reaches in thick grass (F10 profile: "Grass shadows"). 0 = the nearest shadow map only, as before.
 CastShadowsBlack = false               # UNOFFICIAL (2026-10-27), diagnostic, live: the grass shadows are drawn solid black (the tufts as if right against the sun), so you can see at once whether and where the grass casts. For checking only: leave off.
@@ -817,13 +770,34 @@ MaxBlades = 524288                     # [4096-2097152] How many strands a frame
 DebugView = 0                          # DIAGNOSTIC: 1 = near strands red, far strands blue; 2 = a colour per game grass draw. 0 = the real colours.
 Log = 0                                # DIAGNOSTIC: 1 = the graphics card's counts (clumps, strands near / far) in the log every 300 frames (otherwise the first frames and once a minute).
 
-[_Shaders.Grass.Collision]
-Enabled = false                        # UNOFFICIAL (2026-10-19) Grass that moves when you walk through it: you and the people and creatures near you push the grass aside, and it springs back behind you. Costs next to nothing (a small texture made each frame, one extra read per grass vertex). Works on the game's grass and on GPU grass strands; every grass type now bends by the full Strength (it used to follow each grass's own sway stiffness, so most grass hardly moved). After Community Shaders' Grass Collision (GPL-3.0); this build's own version for DirectX 9.
-Strength = 28.0                        # [0-200] (2026-10-19) How far a blade's tip is pushed aside right at someone's feet, in game units (2026-10-20: the full amount from 50 units above the ground up, for every grass type).
-Radius = 1.0                           # [0.1-5] (2026-10-19) How wide the pushed patch is, times each actor's own size.
-Recovery = 2.5                         # [0-60] (2026-10-19) Seconds for the grass to spring back once nobody stands in it (0: at once).
-Range = 1536.0                         # [256-8192] (2026-10-19) How far from you actors still push grass, in game units. Smaller: a finer push map (sharper footprints).
-Actors = 16                            # [0-64] (2026-10-19) How many of the nearest people and creatures push grass besides you.
+[_Shaders.Grass.Interaction]
+Enabled = true                         # Grass bends away from you as you walk through it and springs back after, like There Stands The Grass NVSE (which stands down when NVR owns the grass shaders). UNOFFICIAL VegasShaders 2026-11-04: in place of Grass Collision. The GPU grass and NewGrass strands do not bend. Same settings and defaults as that mod.
+Radius = 100.0                         # [10-1000] Reach around your feet, in game units, within which the grass bends.
+StrengthStanding = 120.0               # [0-1000] Push while standing; the blade tips move half of it.
+StrengthMax = 150.0                    # [0-1000] Push at full running speed.
+SpeedForMax = 300.0                    # [1-5000] Your speed (units per second) that reaches StrengthMax.
+SpringBackSeconds = 0.5                # [0.01-10.0] How quickly the grass recovers when you slow down or leave.
+PositionLagSeconds = 0.08              # [0.0-2.0] How tightly the bend follows you: higher trails further behind.
+Debug = false                          # Tints the grass the bend reaches red and logs the bend strength every two seconds (NewVegasReloaded.log), to check the bend follows you.
+
+[_Shaders.Grass.LOD]
+Enabled = true                         # Grass fades by how big it looks, not only how far it is (after Community Shaders' Grass Optimizations): small pieces go sooner, big clumps last longer, and grass too small to see is skipped before it is shaded. Works under the game's own grass fade distance.
+MinPixels = 3.0                        # [0-200] Grass shorter than this on screen, in pixels (at your resolution), is gone. Raise for more speed, lower to keep small grass longer. 0 turns the size fade off but keeps the detail bias.
+FadePixels = 6.0                       # [0.5-200] It fades in over this many pixels above MinPixels, so nothing pops.
+DetailVertices = 300.0                 # [1-65535] A grass mesh with this many vertices or more counts as fully detailed (rocks, flowers, dense clumps).
+DetailStrength = 1.0                   # [0-10] How much sooner fully detailed meshes go: their MinPixels is raised by up to this much (1: twice as soon). 0 treats every mesh alike.
+
+[_Shaders.Grass.Lights]
+Enabled = true                     # Placed lights and the Pip-Boy light light the grass (never the sun, which the grass already gets). Costs nothing where no lamp is near. UNOFFICIAL VegasShaders 2026-11-04: in place of [Shaders.Grass.Main] PointLights.
+MaxLights = 8                      # [0-8] The most lamps on the grass at once, nearest first.
+Strength = 1.0                     # [0.0-1.0] How bright the lamps are on the grass.
+
+[_Shaders.Grass.NormalMaps]
+Enabled = true                     # A grass texture with a normal map beside it, named after it with _n (grass01.dds -> grass01_n.dds, rock_d.dds -> rock_n.dds; loose or in a BSA; also grass-placed meshes such as Rock Grass), gets per-pixel sunlight from that map. Grass without one looks exactly as before.
+Strength = 1.0                     # [0.0-4.0] How much the normal map bends the light. 0 is the grass's own lighting.
+EnableSpecular = true              # The sun's highlight on the grass (and grass-placed rocks). Where the grass has a normal map, its alpha says how shiny each spot is; grass without one shines evenly.
+SpecularStrength = 0.5             # [0.0-4.0] How bright the highlight is.
+Glossiness = 32.0                  # [1-512] How tight the highlight is: low a broad sheen, high a small sharp glint.
 
 [_Shaders.Grass.Wind]
 Enabled = false                        # UNOFFICIAL (2026-10-20) GRASS IN THE WIND, a LOOK CHANGE (off): the grass moves like a field in the wind instead of every tuft swaying on its own. Gusts roll across the grass along the weather's wind like waves through wheat (stronger and faster as the wind rises), each tuft flutters a little on its own, and the game's own sway follows the weather's wind direction -- the same wind cloth uses, so grass and coats agree (the game itself sways all grass north-south whatever the weather). Works on the game's grass cards. Off = exactly the game's sway. Live.
@@ -1473,66 +1447,19 @@ MaxJumpAngle = 5.0					 # [5.0-30.0] A maximum angle difference for which smooth
 GlideSeconds = 3.0                   # [0.0-10.0] UNOFFICIAL: real seconds each step of the sun slides over, instead of all sun shadows jumping at once about every in-game hour. Bigger jumps (waiting, sleeping, loading) stay instant. 0 = the original behaviour.
 CrossFade = false                    # UNOFFICIAL, needs a game restart: instead of turning the shadows over GlideSeconds, fade from the old shadows to the new ones over that time, so shadow edges never crawl while the sun moves. Costs a second copy of the shadow maps in video memory (about 72 MB at the default CascadeResolution) and a little GPU time during each fade only. Needs ForwardShadows (the default).
 
-[_Shaders.ShadowsExteriors.FormsNear]
+[_Shaders.ShadowsExteriors.Forms]
+# What casts sun shadows, for all four cascades. The farthest one also leaves out actors, activators, furniture and misc objects.
 Activators = true                    # Whether to include objects with "Activator" flag when rendering shadowmaps.
-Actors = true                        # Whether to include objects with "Actors" flag when rendering shadowmaps.
+Actors = true                        # Whether to include actors in the shadows (never in the farthest cascade).
 AlphaEnabled = true                  # Whether to take into account alpha of objects when rendering shadowmaps.
 Apparatus = false                    # Whether to include objects with "Apparatus" flag when rendering shadowmaps.
 Books = false                        # Whether to include objects with "Books" flag when rendering shadowmaps.
 Containers = true                    # Whether to include objects with "Containers" flag when rendering shadowmaps.
 Doors = true                         # Whether to include objects with "Doors" flag when rendering shadowmaps.
 Furniture = true                     # Whether to include objects with "Furniture" flag when rendering shadowmaps.
-Lod = false                          # Whether to include objects with "Lod" flag when rendering shadowmaps.
-MinRadius = 1.0                      # Whether to include objects with a radius of less than x pixels on the screen in the shadowmaps.
+Lod = true                           # Whether to include distant LOD objects (only in the two farthest cascades; hidden up close anyway).
+MinRadius = 1.0                      # Objects smaller than this many pixels on screen are left out of the shadows (ten times this in the two farthest cascades).
 Misc = true                          # Whether to include objects with misc flags when rendering shadowmaps.
-Statics = true                       # Whether to include objects with "Statics" flag when rendering shadowmaps.
-Terrain = true                       # Whether to include Terrain when rendering shadowmaps.
-Trees = true                         # Whether to include Trees when rendering shadowmaps.
-
-[_Shaders.ShadowsExteriors.FormsMiddle]
-Activators = true                    # Whether to include objects with "Activator" flag when rendering shadowmaps.
-Actors = true                        # Whether to include objects with "Actors" flag when rendering shadowmaps.
-AlphaEnabled = true                  # Whether to take into account alpha of objects when rendering shadowmaps.
-Apparatus = false                    # Whether to include objects with "Apparatus" flag when rendering shadowmaps.
-Books = false                        # Whether to include objects with "Books" flag when rendering shadowmaps.
-Containers = true                    # Whether to include objects with "Containers" flag when rendering shadowmaps.
-Doors = true                         # Whether to include objects with "Doors" flag when rendering shadowmaps.
-Furniture = true                     # Whether to include objects with "Furniture" flag when rendering shadowmaps.
-Lod = false                          # Whether to include objects with "Lod" flag when rendering shadowmaps.
-MinRadius = 1.0                      # Whether to include objects with a radius of less than x pixels on the screen in the shadowmaps.
-Misc = true                          # Whether to include objects with misc flags when rendering shadowmaps.
-Statics = true                       # Whether to include objects with "Statics" flag when rendering shadowmaps.
-Terrain = true                       # Whether to include Terrain when rendering shadowmaps.
-Trees = true                         # Whether to include Trees when rendering shadowmaps.
-
-[_Shaders.ShadowsExteriors.FormsFar]
-Activators = true                    # Whether to include objects with "Activator" flag when rendering shadowmaps.
-Actors = true                        # Whether to include objects with "Actors" flag when rendering shadowmaps.
-AlphaEnabled = true                  # Whether to take into account alpha of objects when rendering shadowmaps.
-Apparatus = false                    # Whether to include objects with "Apparatus" flag when rendering shadowmaps.
-Books = false                        # Whether to include objects with "Books" flag when rendering shadowmaps.
-Containers = true                    # Whether to include objects with "Containers" flag when rendering shadowmaps.
-Doors = true                         # Whether to include objects with "Doors" flag when rendering shadowmaps.
-Furniture = true                     # Whether to include objects with "Furniture" flag when rendering shadowmaps.
-Lod = true                           # Whether to include objects with "Lod" flag when rendering shadowmaps.
-MinRadius = 1.0                      # Whether to include objects with a radius of less than x pixels on the screen in the shadowmaps. UNOFFICIAL 2026-10-27: 1 (was 10): small objects 25-80 m away keep their sun shadow; no measurable GPU cost (desert, Goodsprings).
-Misc = true                          # Whether to include objects with misc flags when rendering shadowmaps.
-Statics = true                       # Whether to include objects with "Statics" flag when rendering shadowmaps.
-Terrain = true                       # Whether to include Terrain when rendering shadowmaps.
-Trees = true                         # Whether to include Trees when rendering shadowmaps.
-
-[_Shaders.ShadowsExteriors.FormsLod]
-Activators = false                   # Whether to include objects with "Activator" flag when rendering shadowmaps.
-Actors = false                       # Whether to include objects with "Actors" flag when rendering shadowmaps.
-AlphaEnabled = true                  # Whether to take into account alpha of objects when rendering shadowmaps.
-Apparatus = false                    # Whether to include objects with "Apparatus" flag when rendering shadowmaps.
-Books = false                        # Whether to include objects with "Books" flag when rendering shadowmaps.
-Containers = false                   # Whether to include objects with "Containers" flag when rendering shadowmaps.
-Doors = true                         # Whether to include objects with "Doors" flag when rendering shadowmaps.
-Furniture = false                    # Whether to include objects with "Furniture" flag when rendering shadowmaps.
-Lod = true                           # Whether to include objects with "Lod" flag when rendering shadowmaps.
-MinRadius = 1.0                      # Whether to include objects with a radius of less than x pixels on the screen in the shadowmaps. UNOFFICIAL 2026-10-27: 1 (was 10): small objects 25-80 m away keep their sun shadow; no measurable GPU cost (desert, Goodsprings).
-Misc = false                         # Whether to include objects with misc flags when rendering shadowmaps.
 Statics = true                       # Whether to include objects with "Statics" flag when rendering shadowmaps.
 Terrain = true                       # Whether to include Terrain when rendering shadowmaps.
 Trees = true                         # Whether to include Trees when rendering shadowmaps.
@@ -1589,6 +1516,10 @@ CharacterShadowMapDebug = 0          # UNOFFICIAL (2026-10-24), diagnostic view,
 SmoothFilter = false					 # UNOFFICIAL (2026-10-15), PCF shadows (Mode 3): a smoother, slightly wider filter on the sun shadow maps (a 4 x 4 cubic B-spline instead of 3 x 3). Rounds off the stair steps that show where one shadow-map texel covers several pixels: shadows on your character in third person, a low sun across steep surfaces. Costs a little (16 compares per lookup instead of 9).
 LimitFrequency = true				 # Limit the update frequency of the furthest cascade (once per four frames).
 CasterFadeMin = 0.75                 # UNOFFICIAL (2026-10-28) [0-1], live: things the game is fading (in or out with distance) cast their sun shadow only from this much of their fade on. 0.75 = as before. Found with CasterView: distant trees' leaves sit at fade 0 while drawn on screen, so they never cast, and their shadow snaps on as you come nearer. 0 = they always cast (more shadow-map draws in tree-heavy places).
+CasterCulling = true                 # UNOFFICIAL (2026-11-04, from Physically-Based-Reloaded), live: skip shadow casters whose shadow cannot fall anywhere you can see (e.g. behind you with the sun in front). Saves shadow-map draw calls. Only on the cascades redrawn every frame (not a cached, staggered or SunLayers cascade, nor the furthest one while LimitFrequency is on: turning would show what was left out).
+CasterMargin = 256.0                 # [0.0-4096.0] Game units added around the view when deciding, so shadows at the screen edges and in the cascade cross-fade bands stay.
+CasterDrop = 2048.0                  # [0.0-65536.0] How far below an object its shadow is followed (terrain dropping away). Larger is safer, culls less.
+SkipCoveredCasters = true            # UNOFFICIAL (2026-11-04, from Physically-Based-Reloaded), live: leave a caster out of a cascade when its whole shadow falls where an earlier (sharper) cascade already answers for every pixel. Nearby NPCs and objects were drawn into the near, middle and far maps alike. Same cascades as CasterCulling.
 LodSkipLoaded = true				 # Distant-object LOD inside the loaded cells casts no shadow: the full objects there already do. Removes doubled shadows and ghost shadows of swapped or removed objects, and saves drawing them twice. false: the old behaviour.
 
 [_Shaders.ShadowsExteriors.Ortho]
@@ -2084,6 +2015,8 @@ ShadowResolution = 256                 # UNOFFICIAL [256-2048]: detail of the cl
 ShadowPrefilter = false                # UNOFFICIAL: smoother cloud shadows. On: the shadow map is made from the clouds' smooth shape only (no fine edge detail) and several samples per texel, so faces and ground get no dark speckles or blotches under the clouds. Off: as before.
 ShadowSoftness = 1.5                   # UNOFFICIAL [0.5-4]: with ShadowPrefilter on, how wide each cloud shadow sample spreads, in shadow map texels. Higher: softer, smoother cloud shadow edges.
 PhysicalShadows = false                # UNOFFICIAL (2026-10-31), live: cloud shadows as real ones. On: a thick cloud takes all of the sunlight under it (Shadows above 0 then only switches them on; 0.6 left 40% of the sun and sharp object shadows under an overcast sky), only the sunlight (the sky's light stays), with soft edges from the clouds' smooth shape (as ShadowPrefilter, ShadowSoftness wide), and they keep full strength with the sun down to about 14 degrees (off: only above 20; gone below about 5 either way). Applies where the sunlight alone is shaded (SunFar on, the default, or the RT sun); without SunFar the clouds' own apply darkens the whole pixel and keeps Shadows' strength. Off: as before.
+PlantShadows = true                    # UNOFFICIAL (2026-11-04), live: the clouds' shadow on plants (the bushes and trees the [Shaders.Plants.Wind] Keywords name; needs [Main.Main.Quality] MaterialBuffer). Off: plants keep their full sunlight under a cloud, as with the clouds off (everything SunFar takes from the sun, the land's shadow too, is left off them); the ground round them is still shaded. On: as before.
+ForwardShadows = false                 # UNOFFICIAL (2026-11-04), restart: the cloud shadows drawn by the surfaces themselves (land, objects, characters), per MSAA sample: no darkened edge pixels with the game's anti-aliasing, and grass and the speedtree leaves keep their sunlight under a cloud (with PlantShadows off the plants too). Off: SunFar puts them over the finished picture, as before.
 PhysicalMoonlight = false              # UNOFFICIAL, live: the moon lights the clouds with all the light the weather gives at night, as the sun does by day (their moonlit sides and shading), instead of 15% of it. Daytime is unchanged; dusk and dawn carry the weather's own twilight light. Best with physically dim night light in the weathers, where the 15% cut leaves the clouds lit almost only by the sky (flat). Off: as before.
 PhysicalSkyLight = false               # UNOFFICIAL, live, with [Shaders.Sky.Physical] on: the light the clouds get from the sky is the physical sky's at its own brightness against the sun or moon: their tops from the open sky above (averaged over the dome), their bases from the sunlit ground below (the physical sky's GroundAlbedo, or 0.3). The weather's sky colours then set only the hue (WeatherTint of [Shaders.Sky.Physical]); AmbientStrength becomes a plain multiplier, 1.0 = physical. Off: the sky light keeps the weather's brightness, as before. Without the physical sky: no effect.
 WaterReflections = 1.0                 # UNOFFICIAL [0-1]: these clouds in the water's reflection, drawn into the game's own reflection where it shows sky (so the water waves and tints them like the rest), in place of the game's flat cloud layers there. 0: the game's clouds in the water, as before.
@@ -2761,16 +2694,6 @@ Enabled = true                      # Short refraction water drop animation on t
 FastPaths = true                    # UNOFFICIAL (2026-10-17): the same rain picture for about 1 ms less GPU time (2560x1440): the wet pass's early exits (sky, distance, water, dry or roofed ground, your weapon), its puddle colour and its lamp loop really skip work (the shader compiler had turned them into work every pixel did). Measured: within the frame-to-frame rain flicker; the only place it can differ is the puddle reflection's rare screen-edge cases. Off = the original pass. Applies immediately
 FixedReflectionTrace = false        # UNOFFICIAL (2026-10-17): fixes the puddle reflection (the screen-space trace of WetWorld). Its loop exits never worked on the GPU, so it kept the last hit it found at full strength, ran past the screen border and flipped under any recompile. Fixed: the first hit counts, rays that pass behind a thin object are no hit, and the reflection fades out towards the screen borders and with distance. Looks slightly different (softer, no border patches), so it is off by default. Costs about 0.1-0.2 ms in rain. Applies immediately
 KeepHighlights = true               # UNOFFICIAL (2026-10-16): in rain the wet pass no longer cuts the picture at full white before the tonemapper (sun, bright sky and wet highlights keep their soft roll-off). Off = the old clamp. Applies immediately
-HudDrops = 1.0                       # [0.0-1.0] UNOFFICIAL: rain drops on your first-person weapon while you stand in the rain (not under cover), drying off afterwards (after mrfury97's HUD raindrops). Each drop is a little lens: it magnifies the surface under it, focuses the sun into a bright spot and catches a glint. 0: off (restart to switch on or off: it is compiled into the object shaders).
-HudDropSize = 0.6                    # [0.05-20] Size of a drop's cell in game units (the biggest drops are about three quarters of it across).
-HudDropDensity = 0.6                 # [0.0-1.0] How many drops gather at full wetness.
-HudRefraction = 1.0                  # [0.0-4.0] How strongly a drop magnifies the surface under it.
-HudReflection = 1.0                  # [0.0-8.0] How rounded the drops look: how much they tilt the surface's highlights.
-HudGloss = 0.8                       # [0.0-1.0] How glossy the drops are.
-HudWetGloss = 0.3                    # [0.0-1.0] How much glossier the wet surface between the drops gets.
-HudWetTime = 20.0                    # [0.5-600] Seconds in heavy rain to wet through (lighter rain takes longer).
-HudDryTime = 45.0                    # [0.5-600] Seconds to dry off under cover, indoors or after the rain.
-HudDebug = 0                         # 1: keep the weapon wet without rain, to try it out.
 Amount = 0.0                        # Darkness of puddles
 Decrease = 0.0                      # Time it takes in game hours for puddles to dissipate
 Increase = 0.0                      # Time it takes in game hours for puddles to appear
@@ -2790,3 +2713,62 @@ PersistentDebugView = 0             # (Persistent wetness and snow) Test view. 1
 
 [_Shaders.WetWorld.Status]
 Enabled = true                      # Water ripples on surfaces, and puddles based on physical terrain pockets during rainy weathers. 
+
+[_Shaders.WetnessEffects.Status]
+Enabled = false                     # UNOFFICIAL (2026-11-04), restart: Wetness Effects (from Physically-Based-Reloaded, after Community Shaders), in place of WetWorld's screen-space wet pass: in the rain surfaces darken and gain a glossy water film, puddles form on flat ground, drops ripple on the land, nothing gets wet under cover. Needs the sun cross-fade off ([Shaders.ShadowsExteriors.SunSmoothing] CrossFade). While on, WetWorld draws nothing (its rain tracking still drives the weapon drops, the persistent wet cover and PBR's rain).
+
+[_Shaders.WetnessEffects.Main]
+MaxRainWetness = 1.0                # [0.0-2.5] Rain Wetness: how wet surfaces open to the sky get in the rain (darker, with a glossy water film).
+MaxPuddleWetness = 1.5              # [0.0-6.0] Puddle Wetness: how much the puddles on flat ground fill.
+PuddleRadius = 1.0                  # [0.1-3.0] Puddle size.
+PuddleMaxAngle = 0.95               # [0.6-1.0] How flat ground must be to hold a puddle (the up component of its normal).
+PuddleMinWetness = 0.85             # [0.0-1.0] The wetness at which puddles start to form.
+MinRainWetness = 0.65               # [0.0-0.9] The least a surface gets wet in the rain: walls and undersides, which the rain does not fall straight on.
+WeatherTransitionSpeed = 3.0        # [0.2-8.0] How fast things get wet when the rain starts and dry after it stops (3: about 20 seconds; puddles take three times as long to dry).
+HeightAwareness = 1.0               # [0.0-1.0] Terrain only: how much the land textures' height maps shape the wetness. Water runs off the ridges and gathers in the crevices, which fill with standing water first. 0 off.
+CreviceFill = 0.5                   # [0.0-1.0] Terrain only: how high the standing water rises in the crevices at full wetness, as a height (0 the deepest point of a texture, 1 its highest). Higher floods more of the ground.
+NormalAwareness = 0.5               # [0.0-1.0] Terrain only: how much the land textures' normal maps decide how wet each spot gets. The tops of bumps and stones soak like flat ground, their steep sides less, and puddles keep off rough patches. 0 goes by the ground's slope alone.
+
+[_Shaders.WetnessEffects.Raindrops]
+EnableRaindropFx = true             # Raindrop effects on the ground open to the sky near the camera (the terrain only, not objects).
+EnableRipples = true                # Ripples: rings spreading where drops land on puddles and flat wet ground.
+RaindropFxRange = 1000.0            # [0-4096] Raindrop effects up to this distance, in game units.
+RaindropGridSize = 4.0              # [1-32] Raindrop spacing in game units: at most one drop per cell this size per interval.
+RaindropInterval = 1.0              # [0.1-4.0] Seconds between drops in a cell.
+RaindropChance = 1.0                # [0.0-1.0] Chance a cell gets a drop each interval, at full rain.
+RippleStrength = 1.0                # [0.0-3.0] How strongly ripples bend the water's surface.
+RippleRadius = 1.0                  # [0.1-2.0] How far a ripple spreads, in cells.
+RippleBreadth = 0.5                 # [0.05-1.0] Width of a ripple's ring, in cells.
+RippleLifetime = 0.5                # [0.05-4.0] How long a ripple lasts, in seconds.
+
+[_Shaders.WetnessEffects.Debug]
+WetnessOverride = -1.0              # [-1.0-1.0] Force the wetness, whatever the weather (for testing: vanilla New Vegas has almost no rain). -1 off.
+PuddleOverride = -1.0               # [-1.0-1.0] Force the puddle wetness. -1 off.
+RainOverride = -1.0                 # [-1.0-1.0] Force the rain intensity (ripples). -1 off.
+ShowCover = false                   # Debug view of what counts as under cover: green open to the sky, red covered, yellow outside the top-down map (counted open), blue no map, dark blue land with no map slot.
+
+[_Shaders.WetnessEffects.HudRaindrops]
+Enabled = true                       # Raindrops on the first-person arms and weapon in the rain (after Screen Space Shaders' HUD raindrops), drawn in their own shaders so they stay on the surface: they magnify the surface under them and catch the light. They gather while you stand in the rain (not under cover) and dry off afterwards. UNOFFICIAL VegasShaders: restart to switch on (compiled into the object, parallax and skin shaders); not indoors with the lamps' shadows on. In place of Wet World's HudDrops.
+AllObjects = true                    # Drops on every object out in the rain too (buildings, props, people; never the ground itself), not just your arms and weapon. Objects under cover stay dry (the top-down ortho map).
+AnimSpeed = 1.0                      # [0-8] How fast the drops come and go while it rains (faster in heavy rain).
+Darkness = 0.3                       # [0-1] How much a drop darkens the surface under it, as water soaking in. 0 leaves the colour as it is.
+Density = 0.6                       # [0-1] How many drops gather at full wetness.
+DebugView = 0                        # [0-1] 1 keeps the arms and weapon wet without rain, to try it out.
+DropSize = 8.0                       # [0.5-64] The drop pattern's tile in game units: the biggest drops are about a fortieth of it across. Bigger gives bigger drops.
+Gloss = 0.8                          # [0-1] How glossy the drops are.
+Reflection = 2.5                     # [0-8] How strongly the drops tilt the surface's normal: their highlights and reflections.
+Refraction = 1.0                     # [0-4] How strongly the drops bend and magnify the surface under them.
+WetGloss = 0.3                       # [0-1] How much glossier the wet surface between the drops gets.
+WetTime = 20.0                       # [0.5-600] Seconds in heavy rain for the arms and weapon to wet through (lighter rain takes longer), and for the drops to dry off again after the rain, under cover or indoors.
+
+[_Shaders.WetnessEffects.Reflections]
+Enabled = true                      # Screen-space reflections on the water film and puddles: wet ground and objects reflect what is around them on screen, not just the sky. Needs Wetness Effects on and [Shaders.PBR.Main] SkylightingMode 0.
+Strength = 1.0                    # [0.0-2.0] How much of what wet surfaces reflect comes from the scene on screen instead of the sky.
+MaxDistance = 1500.0                # [100-10000] How far a reflected ray looks, in game units. Longer finds farther things, at more cost per step.
+Thickness = 30.0                    # [1-500] How far behind a surface on screen a ray may pass and still count as hitting it. Too low and thin things go missing; too high and reflections smear under objects.
+Steps = 24                          # [4-64] Ray steps per wet pixel. More is finer and costs more.
+RoughnessCutoff = 0.5               # [0.05-1.0] Water films rougher than this reflect only the sky (fading in from half of it). Puddles are the smoothest.
+EdgeFade = 0.1                      # [0.01-0.5] Reflections fade out near the screen's edges, over this share of the screen, where what they show runs out.
+MaxCameraDistance = 4000.0          # [500-50000] No screen-space reflections on wet surfaces farther than this from the camera.
+DebugView = false                   # Shows the reflections alone.
+

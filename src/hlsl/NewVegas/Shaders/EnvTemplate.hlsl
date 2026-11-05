@@ -41,6 +41,7 @@ struct VS_OUTPUT {	// vertex to pixel
     float4 frameY : TEXCOORD2;   // ... y
     float4 frameZ : TEXCOORD3;   // ... z
     float2 fog : TEXCOORD4;      // x: 1 - fog, y: distance to the camera (the metal's fade, below)
+    float3 rel : TEXCOORD5;      // UNOFFICIAL 2026-11-04 camera-relative world position (cube space: world-aligned, camera-centred) for EnvLightFade
     float3 vcolor : COLOR0;
 };
 
@@ -92,6 +93,7 @@ VS_OUTPUT main(VS_INPUT vin) {
     #endif
     vout.fog.x = 1 - pow(1 - saturate((FogParam.x - length(fogEye)) / FogParam.y), FogParam.z);
     vout.fog.y = length(toVertex);
+    vout.rel = toVertex;
     vout.texc = vin.texc;
     vout.vcolor = vin.vcolor.rgb;
     return vout;
@@ -115,6 +117,7 @@ struct PS_INPUT {	// vertex to pixel
     float4 frameY : TEXCOORD2_centroid;
     float4 frameZ : TEXCOORD3_centroid;
     float2 fog : TEXCOORD4;
+    float3 rel : TEXCOORD5;
     float3 vcolor : COLOR0;
 };
 
@@ -128,6 +131,10 @@ float4 TESR_PBRData : register(c32);     // w: AmbientScale
 float4 TESR_PBRExtraData : register(c33); // y: SkylightingScale, z: SkylightingDirectionality, w: where the metal has faded out
 float4 TESR_PBRMetal : register(c34);    // x: the metal look's strength for this pass (Object.hlsl)
 float4 TESR_PBREnv : register(c35);      // x: Lighting (0 the game's fixed brightness, 1 by the light), y: Strength, z: WithMetal, w: Reflectivity - 1 (PBR.cpp, 0 = as before)
+// UNOFFICIAL 2026-11-04 EnvLightFade (core/EnvLightFade.h, set per env pass of a BSS2_Envmap_Light_Fade asset; 0 otherwise): [0] x -1 = on (a positive x is the object shaders' NVR_FlashLamp), y the game's
+// per-object fade F (already in AmbientColor.a), z the sun's luminance, w the lamp's; [1] the lamp, camera-relative, w its reach;
+// [2] the flashlight's beam axis, w cos of its outer edge; [3] x cos of its full-strength edge, y 1 = the lamp is the flashlight's
+float4 EnvLightFade[4] : register(c28);
 
 float4 main(PS_INPUT pin) : COLOR0 {
     // The game's reflection, as it worked it out.
@@ -171,6 +178,19 @@ float4 main(PS_INPUT pin) : COLOR0 {
     float metalFade = TESR_PBRExtraData.w > 0.0f ? 1.0f - smoothstep(0.6f * TESR_PBRExtraData.w, TESR_PBRExtraData.w, pin.fog.y) : 1.0f;
     refl *= lerp(1.0f, TESR_PBREnv.z, saturate(TESR_PBRMetal.x) * metalFade);
     refl *= 1.0f + TESR_PBREnv.w;  // UNOFFICIAL 2026-10-25 [Shaders.PBR.Main] Reflectivity
+    // UNOFFICIAL 2026-11-04 EnvLightFade: the lamp's share per pixel, a smooth fall to its reach (and the flashlight's cone), in place of the
+    // game's one value for the whole object (its distance to the object's centre, a straight 1 - d/r)
+    [branch] if (EnvLightFade[0].x < -0.5f && EnvLightFade[0].y > 1.0e-4f) {
+        const float3 toPixel = pin.rel - EnvLightFade[1].xyz;
+        const float share2 = dot(toPixel, toPixel) / (EnvLightFade[1].w * EnvLightFade[1].w);
+        const float window = saturate(1.0f - share2);
+        float lampFade = EnvLightFade[0].w * window * window;
+        [flatten] if (EnvLightFade[3].y > 0.5f) {
+            const float cone = smoothstep(EnvLightFade[2].w, EnvLightFade[3].x, dot(toPixel, EnvLightFade[2].xyz) * rsqrt(max(dot(toPixel, toPixel), 1.0f)));
+            lampFade *= cone * cone;
+        }
+        refl *= min(max(EnvLightFade[0].z, lampFade) / EnvLightFade[0].y, 8.0f);
+    }
     return float4(refl * pin.fog.x, 1.0f);
 }
 

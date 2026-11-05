@@ -1,75 +1,61 @@
 #pragma once
 
+// The player's flashlight (the Pip-Boy light's key). UNOFFICIAL 2026-11-04 restructure (user: "get rid of flashlight beam shader, lets
+// restructure the flashlight shader, get rid of the old post process code, the deferred variant should be on by default, dimmer and
+// distance, as well as attach to weapon should be the only things in main, the color of the flashlight should be dictated by the color of
+// your pipboy hud"). This effect draws nothing itself (its Flashlight.fx is a stub so the effect loads and keeps its menu switch); each
+// frame it places the light (on the camera, the head in third person, or the weapon), colours it with the Pip-Boy's own HUD colour and
+// hands it to what lights the world with it:
+//  - core/FlashlightDeferred.h: the spot light on the G-buffer (with its shadow map, ShadowManager::RenderShadowSpotlight);
+//  - effects/Grass: the grass's own beam (card and GPU grass), shadowed too;
+//  - core/FlashlightLamp.h: the Pip-Boy light moved onto the beam, so the game lights what the G-buffer does not hold.
+// The old screen-space light, its Vulkan passes, the FlashlightBeam shaft and the MaterialLight relight are in
+// VegasShaders-backups/before_flashlight_restructure_20261104.
 class FlashlightEffect : public EffectRecord
 {
 public:
 	FlashlightEffect() : EffectRecord("Flashlight"), SpotLight(nullptr), spotLightActive(false), aimingHoldUntil(0.0) {};
 
-	// UNOFFICIAL: the light's look, outdoors ([Shaders.Flashlight.Main]) and indoors ([Shaders.Flashlight.Interiors]);
-	// ApplyLook copies the one for the current cell into Settings every frame.
-	struct FlashlightLook {
-		NiColor		Color;
-		float		Dimmer, ConeAngle, Distance;
-		float		NearFade, HotspotLimit, CookieStrength;
+	struct FlashlightSettingsStruct {	// [Shaders.Flashlight.Main]
+		float		Dimmer;			// how bright the beam is at its centre, in the lamps' units (linear light)
+		float		Distance;		// its reach
+		bool		attachToWeapon;	// on the weapon instead of the camera (it rides the weapon while aiming either way)
+		NiColor		Color;			// the Pip-Boy's HUD colour this frame (SystemColorManager "Pipboy")
+		float		ConeAngle;		// the cone's outer half-angle, degrees (fixed)
+		NiPoint3	Offset;			// from the weapon or camera, in its frame (fixed)
 	};
-	FlashlightLook	Looks[2]; // 0: outdoors, 1: interiors
-	void			ApplyLook(bool exterior);
-
-	struct FlashlightSettingsStruct {
-		NiColor		Color;
-		float		Dimmer, ConeAngle, Distance;
-		bool		renderShadows;
-		NiPoint3	Offset;
-		bool		attachToWeapon;
-		float		NearFade, HotspotLimit, CookieStrength;
-		bool		softEdges;
-		int			edgeFix;	// UNOFFICIAL: depth-aware edges, 0 off, 1 the lit surfaces, 2 also the beam's shaft ([Shaders.Flashlight.Main] EdgeFix)
-		bool		hidePipBoyLight;	// UNOFFICIAL 2026-10-28 [Shaders.Flashlight.Main] HidePipBoyLight: the hidden Pip-Boy light also gets no brightness or reach
-		bool		testForceOn;		// UNOFFICIAL 2026-10-28 [Shaders.Flashlight.Main] TestForceOn (test only): the flashlight on as if the Pip-Boy light were
-
-		// Forward re-light of nearby static geometry, drawn by MaterialPass
-		struct MaterialLightStruct {
-			bool	Enabled;
-			float	Intensity, Specular, NormalStrength;
-			int		MaxGeometry, DebugMode;
-		};
-		MaterialLightStruct	MaterialLight;
+	FlashlightSettingsStruct	Settings = {};
+	// [Shaders.Flashlight.Deferred] (core/FlashlightDeferred.h): how the light pass draws it.
+	struct DeferredSettingsStruct {
+		bool	Shadows;		// the light's shadow map
+		float	ShadowSoftness;	// PCF radius, in texels of a 512 map (FlashlightDeferred::SoftnessTexels)
+		float	ShadowBias;		// share of the reach
+		float	Cookie;			// the cookie texture's strength (0 none)
+		float	Falloff;		// > 0 a windowed inverse square, (1 - d^2/r^2)^2 / (1 + F d^2/r^2); 0 the lamps' 1 - d^2/r^2
+		bool	GameLight;		// the Pip-Boy light as the beam's real game lamp for what the light pass cannot see (core/FlashlightLamp.h)
+		int		DebugView;		// 1 the light alone, 2 the shadow, 3 the normal
+		bool	TestForceOn;	// test only: on as if the Pip-Boy light were (and the game's Pip-Boy light switched on)
 	};
-	FlashlightSettingsStruct	Settings;
-	NiPointLight*	hiddenPipBoyLight = nullptr;	// UNOFFICIAL 2026-10-28 HidePipBoyLight: the light we darkened, and its own values
+	DeferredSettingsStruct	Deferred = {};
+	bool	WantsShadowMap() const { return Deferred.Shadows; }
+
+	// The Pip-Boy light while the flashlight is on: the flashlight's game lamp (GameLight) or, with GameLight off, darkened (else the game
+	// could still hand it to the objects round the player as one of their few lamps). Its own values, put back when the flashlight is off.
+	NiPointLight*	hiddenPipBoyLight = nullptr;
 	float			hiddenPipBoyDimmer = 0.0f;
 	NiColor			hiddenPipBoySpec = NiColor(0, 0, 0);
-
-	struct FlashlightStruct {
-		D3DXMATRIX	FlashlightViewProj;
-		D3DXVECTOR4	Position, Direction, Color;
-		D3DXVECTOR4	Tuning;		// x near fade, y soft edges, z hotspot limit, w cookie strength
-		D3DXVECTOR4	Composite;	// x source buffer is already linear; UNOFFICIAL (EdgeFix): y 1 = also the beam's shaft, zw 1 / beam buffer size
-		D3DXVECTOR4	RtShadow;	// UNOFFICIAL 2026-11-04 TESR_FlashLightRT: x 1 = the D3D9 shadow pass reads the traced shadow (TESR_RtFlashShadow, a rect frame)
-	};
-	FlashlightStruct	Constants;
+	bool			drivenPipBoyLight = false;
+	NiColor			hiddenPipBoyDiff = NiColor(0, 0, 0);
+	NiPoint3		hiddenPipBoyLocal = {};
+	void			DrivePipBoyLight(NiPointLight* PipLight, const NiNode* PlayerNode, const NiPoint3& Pos, const NiMatrix33& Rot);
+	void			RestorePipBoyLight();
 
 	NiSpotLight* SpotLight;
 	bool	spotLightActive;	// true while the cone is lit
 	double	aimingHoldUntil;	// real time the aiming latch holds until, see UpdateConstants
-	int		selectedPass;
-	int		TechniqueThisFrame();	// UNOFFICIAL 2026-10-30: selectedPass, or its shadowed technique while a traced shadow is there (RT lamp shadows Flashlight)
 
-	void	UpdateConstants();	void	RegisterConstants();
-	void	RegisterTextures() override;	// UNOFFICIAL 2026-11-04: TESR_RtFlashShadow (RT lamp shadows Flashlight's result, for the D3D9 shadow pass)
-	void	UpdateSettings();	bool	ShouldRender();
-
-	void	GetFlashlightViewProj();	void	PublishLightConstants(bool abActive);
-	int		TechniqueIndex(const char* name);	// UNOFFICIAL: -1 when the loaded effect has no technique of that name
-	// UNOFFICIAL: the EdgeFix technique indices, found once per loaded effect instead of by a name scan every frame.
-	void	RefreshTechniqueIndices();
-	unsigned techniqueGeneration = 0;
-	int		edgeFixIndex = -1, edgeFixShadowsIndex = -1;
-
-	// UNOFFICIAL 2026-10-25 (NVR DXVK): the four techniques as src\hlsl\NewVegas\Compute\Flashlight*.frag (EffectRecord::ExtRender)
-	bool	ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override;
-private:
-	ExtPass				extShadows, extDepthBlur, extLight, extBoxBlur, extCombine;
-	ExtPass				extShadowsRt;		// UNOFFICIAL 2026-10-30 FlashlightShadowsRT (RT lamp shadows Flashlight)
-	ExtUniformBuffer	extUniforms;
+	void	UpdateConstants();
+	void	UpdateSettings();
+	bool	ShouldRender() { return false; }	// nothing drawn here (see above)
+	void	PublishLightConstants(bool abActive);
 };

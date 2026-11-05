@@ -10,3 +10,7 @@ void* __fastcall SkinShader__PrepareGeometryForRendering(void* apThis, void*, vo
 void __fastcall SkinShader__PostGeometry(void* apThis, void*, void* apProperties);
 void InstallFaceGenInteriorPatch();
 void UpdateFaceGenInteriorFlag();
+
+// UNOFFICIAL 2026-11-04 the Pip-Boy screen's raindrops (Wetness Effects HudRaindrops, Shaders.cpp).
+extern VirtFuncDetour kPipboyPostProcessDetour;
+void __fastcall FOPipboyManager__RenderPostProcess(void* apThis, void*, void* apSource, BSRenderedTexture* apTarget, UInt32 aeClearFlags);

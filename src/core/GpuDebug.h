@@ -1,4 +1,5 @@
 #pragma once
+#include "DxvkLoader.h"
 
 // UNOFFICIAL 2026-10-26 (deep/fork-debug-capture): tools to make a broken frame inspectable. Off by default, nothing runs in
 // normal play. Plain-English guide: docs/next/FORK-DEBUG-CAPTURE.md.
@@ -40,7 +41,7 @@ namespace GpuDebug {
 		static PerfApi api;
 		if (!api.Tried) {
 			api.Tried = true;
-			if (HMODULE d3d9 = GetModuleHandleA("d3d9.dll")) {
+			if (HMODULE d3d9 = DxvkLoader::Runtime()) {
 				api.Begin = (BeginEventFn)GetProcAddress(d3d9, "D3DPERF_BeginEvent");
 				api.End = (EndEventFn)GetProcAddress(d3d9, "D3DPERF_EndEvent");
 				api.Status = (GetStatusFn)GetProcAddress(d3d9, "D3DPERF_GetStatus");

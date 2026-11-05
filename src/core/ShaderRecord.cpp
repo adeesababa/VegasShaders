@@ -19,6 +19,7 @@
 #include "ReflMaterial.h"	// UNOFFICIAL 2026-10-20 MaterialAware reflections
 #include "AlphaHash.h"	// UNOFFICIAL 2026-11-03 SmoothCutouts (ALPHA_HASH_ON)
 #include "LandLight.h"	// UNOFFICIAL 2026-10-25 (SunFar)
+#include "ForwardCloudShadows.h"	// UNOFFICIAL 2026-11-04 ForwardCloudShadows (FORWARD_CLOUD_SHADOWS)
 // Small helpers for the shader loader: a template's define list is searched by name, and a held interface
 // is released and cleared in one step.
 namespace {
@@ -216,9 +217,9 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	if (ReflMaterial::CompiledIn())
 		AppendDefine("REFL_MATERIAL_ON", "1");
 
-	// UNOFFICIAL rain on the first-person weapon (Includes/HudRain.hlsl, ObjectTemplate.hlsl, Render.cpp HudRain): compiled in only
-	// when Wet World's HudDrops is above 0 at startup.
-	AppendDefine("HUD_RAIN_ON", TheSettingManager->GetSettingF("Shaders.WetWorld.Main", "HudDrops") > 0.0f ? "1" : "0");
+	// UNOFFICIAL rain drops on the first-person arms and weapon, and AllObjects (Includes/HudRain.hlsl; Wetness Effects' HudRaindrops,
+	// effects/WetnessEffects/HudRaindrops.h, 2026-11-04 in place of Wet World's HudDrops): compiled in only when on at startup.
+	AppendDefine("HUD_RAIN_ON", TheSettingManager->GetSettingI("Shaders.WetnessEffects.HudRaindrops", "Enabled") ? "1" : "0");
 
 	// UNOFFICIAL linear lighting (Includes/LinearLight.hlsl: ObjectTemplate, TerrainTemplate): compiled in only when on at
 	// startup, so that otherwise those shaders are exactly what they were. Gamma stays live (PBRShaders::UpdateSettings).
@@ -379,6 +380,12 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	// (ShadowsExteriorEffect::RegisterTextures reads the same setting for CharacterMapCompiled.)
 	if (TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.ShadowMaps", "CharacterShadowMap"))
 		AppendDefine("CHARACTER_SHADOW_MAP", "1");
+	// UNOFFICIAL 2026-11-04 ForwardCloudShadows ([Shaders.VolumetricClouds.Main] ForwardShadows; Includes/Shadow.hlsl, core/ForwardCloudShadows.h): the
+	// volumetric clouds' shadow in the surface shaders. Defined only when on, and last, as above.
+	if (ForwardCloudShadows::CompiledIn()) AppendDefine("FORWARD_CLOUD_SHADOWS", "1");
+	// UNOFFICIAL 2026-11-04 Wetness Effects ([Shaders.WetnessEffects.Status] Enabled at startup; Includes/Wetness.hlsl): the water layer in the
+	// object, parallax and land pixel shaders. Defined only when on, and last, as above.
+	if (TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled")) AppendDefine("WETNESS_EFFECTS", "1");
 	// UNOFFICIAL 2026-10-24 SmoothObjectNormals ([Shaders.PBR.Main], restart): the object and skin shaders' shadow lookups and sky ambient take
 	// the vertex normal instead of the per-triangle one (Includes/Shadow.hlsl ShadowFacingNormal). 0: the shaders exactly as before.
 	AppendDefine("OBJECT_SMOOTH_NORMALS", TheSettingManager->GetSettingI("Shaders.PBR.Main", "SmoothObjectNormals") ? "1" : "0");
@@ -428,13 +435,13 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 		return record;
 	}
 
-	// UNOFFICIAL 2026-10-27 [Shaders.Grass.Main] PointLights (off by default): NVR's 1POINT grass shaders (GRASS23x004-007.vso,
-	// GRASS23x001TMS/003TMS.pso: grass by a lamp or fire) only when on; off, the game's own as before (startup setting).
-	// (2026-10-27: also their twins without transparency multisampling, GRASS23x001/003.pso, used with the game's MSAA off.)
+	// UNOFFICIAL 2026-10-27, 2026-11-04: the game's 1POINT grass shaders (GRASS23x004-007.vso, GRASS23x001/003(TMS).pso: grass by a lamp
+	// or fire) stay the game's own. NVR's took them over with [Shaders.Grass.Main] PointLights until 2026-11-04, when Physically-Based-
+	// Reloaded's lamps on the grass ([Shaders.Grass.Lights], GRASS23x000TMS.pso) replaced it; its files are in VegasShaders-backups/
+	// before_grass_port_20261104. Their cached builds from before are never loaded.
 	if (!memcmp(Name, "GRASS23x00", 10) && (!strcmp(Name + 10, "4.vso") || !strcmp(Name + 10, "5.vso") || !strcmp(Name + 10, "6.vso") ||
 		!strcmp(Name + 10, "7.vso") || !strcmp(Name + 10, "1TMS.pso") || !strcmp(Name + 10, "3TMS.pso") ||
-		!strcmp(Name + 10, "1.pso") || !strcmp(Name + 10, "3.pso")) &&
-		!TheSettingManager->GetSettingI("Shaders.Grass.Main", "PointLights"))
+		!strcmp(Name + 10, "1.pso") || !strcmp(Name + 10, "3.pso")))
 		return record;
 
 #if NVR_TEST_TOOLS
@@ -664,6 +671,7 @@ void ShaderRecord::CreateCT(ID3DXBuffer* ShaderSource, ID3DXConstantTable* Const
 		ConstantTable->GetConstantDesc(handle, &constDesc, &descCount);
 		if (!strcmp(constDesc.Name, "SunDir") && constDesc.RegisterSet == D3DXRS_FLOAT4 && constDesc.RegisterIndex == 18) sunDir18 = true;
 		if (!strcmp(constDesc.Name, "TESR_TerrainSkyData")) terrainSky = true;
+		if (!strcmp(constDesc.Name, "NVR_CloudSun") || !strcmp(constDesc.Name, "NVR_CloudSunVS")) CloudSunReg = true;	// UNOFFICIAL 2026-11-04 ForwardCloudShadows
 		if (memcmp(constDesc.Name, "TESR_", 5) != 0) continue; // Only treat constants named with TESR prefix
 		if (constDesc.RegisterSet == D3DXRS_FLOAT4) newFloats++;
 		if (constDesc.RegisterSet == D3DXRS_SAMPLER) newSamplers++;
@@ -837,6 +845,9 @@ void ShaderRecord::SetCT() {
 	// UNOFFICIAL 2026-10-25 (LandLight.h): the light vector the last land draw lit with, then this bind's own turn.
 	if (LandLight::Pending) LandLight::Read();
 	if (IsLandLight) LandLight::Pending = true;
+	// UNOFFICIAL 2026-11-04 ForwardCloudShadows: the clouds' constants with the shader, not only in the object pass hook: draws that do not
+	// come through RenderPassStandardHook (and the land's lamp-shadow constants, c168-c172, PointShadowForward::BindTerrain) left c169 stale.
+	if (CloudSunReg) ForwardCloudShadows::ForShader(TheRenderManager->device);
 
 	// Pixel records start from empty stages (vertex records leave them alone).
 	for (int stage = 0; ClearSamplers && stage < 16; stage++) TheRenderManager->renderState->SetTexture(stage, nullptr);
@@ -901,6 +912,24 @@ static auto PickRecord(ShaderEx* Shader, bool InWorldspace) {
 */
 void NiD3DVertexShaderEx::SetupShader(IDirect3DVertexShader9* BoundHandle) {
 	auto useGameShader = [this] { ShaderHandle = (IDirect3DVertexShader9*)ShaderHandleBackup; };
+
+	// UNOFFICIAL 2026-11-04 (crash switching Effects off, always a grass pass): the grass (GRASS23x*) and SpeedTree (STLEAF/STFROND) vertex
+	// shaders get a new D3D shader after the game made them, and the first is freed. ShaderHandleBackup kept that dead one, and the game's
+	// shader was bound with it whenever NVR's was not (Effects off, or a shader NVR does not replace): DXVK crashed on it. A handle here that
+	// is neither the kept one nor one of NVR's records was put in on the game's side: it becomes the game's shader.
+	if (ShaderHandle && ShaderHandle != (IDirect3DVertexShader9*)ShaderHandleBackup) {
+		bool ours = false;
+		for (int slot = ShaderRecordType::Default; slot <= ShaderRecordType::Interior && !ours; slot++) {
+			const ShaderRecordVertex* record = GetShaderRecord((ShaderRecordType)slot);
+			ours = record && record->ShaderHandle == ShaderHandle;
+		}
+		if (!ours) {
+			static unsigned told = 0;
+			if (told++ < 40) Logger::Log("UNOFFICIAL vertex shader %s: the game's D3D shader was replaced (%p -> %p): the new one is kept as the game's", Name ? Name : "?",
+				(void*)ShaderHandleBackup, (void*)ShaderHandle);
+			ShaderHandleBackup = ShaderHandle;
+		}
+	}
 
 	const bool nvrOff = !Enabled || !TheSettingManager->SettingsMain.Main.RenderEffects;
 	if (nvrOff && ShaderHandleBackup) return useGameShader();

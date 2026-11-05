@@ -177,7 +177,6 @@
     <ClCompile Include="..\src\effects\DepthOfField\DepthOfField.cpp" />
     <ClCompile Include="..\src\effects\Exposure\Exposure.cpp" />
     <ClCompile Include="..\src\effects\Flashlight\Flashlight.cpp" />
-    <ClCompile Include="..\src\effects\FlashlightBeam\FlashlightBeam.cpp" />
     <ClCompile Include="..\src\effects\DustMotes\DustMotes.cpp" />
     <ClCompile Include="..\src\effects\LocalExposure\LocalExposure.cpp" />
     <ClCompile Include="..\src\effects\GodRays\GodRays.cpp" />
@@ -217,7 +216,6 @@
     <ClCompile Include="..\src\effects\Terrain\LandHeights.cpp" />
     <ClCompile Include="..\src\effects\TerrainShadows\TerrainShadows.cpp" />
     <ClCompile Include="..\src\effects\SunFar\SunFar.cpp" />
-    <ClCompile Include="..\src\effects\Grass\GrassCollision.cpp" />
     <ClCompile Include="..\src\effects\Bodycam\Bodycam.cpp" />
     <ClCompile Include="..\src\effects\Reflections\Reflections.cpp" />
     <ClCompile Include="..\src\effects\VolumetricClouds\VolumetricClouds.cpp" />
@@ -232,6 +230,9 @@
     <ClCompile Include="..\src\effects\Specular\Specular.cpp" />
     <ClCompile Include="..\src\effects\SunShadows\SunShadows.cpp" />
     <ClCompile Include="..\src\effects\Terrain\Terrain.cpp" />
+    <ClCompile Include="..\src\effects\WetnessEffects\WetnessEffects.cpp" />
+    <ClCompile Include="..\src\effects\WetnessEffects\HudRaindrops.cpp" />
+    <ClCompile Include="..\src\effects\WetnessEffects\WetnessReflections.cpp" />
     <ClCompile Include="..\src\effects\Tonemapping\Tonemapping.cpp" />
     <ClCompile Include="..\src\effects\Underwater\Underwater.cpp" />
     <ClCompile Include="..\src\effects\VolumetricFog\VolumetricFog.cpp" />
@@ -267,7 +268,6 @@
     <ClCompile Include="..\src\NewVegas\Hooks\FlyCam.cpp" />
     <ClCompile Include="..\src\NewVegas\Hooks\Game.cpp" />
     <ClCompile Include="..\src\NewVegas\Hooks\Hooks.cpp" />
-    <ClCompile Include="..\src\NewVegas\Hooks\MaterialPass.cpp" />
     <ClCompile Include="..\src\NewVegas\Hooks\Render.cpp" />
     <ClCompile Include="..\src\NewVegas\Hooks\Settings.cpp" />
     <ClCompile Include="..\src\NewVegas\Hooks\ShaderIO.cpp" />
@@ -309,6 +309,7 @@
     <ClInclude Include="..\src\core\MenuTools.h" />
     <ClInclude Include="..\src\core\Branding.h" />
     <ClInclude Include="..\src\core\Paths.h" />
+    <ClInclude Include="..\src\core\DxvkLoader.h" />
     <ClInclude Include="..\src\core\InstallCheck.h" />
     <ClInclude Include="..\src\core\ShaderCounters.h" />
     <ClInclude Include="..\src\core\NvrDxvkExt.h" />
@@ -347,7 +348,6 @@
     <ClInclude Include="..\src\effects\Effects.h" />
     <ClInclude Include="..\src\effects\Exposure\Exposure.h" />
     <ClInclude Include="..\src\effects\Flashlight\Flashlight.h" />
-    <ClInclude Include="..\src\effects\FlashlightBeam\FlashlightBeam.h" />
     <ClInclude Include="..\src\effects\DustMotes\DustMotes.h" />
     <ClInclude Include="..\src\effects\LocalExposure\LocalExposure.h" />
     <ClInclude Include="..\src\effects\GodRays\GodRays.h" />
@@ -378,7 +378,6 @@
     <ClInclude Include="..\src\effects\Terrain\LandHeights.h" />
     <ClInclude Include="..\src\effects\TerrainShadows\TerrainShadows.h" />
     <ClInclude Include="..\src\effects\SunFar\SunFar.h" />
-    <ClInclude Include="..\src\effects\Grass\GrassCollision.h" />
     <ClInclude Include="..\src\effects\Bodycam\Bodycam.h" />
     <ClInclude Include="..\src\effects\Bodycam\BodycamAudio.h" />
     <ClInclude Include="..\src\effects\Reflections\Reflections.h" />
@@ -396,6 +395,9 @@
     <ClInclude Include="..\src\effects\Specular\Specular.h" />
     <ClInclude Include="..\src\effects\SunShadows\SunShadows.h" />
     <ClInclude Include="..\src\effects\Terrain\Terrain.h" />
+    <ClInclude Include="..\src\effects\WetnessEffects\WetnessEffects.h" />
+    <ClInclude Include="..\src\effects\WetnessEffects\HudRaindrops.h" />
+    <ClInclude Include="..\src\effects\WetnessEffects\WetnessReflections.h" />
     <ClInclude Include="..\src\effects\Tonemapping\Tonemapping.h" />
     <ClInclude Include="..\src\effects\Underwater\Underwater.h" />
     <ClInclude Include="..\src\effects\VolumetricFog\VolumetricFog.h" />
@@ -421,7 +423,6 @@
     <ClInclude Include="..\src\NewVegas\Hooks\FlyCam.h" />
     <ClInclude Include="..\src\NewVegas\Hooks\Game.h" />
     <ClInclude Include="..\src\NewVegas\Hooks\Hooks.h" />
-    <ClInclude Include="..\src\NewVegas\Hooks\MaterialPass.h" />
     <ClInclude Include="..\src\NewVegas\Hooks\Render.h" />
     <ClInclude Include="..\src\NewVegas\Hooks\Settings.h" />
     <ClInclude Include="..\src\NewVegas\Hooks\ShaderIO.h" />

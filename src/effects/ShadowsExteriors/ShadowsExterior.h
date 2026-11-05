@@ -79,6 +79,8 @@ public:
 		FormsStruct				Forms;
 		float					ShadowMapResolution, ShadowMapInverseResolution, ShadowMapRadius, ShadowMapNear;
 		bool					CustomClearRequired;
+		D3DXPLANE				CasterPlanes[4];	// UNOFFICIAL 2026-11-04 CasterCulling: the view slice's sides, camera-relative, facing in (ShadowManager::SunCastMask)
+		bool					CasterPlanesValid = false;
 	};
 
 	struct ShadowMapStruct {
@@ -88,6 +90,11 @@ public:
 		bool                Prefilter, MSAA, Mipmaps, LimitFrequency;
 		bool				LodSkipLoaded;	// UNOFFICIAL (Fable): object LOD inside the loaded cells casts no shadow (the full models do)
 		float				CasterFadeMin = 0.75f;	// UNOFFICIAL 2026-10-28 [Shaders.ShadowsExteriors.ShadowMaps] CasterFadeMin: a fade node casts from this fade on
+		// UNOFFICIAL 2026-11-04 (from Physically-Based-Reloaded) [Shaders.ShadowsExteriors.ShadowMaps], every quality, live:
+		bool				CasterCulling = false;		// leave out casters whose shadow cannot reach the view
+		float				CasterMargin = 256.0f;
+		float				CasterDrop = 2048.0f;
+		bool				SkipCoveredCasters = false;	// leave out of a cascade what only an earlier one shades
 		int					Anisotropy;
 		float				Distance, CascadeLambda;
 		bool				SmoothFilter;	// UNOFFICIAL 2026-10-15: PCF (Mode 3) with a 4 x 4 cubic B-spline instead of the 3 x 3
@@ -296,6 +303,7 @@ public:
 	// and jagged): cube slots 0..NearCubeSlots-1 (the lamps the atlas gives its big NearTiles) are made this size instead of
 	// ShadowCubeMapSize, so the 2048-texel near tiles hold real detail instead of a resampled 512 map. 0 = every slot ShadowCubeMapSize.
 	UINT		NearCubeSize = 0;
+	UINT		SpotMapSize = 512;	// UNOFFICIAL 2026-11-04 [Shaders.Flashlight.Deferred] ShadowMapSize (restart): the spot maps' size (RegisterTextures)
 	static const int NearCubeSlots = 8;
 	UINT		CubeSizeFor(int slot) const { return (slot >= 0 && slot < NearCubeSlots && NearCubeSize > CubeMapSizeCreated) ? NearCubeSize : CubeMapSizeCreated; }
 	unsigned	CubeGeneration = 0;	// UNOFFICIAL 2026-10-18 CubeFaceCopySkip: counts lamp cube map creations (a new texture may reuse an old address)

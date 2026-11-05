@@ -29,6 +29,7 @@
 #include "EffectChain.h"	// UNOFFICIAL 2026-11-02 the post-process chain as step tables
 #include "FailOnce.h"	// UNOFFICIAL 2026-11-02 RetryFailedEffects: the cell serial its latches wait for
 #include <unordered_map>	// UNOFFICIAL 2026-10-27 RenderScale v2 (RenderRect::RescaleRegistered)
+extern D3DXVECTOR4 NvrGameMultisample;	// UNOFFICIAL 2026-11-04 Hooks/Settings.cpp (TESR_GameMultisample)
 
 /**
 * Initializes the Shader Manager Singleton.
@@ -96,7 +97,6 @@ void ShaderManager::Initialize() {
 	EnrollEffect<DebugEffect>(sm, sm->Effects.Debug);
 	EnrollEffect<ExposureEffect>(sm, sm->Effects.Exposure);
 	EnrollEffect<FlashlightEffect>(sm, sm->Effects.Flashlight);
-	EnrollEffect<FlashlightBeamEffect>(sm, sm->Effects.FlashlightBeam);
 	EnrollEffect<GodRaysEffect>(sm, sm->Effects.GodRays);
 	EnrollEffect<ImageAdjustEffect>(sm, sm->Effects.ImageAdjust);
 	EnrollEffect<LensEffect>(sm, sm->Effects.Lens);
@@ -131,6 +131,8 @@ void ShaderManager::Initialize() {
 	EnrollEffect<SkyDitherEffect>(sm, sm->Effects.SkyDither);
 	EnrollEffect<BodycamEffect>(sm, sm->Effects.Bodycam);
 	EnrollEffect<ReflectionsEffect>(sm, sm->Effects.Reflections);
+	EnrollEffect<WetnessReflectionsEffect>(sm, sm->Effects.WetnessReflections);	// UNOFFICIAL 2026-11-04 Wetness Effects
+	EnrollEffect<HudRaindropsEffect>(sm, sm->Effects.HudRaindrops);
 	EnrollEffect<VolumetricCloudsEffect>(sm, sm->Effects.VolumetricClouds);
 	EnrollEffect<BloodFlowEffect>(sm, sm->Effects.BloodFlow);
 	sm->Effects.BarrelHaze->Enabled = sm->Effects.BarrelHaze->Effect != nullptr;
@@ -150,6 +152,7 @@ void ShaderManager::Initialize() {
 	EnrollCollection<GrassShaders>(sm, sm->Shaders.Grass);
 	EnrollCollection<ParticleShaders>(sm, sm->Shaders.Particles);
 	EnrollCollection<TerrainShaders>(sm, sm->Shaders.Terrain);
+	EnrollCollection<WetnessEffectsShaders>(sm, sm->Shaders.Wetness);	// UNOFFICIAL 2026-11-04 Wetness Effects
 	LoadEarlyShaders(sm);	// UNOFFICIAL 2026-10-27: shaders the game made while the sets above did not exist yet
 
 	// setup map of constant names: the bindings are inserted in this order, the terrain erosion's own after the first block
@@ -174,6 +177,7 @@ void ShaderManager::Initialize() {
 		{ "TESR_ViewSpaceLightDir", &sm->ShaderConst.ViewSpaceLightDir },
 		{ "TESR_ScreenSpaceLightDir", &sm->ShaderConst.ScreenSpaceLightDir },
 		{ "TESR_ReciprocalResolution", &sm->ShaderConst.ReciprocalResolution },
+		{ "TESR_GameMultisample", &NvrGameMultisample },	// UNOFFICIAL 2026-11-04: x = the game's MSAA samples (Hooks/Settings.cpp)
 		// UNOFFICIAL 2026-10-27 RenderScale (effects\TAAUpscale.cpp): xy = the internal resolution / the screen's while the world is drawn
 		// smaller, else 1 (always registered: an unregistered TESR_ constant would read 0). The water shaders' refraction lookup uses it.
 		{ "TESR_RenderScale", &TAAEffect::RenderScaleConstant },
@@ -1058,6 +1062,7 @@ void ShaderManager::GetNearbyLights(ShadowSceneLight* ShadowLightsList[], NiPoin
 	while (node) {
 		// UNOFFICIAL 2026-10-16 (bug hunt): an entry without a light (the loop below checks the same) was dereferenced.
 		if (!node->data || !node->data->sourceLight) { node = node->next; continue; }
+		if (FlashlightLamp::Is(node->data->sourceLight)) { node = node->next; continue; }	// UNOFFICIAL 2026-11-04 the flashlight's game lamp (core/FlashlightLamp.h)
 		NiPointLight* lamp = node->data->sourceLight;
 		D3DXVECTOR4 lampAt = lamp->m_worldTransform.pos.toD3DXVEC4();
 

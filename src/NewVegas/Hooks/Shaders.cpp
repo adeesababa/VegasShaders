@@ -151,6 +151,16 @@ void __fastcall SkinShader__PostGeometry(void* apThis, void*, void* apProperties
     }
 }
 
+// UNOFFICIAL 2026-11-04 (from Physically-Based-Reloaded) the Pip-Boy's screen: once the game has rendered the menu into the screen's
+// texture (its scanlines and blur included), the raindrops are drawn into it (HudRaindropsEffect::DrawOnScreen), so they sit on the
+// screen itself. FOPipboyManager's vtable 0x10780AC, slot 20.
+VirtFuncDetour kPipboyPostProcessDetour;
+
+void __fastcall FOPipboyManager__RenderPostProcess(void* apThis, void*, void* apSource, BSRenderedTexture* apTarget, UInt32 aeClearFlags) {
+    ThisCall(kPipboyPostProcessDetour.GetOverwrittenAddr(), apThis, apSource, apTarget, aeClearFlags);
+    if (TheShaderManager->Effects.HudRaindrops) TheShaderManager->Effects.HudRaindrops->DrawOnScreen(apTarget);
+}
+
 // Interior faces. BSShaderPPLightingProperty::GetRenderPasses_2x (0xBDF790) builds every lit
 // mesh's pass list, and for FaceGen geometry in interiors it skips the passes SkinShader draws
 // itself (ADT/ADT2 and AD2/AD3: the two "!bIsFaceGen || !BSShaderManager::bInterior" tests). An

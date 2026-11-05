@@ -147,6 +147,7 @@ static_assert(sizeof(LockPickMenu) == 0x28, "LockPickMenu");
 static_assert(sizeof(MagicTarget) == 0x10, "MagicTarget");
 static_assert(sizeof(Main) == 0xA4, "Main");
 static_assert(offsetof(Main, FlyCam) == 0x6, "Main::FlyCam");
+static_assert(offsetof(Main, camera) == 0xA0, "Main::camera");
 static_assert(sizeof(MainDataHandler) == 0x63C, "MainDataHandler");
 static_assert(offsetof(MainDataHandler, weathers) == 0x30, "MainDataHandler::weathers");
 static_assert(offsetof(MainDataHandler, modList) == 0x210, "MainDataHandler::modList");

@@ -65,7 +65,7 @@
 //                                       when: BounceLight->Enabled
 //  29  BloodFlow                        Blood flow
 //                                       when: always called (nothing with no blood near)
-//  30  WetFlashlightSpecularUnderwater  HudDrops cover test, wet world, flashlight beam + flashlight, specular (with the bounce combine), underwater
+//  30  WetFlashlightSpecularUnderwater  wetness reflections, the HUD raindrops' wetness, wet world, flashlight beam + flashlight, specular (with the bounce combine), underwater
 //                                       when: each as its effect decides
 //  31  SpillSelfTest                    NeonSpillSelfTest capture
 //                                       when: NVR_TEST_TOOLS builds
@@ -603,7 +603,7 @@ void ShaderManager::PreStep_CompositePlan(ChainContext& ctx) {
 	const bool shadowApplies = GameState.isExterior && wouldRender(Effects.ShadowsExteriors);
 	const bool aoApplies = wouldRender(AO);
 	const bool effectsBetween = wouldRender(Effects.SnowAccumulation) || wouldRender(Effects.WetWorld) || wouldRender(Effects.BloodFlow) ||
-		wouldRender(Effects.Flashlight) || wouldRender(Effects.Specular) || wouldRender(Effects.Underwater) ||
+		wouldRender(Effects.Specular) || wouldRender(Effects.Underwater) ||
 		wouldRender(Effects.BounceLight) || wouldRender(Effects.Reflections) || ambientLight; // must see the scene with its shadows and AO applied
 	// UNOFFICIAL 2026-10-18 InteriorShadowFold ([Main.Main.Performance]; evidence\intshadow-LOG.md): indoors with the forward lamp
 	// shadows, the darkening of what no tracked lamp reaches (KeepDarkening) was its own full-resolution pass below, unblurred
@@ -806,7 +806,7 @@ void ShaderManager::PreStep_SpecularBouncePlan(ChainContext& ctx) {
 	const bool specularRenders = wouldRender(Effects.Specular) && Effects.Specular->Textures.LightSurface;
 	// (Not with the bounce light's NeonSpill on: its own combine has the spill's debug views and street smoothing.)
 	const bool bounceIntoSpecular = specularRenders && wouldRender(Effects.BounceLight) && !wouldRender(Effects.WetWorld) &&
-		!wouldRender(Effects.Flashlight) && Effects.Specular->CanTakeBounce() && !Effects.BounceLight->SpillOn() &&
+		Effects.Specular->CanTakeBounce() && !Effects.BounceLight->SpillOn() &&
 		!Effects.BounceLight->HardEdgesOn();
 	ctx.specularRenders = specularRenders;
 	ctx.bounceIntoSpecular = bounceIntoSpecular;
@@ -893,25 +893,20 @@ void ShaderManager::PreStep_WetFlashlightSpecularUnderwater(ChainContext& ctx) {
 	const bool specularRenders = ctx.specularRenders;
 	{
 		GpuProfileScope gpu(materialEffectsTimer, Device);
-		// UNOFFICIAL HudDrops: the camera's cover test while it rains outdoors (Render.cpp HudRain reads its answer).
-		if (Effects.WetWorld->Enabled && Effects.WetWorld->Constants.Data.x > 0.0f && GameState.isExterior && !GameState.isUnderwater &&
-			TheSettingManager->GetSettingF("Shaders.WetWorld.Main", "HudDrops") > 0.0f) {
-			Effects.WetWorld->RenderCoverTest(Device);
-			Device->SetRenderTarget(0, RenderTarget);
-		}
-		{
+		// UNOFFICIAL 2026-11-04 Wetness Effects' reflections (after the shadows, AO and bounce light, so what wet surfaces reflect is
+		// shaded as it is seen), and the wetness the HUD raindrops read next frame (as Physically-Based-Reloaded).
+		{ Effects.WetnessReflections->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface); PixelInspector::AfterFrame(Effects.WetnessReflections); }
+		Effects.HudRaindrops->UpdateWetness(Device);
+		Device->SetRenderTarget(0, RenderTarget);
+		// UNOFFICIAL 2026-11-04 Wetness Effects ([Shaders.WetnessEffects.Status], restart): the surface shaders make the world wet in its
+		// place, so WetWorld's screen pass is not drawn. Its rain tracking (UpdateConstants) still runs: the persistent wet cover, PBR's
+		// rain and the heat haze read it.
+		if (!(Shaders.Wetness && Shaders.Wetness->Enabled)) {
 			Effects.WetWorld->Render(Device, RenderTarget, TheTextureManager->RenderedSurface,
 				TheCoverMap ? TheCoverMap->WetTechnique(Effects.WetWorld, Effects.WetWorld->MainTechnique()) : Effects.WetWorld->MainTechnique(), false, SourceSurface);
 			PixelInspector::AfterFrame(Effects.WetWorld);
 		}
-		// Beam march first, into its own half res buffer, so the Flashlight Combine pass can
-		// read it. Control.x already folds the effect toggle, the per view toggle and the
-		// strength together, so this one test gates the whole thing.
-		if (Effects.FlashlightBeam->Constants.Control.x > 0.0f) {
-			RenderEffectToRT(Effects.FlashlightBeam->Textures.VolumetricSurface, Effects.FlashlightBeam, true);
-			Device->SetRenderTarget(0, RenderTarget);
-		}
-		{ Effects.Flashlight->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, Effects.Flashlight->TechniqueThisFrame(), true, SourceSurface); PixelInspector::AfterFrame(Effects.Flashlight); }
+		// (2026-11-04: the flashlight and its beam shaft were drawn here; the flashlight is the deferred light now, core/FlashlightDeferred.h)
 		// Specular's two quarter-resolution steps (the blocks' normals, then the light they reflect) into its own buffers,
 		// then its main technique adds that to the image in the chain.
 		if (specularRenders) {

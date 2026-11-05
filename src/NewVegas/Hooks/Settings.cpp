@@ -6,15 +6,12 @@
 // off. D3D9 shaders cannot read the samples, so NVR cannot fix that per effect. It says so once in the log and once on screen
 // (NvrMsaaWarningTick). Reading iMultiSample as 0 here alone (tried the same day) left the game half multisampled: the water
 // reflection has its own iWaterMultiSamples, and FalloutCustom.ini reaches the renderer's own setting past this hook. (The grass trouble
-// that day was b30GrassVS, below.) 2026-11-04: [Main.Main.Misc] BlockGameMSAA (default true) switches it off for real: both settings
-// read as 0 here, the renderer's copies set to 0 before it starts (BlockGameMSAABeforeRenderer), and neither written back to the INIs.
+// that day was b30GrassVS, below.) 2026-11-04: [Main.Main.Misc] BlockGameMSAA switched it off for real (default on). 2026-11-05 (user,
+// after merging Balebandro's PR #5: SkyCoverage, ForwardCloudShadows, deferred passes and skin under MSAA): BlockGameMSAA is removed, the
+// INIs' MSAA is used again; the log still says once that it is on, and the on-screen warning is gone.
 static int GameMSAAWarned = 0;	// the iMultiSample the INI asks for, when it is on (0: off)
-void NvrMsaaWarningTick() {
-	static bool shown = false;
-	if (!GameMSAAWarned || shown || !Player || !Player->parentCell || !InterfaceManager) return;
-	shown = true;
-	InterfaceManager->ShowMessage("Vegas Shaders: turn the game's anti-aliasing off (launcher options). With it on, Vegas Shaders' shadows and effects get speckled.");
-}
+D3DXVECTOR4 NvrGameMultisample(0.0f, 0.0f, 0.0f, 0.0f);	// UNOFFICIAL 2026-11-04 TESR_GameMultisample (ShaderManager): x = iMultiSample as the game reads it
+void NvrMsaaWarningTick() {}	// (2026-11-05: the on-screen warning is gone with BlockGameMSAA; ShaderManager still calls it)
 
 // The game's INI read/write calls, hooked (Hooks.cpp attaches them). A read lets the game fill the value first and then adjusts the
 // few entries NVR depends on; a write is skipped for the entries NVR overrides at run time, so they never land in the user's INI.
@@ -77,27 +74,14 @@ bool __fastcall ReadSettingHook(INISettingCollection* This, UInt32 edx, GameSett
 		if (nvr.ForceMSAA) {
 			if (Setting->iValue < 2) Setting->iValue = 2;
 		}
-		else if (nvr.BlockGameMSAA) {
-			// UNOFFICIAL 2026-11-04 BlockGameMSAA: read as 0 (TESRenderer::Init then leaves eMode 0: no multisampled frame buffer, and
-			// bTransparencyMultisampling needs iMultiSample > 1, so the grass takes GRASS23x00n, which NVR also replaces). The earlier
-			// try (header) left the water reflection multisampled: that one is iWaterMultiSamples (below). Its grass problem was b30GrassVS.
-			if (Setting->iValue > 0)
-				Logger::Log("UNOFFICIAL BlockGameMSAA: the INI asks for the game's anti-aliasing (iMultiSample %d): read as 0 (MSAA off; the INI file is not changed)", Setting->iValue);
-			Setting->iValue = 0;
-		}
 		else if (Setting->iValue > 0) {
 			if (!GameMSAAWarned)
-				Logger::Log("WARNING: the game's own anti-aliasing is on (iMultiSample %d). Vegas Shaders' effects read one depth sample per pixel, which with "
-					"MSAA disagrees with the colour: speckled cloud shadows on grass, broken shadows round the player, patches on characters. Turn "
-					"Antialiasing off in the game's launcher (Options); Vegas Shaders' TAA / FSR / DLSS smooth the edges instead.", Setting->iValue);
+				Logger::Log("UNOFFICIAL the game's own anti-aliasing is on (iMultiSample %d): the clouds, volumetric light and terrain blending take "
+					"each edge pixel's sky share (SkyCoverage); for cloud shadows without speckled edges turn on [Shaders.CloudShadows.Main] "
+					"ForwardShadows (restart). Effects that read one depth per pixel can still show thin edge seams.", Setting->iValue);
 			GameMSAAWarned = Setting->iValue;
 		}
-	}
-	// UNOFFICIAL 2026-11-04 BlockGameMSAA: the water reflection's own MSAA (BSShaderManager::iWaterReflectionMultisample, read once at start)
-	else if (SameKey(key, "iWaterMultiSamples:Display") && nvr.BlockGameMSAA && !nvr.ForceMSAA) {
-		if (Setting->iValue > 0)
-			Logger::Log("UNOFFICIAL BlockGameMSAA: iWaterMultiSamples %d read as 0", Setting->iValue);
-		Setting->iValue = 0;
+		NvrGameMultisample.x = (float)(Setting->iValue > 0 ? Setting->iValue : 0);
 	}
 	// UNOFFICIAL 2026-10-27 (user: "still no grass shadows"): NVR's grass shaders replace the game's shader model 3 grass (GRASS23x000-007);
 	// with b30GrassVS 0 the game takes its older GRASS2000-2023 set, which NVR leaves alone: no NVR lighting, shadow or wind on grass at all.
@@ -117,34 +101,8 @@ bool __fastcall WriteSettingHook(INISettingCollection* This, UInt32 edx, GameSet
 	for (const char* kept : kKeptFromWrite) {
 		if (SameKey(Setting->Name, kept)) return true;	// reported as written, file untouched
 	}
-	// UNOFFICIAL 2026-11-04 BlockGameMSAA: the 0 read in above stays in memory; the INI keeps the player's value
-	SettingsMainStruct::MainStruct& nvr = TheSettingManager->SettingsMain.Main;
-	if (nvr.BlockGameMSAA && !nvr.ForceMSAA && (SameKey(Setting->Name, "iMultiSample:Display") || SameKey(Setting->Name, "iWaterMultiSamples:Display")))
-		return true;
 	return WriteSetting(This, Setting);
 
-}
-
-// UNOFFICIAL 2026-11-04 BlockGameMSAA, part 2: the renderer's own settings (RendererSettingCollection), set to 0 just before
-// TESRenderer::Init reads them (called from InitializeRendererHook = TESMain::InitRenderer, after every INI file is read).
-// The read hook above did not see every route: FalloutCustom.ini's iMultiSample 4 still reached the renderer (user test 16:09, the
-// frame 4x). TESRenderer::Init: eMode (the frame buffer's MSAA) from gs_iMultiSample, BSShaderManager::iWaterReflectionMultisample
-// from gs_iWaterMultiSamples, bTransparencyMultisampling needs gs_iMultiSample > 1.
-void BlockGameMSAABeforeRenderer() {
-	const SettingsMainStruct::MainStruct& nvr = TheSettingManager->SettingsMain.Main;
-	if (!nvr.BlockGameMSAA || nvr.ForceMSAA) return;
-	struct Entry { UInt32 address; const char* name; };
-	const Entry entries[] = { { 0x011C73F4, "iMultiSample:Display" }, { 0x011C7284, "iWaterMultiSamples:Display" } };
-	for (const Entry& e : entries) {
-		GameSetting* s = (GameSetting*)e.address;
-		if (!s->Name || strcmp(s->Name, e.name) != 0) {	// not this game build's layout: leave it
-			Logger::Log("UNOFFICIAL BlockGameMSAA: the renderer's %s is not at %08X (found '%s'): not changed", e.name, e.address, s->Name ? s->Name : "(none)");
-			continue;
-		}
-		if (s->iValue != 0)
-			Logger::Log("UNOFFICIAL BlockGameMSAA: the renderer's %s was %d (the INIs, FalloutCustom.ini included): set to 0 before the renderer starts", e.name, s->iValue);
-		s->iValue = 0;
-	}
 }
 
 // Replaces the game's main-menu music path with NVR's track (called from two places, see Hooks.cpp).
