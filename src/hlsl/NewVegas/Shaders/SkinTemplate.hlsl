@@ -97,9 +97,6 @@
 #define CAPTURED_ACTOR	// UNOFFICIAL 2026-10-28: every skin draw is an actor's (CapturedNormals alpha 2)
 #include "includes/CapturedNormals.hlsl"	// UNOFFICIAL 2026-10-28 CapturedNormals (COLOR3, see there)
 
-// How far toward the sun the pixel shader looks a second time into the shadow map, in game units (16 = 23 cm: past the far
-// side of a hand or a head): lit there, a shadow here is the skin's own (Includes/Skin.hlsl SkinLight, selfLit).
-#define SKIN_SELF_SHADOW_REACH 16.0f
 
 #ifdef VS	// vertex shader
 
@@ -350,7 +347,7 @@ float3 SkinLamp(int i, float3 d, float3 shadow, float3 albedo, float3 N, float3 
         // interleaving all four lamps, which overflows ps_3_0's 32 temporaries.
         [branch] if ((FIRST_POINT + i) < EmittanceColor.a && att > 0.0f)
     #endif
-        lamp = SkinLight(albedo, N, Nsoft, normalize(d).z, V, d, light, 1.0f, 0.0f, 1.0f, specular);
+        lamp = SkinLight(albedo, N, Nsoft, normalize(d).z, V, d, light, 1.0f, false, specular);
     specular *= shadow;
     return lamp * shadow;
 }
@@ -362,7 +359,7 @@ float3 SkinLamp(int i, float3 d, float3 shadow, float3 albedo, float3 N, float3 
 //     where the per-pixel diffusion stands in
 //   3 direct light (sun and lamps, with the diffusion and transmission) on white skin
 //   4 ambient and sky light on white skin
-//   5 highlights alone: the lights' lobes, the sheen and the sky reflection
+//   5 highlights alone: the lights' lobes and the sky reflection
 //   6 material: red roughness, green highlight strength (the mask x SpecularStrength), blue wetness
 //   7 curvature: red the per-pixel diffusion (0 where the blur takes over), green thin features (transmission)
 // The light-only passes are divided by the texture the engine multiplies them by afterwards, so every view reads true.
@@ -487,8 +484,6 @@ PS_OUTPUT main(PS_INPUT pin) {
     #ifndef DIFFUSE
         const float3 sunTS = float3(pin.uv.zw, pin.tangent.w);
         float sunVis = 1.0f;
-        float sunShadowEdge = 0.0f;
-        float selfLit = 1.0f;
         #if FORWARD_SHADOWS	// NVR sun shadows in the object pass
             #if OBJECT_SMOOTH_NORMALS
                 const float3 flatNormal = ShadowFacingNormal(pin.normal.xyz, worldPos);   // SmoothObjectNormals: no per-triangle normal is built
@@ -497,18 +492,6 @@ PS_OUTPUT main(PS_INPUT pin) {
             #endif
             const float3 shadowNormal = ShadowLookupNormal(flatNormal, float4(pin.normal.xyz, SHADOW_VS_SENTINEL));   // SmoothCharacterShadows, and the skin's edge softness
             sunVis = GetSunShadow(worldPos, shadowNormal);
-            // How sharp the shadow's edge is here, on screen (Includes/Skin.hlsl SkinShadow: the red of light carried across a
-            // shadow line shows only on penumbrae a few pixels wide). Top level: a derivative.
-            sunShadowEdge = fwidth(sunVis);
-            // The surface's own far side (geometric N.L under 0.05), in shadow, with ShadowScatter on: is it the skin's
-            // own shadow? One coarse look SKIN_SELF_SHADOW_REACH toward the sun (SkinLight uses it only there).
-            [branch] if (sunVis < 1.0f && sunTS.z < 0.05f && TESR_SkinLook.z > 0.0f)
-                // 2026-10-27 (user: red lines on a face in heavy shadow): and half as far. One look alone was fooled by a caster close to
-                // the skin (the hair, a collar, a helmet's rim): the point 16 units off lay past it, in the sun, so the red light carried
-                // past the terminator showed inside that caster's shadow, in bands along the face's contours. A head's own far side is
-                // lit at both distances (8 units clears a head's chord there); a close caster's shadow covers the nearer one.
-                selfLit = min(SunShadowCoarse(worldPos + TESR_SmoothedSunDir.xyz * (0.5f * SKIN_SELF_SHADOW_REACH)),
-                    SunShadowCoarse(worldPos + TESR_SmoothedSunDir.xyz * SKIN_SELF_SHADOW_REACH));
         #endif
         float3 projShadow = 1.0f;
         #ifdef PROJ_SHADOW	// variants with the game's projected (canopy) shadow
@@ -524,7 +507,7 @@ PS_OUTPUT main(PS_INPUT pin) {
 
     #ifndef DIFFUSE
         const float3 sunLight = PBRLight(PSLightColor[0].rgb) * projShadow;
-        diffuseLight += SkinLight(albedo, N, Nsoft, sunTS.z, V, sunTS, sunLight, sunVis, sunShadowEdge, selfLit, specular);
+        diffuseLight += SkinLight(albedo, N, Nsoft, sunTS.z, V, sunTS, sunLight, sunVis, true, specular);
         specularLight += specular;
     #endif
 

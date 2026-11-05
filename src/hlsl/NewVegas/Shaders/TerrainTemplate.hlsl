@@ -247,7 +247,9 @@ float4 NVR_TerrainLampSlot[20] : register(c146);            // the trace's slots
 row_major float4x4 NVR_TerrainLampReproject : register(c168); // camera-relative position (this frame) -> the traced frame's clip
 float4 NVR_TerrainLampRT : register(c172);                  // x 1 = on, y depth tolerance, z log2(farZ) / 4095, w strength
 float4 NVR_TerrainLampPack : register(c173);                // (2026-11-03 rtext) x the packing unit U (1024; 4096 ManyLights), y 1 = ManyLights:
-                                                            // entry 2 is R, the traced share of every lamp not among the 2 exact ones
+                                                            // entry 2 is R, the traced share of every lamp not among the 2 exact ones;
+                                                            // z (2026-11-05) 1 = debug (ExteriorDebug 3): the lamps' light red where traced
+                                                            // blocked, green where lit
 sampler2D NVR_TerrainLampVis : register(s15);               // the traced result (point sampled, set by the DLL)
 
 // The pixel's three traced entries: their visibility and their lamps' positions (once a pixel; the slot table read in a loop, the
@@ -631,6 +633,7 @@ PS_OUTPUT main(PS_INPUT pin) {
         #if TERRAIN_LAMP_RT
             float3 tlVis, tlP0, tlP1, tlP2, tlOk;
             TerrainLampEntries(camPos, tlVis, tlP0, tlP1, tlP2, tlOk);
+            float2 tlDebug = 0.0f;   // (2026-11-05 ExteriorDebug 3) the lamps' attenuation blocked / lit
         #endif
         [loop] for (int k = 0; k < PointLightCount; k++) {
             float3 lampDir = PointLightPosition[k].xyz - pin.localPos.xyz;
@@ -640,6 +643,7 @@ PS_OUTPUT main(PS_INPUT pin) {
             if (atten > 0.001) {
                 #if TERRAIN_LAMP_RT
                     float tlShadow = TerrainLampShadow(camPos + lampDir, tlVis, tlP0, tlP1, tlP2, tlOk);
+                    tlDebug += atten * float2(1.0f - tlShadow, tlShadow);
                 #else
                     float tlShadow = 1.0f;
                 #endif
@@ -648,6 +652,9 @@ PS_OUTPUT main(PS_INPUT pin) {
                 litCol += tlShadow * getPointLightLighting(lampDir, LampAttOther(atten), LinColor(PointLightColor[k].rgb), toEye, combinedNormal, baseColor, glossV, specPow);
             }
         }
+        #if TERRAIN_LAMP_RT
+            [branch] if (NVR_TerrainLampPack.z > 0.5f) litCol = litCol * 0.25f + float3(tlDebug.x, tlDebug.y, 0.0f) * 2.0f;
+        #endif
     #endif
 
     // Per pixel fog.

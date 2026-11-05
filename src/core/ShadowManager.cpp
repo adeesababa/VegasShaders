@@ -2312,6 +2312,10 @@ void ShadowManager::RenderShadowMaps() {
 	D3DVIEWPORT9 savedViewport;
 
 	D3DXVECTOR4* dataConst = &TheShaderManager->Effects.ShadowsExteriors->Constants.Data;
+	// UNOFFICIAL 2026-11-05 (from Bale, PR #6; user: exterior forward sun shadows show in third person, vanish in first): the world's TESR_ShadowData
+	// (x quality, y darkness) is borrowed by the caster passes below (x caster kind, y alpha test) and was never put back, so the world read the
+	// last pass's values: darkness 0 whenever an opaque pass drew last (in third person the character map happened to leave 1). Put back at the end.
+	const float worldQuality = dataConst->x, worldDarkness = dataConst->y;
 	D3DXVECTOR4* orthoConst = &TheShaderManager->Effects.ShadowsExteriors->Constants.OrthoData;
 	dev->GetDepthStencilSurface(&savedDepth);
 	dev->GetRenderTarget(0, &savedTarget);
@@ -3367,6 +3371,8 @@ void ShadowManager::RenderShadowMaps() {
 	}
 
 	// reset renderer to previous state
+	dataConst->x = worldQuality;	// UNOFFICIAL 2026-11-05 (above)
+	dataConst->y = worldDarkness;
 	dev->SetDepthStencilSurface(savedDepth);
 	dev->SetRenderTarget(0, savedTarget);
 	dev->SetViewport(&savedViewport);
@@ -3592,6 +3598,9 @@ bool ShadowManager::RenderViewModelShadowMap(NiCamera* FirstPersonCamera) {
 	if (!TheShaderManager->GameState.isExterior || !Shadows->Enabled || !Shadows->Settings.Exteriors.Enabled) return skip("indoors or exterior shadows off");
 	if (Shadows->Constants.ShadowFade.y <= 0.0f || Shadows->Constants.ForwardData.x != 0.0f) return skip(Shadows->Constants.ShadowFade.y <= 0.0f ? "sun shadow maps inactive" : "forward sun shadows off this frame");
 	if (!Player || !Player->firstPersonNiNode || !FirstPersonCamera) return skip("no first-person model or camera");
+	// UNOFFICIAL 2026-11-05 (from Bale, PR #6): no map while the weapon is holstered, nothing of the viewmodel is drawn for it to shadow (the world's
+	// shadows dropped out in first person then).
+	if (!Player->process || !Player->process->IsWeaponOut()) return skip("weapon holstered: no viewmodel on screen");
 
 	IDirect3DDevice9* Device = TheRenderManager->device;
 	NiDX9RenderState* RenderState = TheRenderManager->renderState;

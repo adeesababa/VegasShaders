@@ -925,8 +925,9 @@ namespace {
 		"TESR_SkyColor", "TESR_HorizonColor", "TESR_CloudsShape", "TESR_CloudsNoise", "TESR_CloudsLight", "TESR_CloudsWind",
 		"TESR_CloudsMarch", "TESR_CloudsLayout", "TESR_CloudsBlocks", "TESR_CloudsLook", "TESR_CloudsDetail", "TESR_CloudsExtra",
 		"TESR_CloudsMotion", "TESR_WaterSettings", "TESR_CameraData", "TESR_CameraPosition", "TESR_CloudsTint", "TESR_CloudsTower",
-		"TESR_PhysSky", "TESR_PhysSkySun" };	// (TESR_CloudsTint, TESR_CloudsTower: UNOFFICIAL 2026-10-26, WeatherTint and Towering)
-	const UINT CloudsOptionalVectors = 2;	// the last two
+		"TESR_PhysSky", "TESR_PhysSkySun", "TESR_GameMultisample" };	// (TESR_CloudsTint, TESR_CloudsTower: UNOFFICIAL 2026-10-26, WeatherTint and Towering)
+	// (TESR_GameMultisample: UNOFFICIAL 2026-11-05, the game's MSAA and the composite's sky shares, Compute/MsaaSkyEdge.glsl)
+	const UINT CloudsOptionalVectors = 3;	// the last three
 	struct CloudsUniforms {
 		D3DXMATRIX	Matrices[_countof(CloudsMatrixNames)];
 		D3DXVECTOR4	Vectors[_countof(CloudsVectorNames)];
@@ -979,7 +980,11 @@ bool VolumetricCloudsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurfac
 		IDirect3DBaseTexture9* depth = CloudsNamedTexture("TESR_DepthBuffer");
 		textures[0] = TheTextureManager->RenderedTexture; textures[1] = depth; textures[2] = CloudsNamedTexture("TESR_NormalsBuffer");
 		textures[3] = Textures.ShadowTexture ? Textures.ShadowTexture : depth;	// no map: shadow strength 0, never read
-		textures[4] = Textures.HistoryRead; count = 5; break;
+		textures[4] = Textures.HistoryRead;
+		// UNOFFICIAL 2026-11-05 (alpha cutouts under the game's MSAA): TESR_SkyCoverage, as the D3D9 composite reads it (Includes/MsaaSkyEdge.hlsl);
+		// without the game's MSAA it is never made nor read: the depth stands in for the binding.
+		IDirect3DBaseTexture9* skyCoverage = CloudsNamedTexture("TESR_SkyCoverage");
+		textures[5] = skyCoverage ? skyCoverage : depth; count = 6; break;
 	}
 	case 1: case 3: case 4:
 		textures[0] = weather; textures[1] = ExtFileTexture("TESR_CloudShape"); textures[2] = ExtFileTexture("TESR_CloudDetail");

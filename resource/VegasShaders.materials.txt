@@ -2,13 +2,16 @@
 # Picks how the object shaders treat a texture (metal or not, how rough) from its diffuse texture's path. Edit freely;
 # changes apply after a restart. A texture no line covers looks exactly as with the rules off.
 #
-#   class   <name> metal=<off|guess|mask|full> strength=<0-1> rough=<min>-<max> reflections=<x> tint=<r>,<g>,<b>
+#   class   <name> metal=<off|guess|mask|full> strength=<0-1> rough=<min>-<max> reflections=<x> tint=<r>,<g>,<b> authored=<keep|replace>
 #       metal: off = never metal; guess = the usual colour + highlight-mask guess; mask = the texture's _m environment
 #              mask is the metal map (guess where there is none); full = all metal
 #       strength: how metal it can get (replaces [Shaders.PBR.Metal] World / FirstPerson for these textures)
 #       rough: the roughness range the normal map's highlight mask is spread over (leave out = the global one)
 #       reflections: metal's reflection of its surroundings, times [Shaders.PBR.Metal] Reflections
 #       tint: the class's colour in [Shaders.PBR.MaterialRules] DebugView
+#       authored: keep (default) or replace (2026-11-05, [Shaders.PBR.Main] VanillaBridge). keep: where the game's art has a
+#              highlight (normal map alpha + the mesh's glossiness) the highlight follows it, and rough only fills in where
+#              there is none; replace: rough decides everywhere, as before the bridge
 #   folder  <path prefix> <class> [final]   final = decided before the keywords (the keywords cannot change it)
 #   keyword <word in the file name> <class> [not=<word>,<word>]
 #   file    <full texture path> <class>

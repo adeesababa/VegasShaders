@@ -14,11 +14,15 @@ float4 FogColor : register(c2);
 
 sampler2D DiffuseMap : register(s0);
 
+#include "includes/SoftParticle.hlsl"   // UNOFFICIAL 2026-11-04 soft particles
+
 struct PS_INPUT {
     float4 uv : TEXCOORD0;             // xy: texture, z: alpha scale, w: fog
     float4 color : COLOR0;
     float4 shadowWorldPos : TEXCOORD1; // from NOLIGHT016/017.vso only
     float4 vertexLight : TEXCOORD2;
+    float2 depthSize : TEXCOORD3;      // x: view depth, y: the particle's size (0: not soft)
+    float2 screenPos : VPOS;
 };
 
 struct PS_OUTPUT {
@@ -41,5 +45,6 @@ PS_OUTPUT main(PS_INPUT IN) {
     float3 additive = lerp(base.rgb, 1.0f, saturate(fog * 1.5f));
     OUT.color_0.rgb = lerp(lerp(fogged, premultiplied, Toggles.x), additive, Toggles.y);
     OUT.color_0.a = base.a * IN.uv.z;
+    OUT.color_0.a *= SoftParticleFade(IN.screenPos, IN.depthSize);   // UNOFFICIAL 2026-11-04 soft particles
     return OUT;
 }

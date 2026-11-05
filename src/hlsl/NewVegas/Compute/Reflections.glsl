@@ -188,6 +188,7 @@ vec3 SurfacePosition(vec2 uv, float depth) {
 // UNOFFICIAL 2026-10-31 RT water ([Shaders.Reflections.RT] Water): on a frame RT traces the water, water pixels reflect (RayGen casts,
 // Resolve shades, the blurs run), but the composite leaves them alone: the water shaders read Buffer next frame in place of the planar map.
 #define WaterRtOn (cb.sky.z > 0.5)
+#define WaterPlanarSkipped (cb.sky.z > 1.5)   // UNOFFICIAL 2026-11-05: WaterSkipPlanar (no planar map for a water miss to fall back on)
 bool SurfaceWater = false;    // set by Reflectivity: this pixel is the water (with WaterRtOn)
 float WaterReflectivity(float depth, out float roughness) {
     if (!WaterRtOn) return 0.0;

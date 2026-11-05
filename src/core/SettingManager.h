@@ -35,6 +35,8 @@ struct SettingsMainStruct
         bool    NvrDxvkReplacements; // [Main.Main.Performance] NvrDxvkReplacements (UNOFFICIAL 2026-10-24: pixel shaders with a Compute\Replace\<name>.spv run as that SPIR-V through the NVR DXVK extension; needs NVR DXVK 1.2), at load
         bool    AmbientLightBlurCompute; // [Main.Main.Performance] AmbientLightBlurCompute (UNOFFICIAL 2026-10-25: AmbientLight's BlurX + BlurY as one compute dispatch; needs NVR DXVK), live
         bool    NvrSm6Shaders; // [Main.Main.Performance] NvrSm6Shaders (UNOFFICIAL 2026-10-26: NVR's own effect passes with an SM6 build in Compute\Sm6 run from that SPIR-V, compiled from the same .hlsl without ps_3_0's limits; needs NVR DXVK; core\Sm6Pass.h), live
+        bool    MsaaEdgeFix; // [Main.Main.Quality] MsaaEdgeFix (UNOFFICIAL 2026-11-05: with the game's MSAA the clouds and the volumetric light take each pixel's exact sky share, sky-by-depth pixels and the Vulkan passes too; TESR_GameMultisample.z), live
+        int     MsaaEdgeDebugView; // [Main.Main.Quality] MsaaEdgeDebugView (UNOFFICIAL 2026-11-05, test: 1 = the composites show red where their depth says sky, green the exact sky share; TESR_GameMultisample.w), live
         int     SmoothNormals; // [Main.Main.Quality] SmoothNormals (UNOFFICIAL 2026-10-23: reach in pixels of the shared normal smoothing after the normals pass; 0 off), live
         bool    LampMaskScissor; // [Main.Main.Performance] LampMaskScissor (the lamp-mask pass drawn only inside its lamps' screen rectangle, not at all with none on screen; exact), live
         bool    InteriorShadowFold; // [Main.Main.Performance] InteriorShadowFold (indoors the unblurred lamp darkening applied in the fog composite, not its own pass), live

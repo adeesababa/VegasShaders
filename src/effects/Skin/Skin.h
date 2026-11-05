@@ -28,26 +28,27 @@ public:
 
 	struct SkinStruct {
 		D3DXVECTOR4		Material;   // TESR_SkinMaterial (c192): x SpecularStrength, y Roughness, z Scattering, w Translucency
-		D3DXVECTOR4		Look;       // TESR_SkinLook (c193): x SkyReflection (0 indoors), y wetness (rain x RainWetness), z ShadowScatter, w Sheen
+		D3DXVECTOR4		Look;       // TESR_SkinLook (c193): x SkyReflection (0 indoors), y wetness (rain x RainWetness), z ShadowScatter, w VanillaMatchedHighlights
 		D3DXVECTOR4		Debug;      // TESR_SkinDebug (c195): x [Shaders.Skin.Debug] DebugView 1-7, y 1 while the Interiors settings are in use, z LegacyFaceShadows
 	};
 	SkinStruct Constants = {};
 
 	// The skin material outdoors ([Shaders.Skin.Main]) and indoors ([Shaders.Skin.Interiors]); UpdateConstants picks one each frame.
 	struct MaterialStruct {
-		float SpecularStrength, Roughness, Scattering, Translucency, ShadowScatter, Sheen;
+		float SpecularStrength, Roughness, Scattering, Translucency, ShadowScatter;
 	};
 	MaterialStruct Exterior = {};
 	MaterialStruct Interior = {};
 	float SkyReflection = 1.0f;		// outdoors only: nothing occludes the sky the reflection samples, so indoors it is off
 	float RainWetness = 0.5f;		// outdoors only
+	float VanillaMatchedHighlights = 0.0f;	// UNOFFICIAL 2026-11-05 (PB NVR's skin lighting): 1 = the highlights as strong as vanilla's (Includes/Skin.hlsl SkinSetup)
 
 	// [Shaders.Skin.Debug] DebugView. 1-7 are drawn by the skin shader (SkinTemplate.hlsl); 8-10 by the screen-space blur
 	// (SkinScattering.fx.hlsl), which steps aside for 1-7 so it does not blur them.
 	int DebugView = 0;
 	bool MuteGameHighlights = true;	// [Shaders.Skin.Main] MuteGameHighlights (Hooks/Shaders.cpp): the engine's own face highlight passes off
 	bool BindFaceGenMaps = true;	// diagnostic: [Shaders.Skin.Debug] BindFaceGenMaps (Hooks/Shaders.cpp BindFaceGenMaps)
-	bool LegacyFaceShadows = false;	// diagnostic, live: [Shaders.Skin.Debug] LegacyFaceShadows (the 2026-10-25 shadow edges on skin, for an A/B)
+	bool LegacyFaceShadows = false;	// diagnostic, live: [Shaders.Skin.Debug] LegacyFaceShadows (the template's shadow reach along the ray off, for an A/B)
 	static const int DebugViewCount = 10;
 	static const int FirstScatteringDebugView = 8;
 

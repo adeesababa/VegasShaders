@@ -244,9 +244,31 @@ float2 FogGridAir(float2 uvV, float dpt) {
 	return float2(FogGridSum(uvV, dpt).r / TESR_VolumetricLightGridData.y, 1.0 - exp(-sigma * planar));
 }
 
+// UNOFFICIAL 2026-11-05 MsaaEdgeFix ([Main.Main.Quality], NVR_FogGridFlags.z = on and this frame's sky shares made): with the game's MSAA,
+// each pixel's exact sky share (core/SkyCoverage.h), bound by hand on stage 15 (a TESR_ sampler would take stage 6, the fog buffer's).
+// The air of a pixel by that share, as VolumetricLight.fx.hlsl MsaaAirMix (Includes/MsaaSkyEdge.hlsl): with transparency multisampling a
+// see-through cutout (a bush, a pylon's lattice) covers part of each pixel's samples, but the one depth read here is the nearest
+// sample's (NVR DXVK) or sample 0's: the see-through part took the air up to the cutout, not the sky's (the bush a solid shape in the
+// light). A surface pixel's sky share takes the whole view's air. This file is at ps_3_0's 224 constants: a second grid lookup (the air at
+// the far plane, to blend the two as MsaaAirMix does) took the composites past them, so the depth the one lookup is made at is blended
+// instead, from the surface's toward the end of the grid by the sky share. The air builds up almost evenly along a view (at the default
+// Density and MaxDistance a whole view is about a tenth opaque), so that is within a few percent of blending the two. (A sky pixel's
+// surface share under a sample-0 resolve, MsaaAirMix's other half, is left out: the DXVK fork resolves the nearest sample.)
+sampler2D NVR_FogSkyCoverage : register(s15) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+
+// The depth to read the grid at: the planar depth the grid would take (the march distance for the sky, else at most it), blended toward
+// the march distance by the sky share. With share 0 the lookup is the one before (min(depth, MaxDistance) is what FogGridAir takes), the
+// sky's is unchanged (share 1). (No branch and no flag read: either took a constant register this shader does not have. The fix off,
+// VolumetricFog.cpp binds nothing on stage 15, which reads 0: share 0.)
+float FogGridDepthMsaa(float2 uvV, float dpt) {
+	float share = tex2Dlod(NVR_FogSkyCoverage, float4(uvV, 0, 0)).r;
+	float marchDistance = TESR_VolumetricLightData.w;
+	return lerp(min(dpt, marchDistance), marchDistance, share);
+}
+
 // The volumetric light's composite (VolumetricLight.fx.hlsl CompositeAir) on a gamma-encoded colour.
 float3 FogGridLight(float3 gammaColor, float2 uvV) {
-	float2 air = FogGridAir(uvV, readDepthLod(uvV));
+	float2 air = FogGridAir(uvV, FogGridDepthMsaa(uvV, readDepthLod(uvV)));	// (UNOFFICIAL 2026-11-05 MsaaEdgeFix, NVR_FogGridFlags.z)
 	float cosTheta = dot(normalize(toWorld(uvV)), TESR_SmoothedSunDir.xyz);
 	float g = TESR_VolumetricLightData2.y;
 	float phase = min((1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * cosTheta, 1.0e-4), 1.5), 8.0);

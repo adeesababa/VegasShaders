@@ -30,6 +30,7 @@ public:
 	IDirect3DSurface9		*BloomSurface;
 	IDirect3DTexture9		*DepthTexture, *DepthTextureViewModel;	// readable (INTZ) depth: world, first-person model
 	IDirect3DTexture9*		TerrainBlendDepthTexture = nullptr;	// UNOFFICIAL terrain blending: the world's depth as the land starts (Terrain.h)
+	IDirect3DTexture9*		ParticleDepthTexture = nullptr;	// UNOFFICIAL 2026-11-04 soft particles: the world's depth as the first lit particle draws (Particles.h)
 	IDirect3DSurface9		*CombinedDepthSurface;
 	IDirect3DTexture9		*CombinedDepthTexture, *DepthTextureINTZ;
 	IDirect3DSurface9		*DepthSurface;

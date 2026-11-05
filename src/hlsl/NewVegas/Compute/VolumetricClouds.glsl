@@ -32,6 +32,7 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4 tower;                    // TESR_CloudsTower (2026-10-25 Towering: x ordinary share of the layer, y towering, z anvil)
     vec4 physSky;                 // TESR_PhysSky (zero unless the effect was compiled with PHYSICAL_SKY_ON)
     vec4 physSkySun;               // TESR_PhysSkySun
+    vec4 gameMultisample;          // TESR_GameMultisample (UNOFFICIAL 2026-11-05: the composite's sky shares, MsaaSkyEdge.glsl)
 } cb;
 
 layout(push_constant) uniform Push {

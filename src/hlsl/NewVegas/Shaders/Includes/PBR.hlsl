@@ -35,6 +35,15 @@ float4 TESR_PBRMath : register(c223); // x: EnergySplit (1 = on), y: Reflectivit
 #endif
 float3 ReflectivityF0(float3 f0) { return saturate(f0 + f0 * TESR_PBRMath.y); }
 #define REFLECTIVITY_F90 saturate(1.0f + TESR_PBRMath.y).xxx
+// UNOFFICIAL 2026-11-05 VanillaBridge (Object.hlsl): the Fresnel of the HIGHLIGHT, which may start from a different reflectance
+// than the diffuse's (1 - F) share: an includer that defines PBR_SPEC_F0(baseColor, metal) gives the highlight that F0 (the
+// authored Blinn-Phong highlight's strength); the diffuse keeps the dielectric's, so a surface's diffuse light is unchanged.
+// Without it the highlight takes the same Fresnel as before (the macro is that value itself: the shaders are unchanged).
+#ifdef PBR_SPEC_F0
+    #define PBR_SPEC_FRESNEL(fres, baseColor, metal, cosT) Fresnel(ReflectivityF0(PBR_SPEC_F0(baseColor, metal)), REFLECTIVITY_F90, cosT)
+#else
+    #define PBR_SPEC_FRESNEL(fres, baseColor, metal, cosT) (fres)
+#endif
 
 // UNOFFICIAL 2026-10-18 SpecularFade ([Shaders.PBR.Main], restart: SPEC_FADE_ON from ShaderRecord::BuildDefines; the object templates
 // define PBR_SPEC_FADE in their highlight-drawing pixel shaders, so terrain, skin and water keep the old code; parallax since 2026-10-25). The game stops
@@ -234,7 +243,7 @@ float3 PBRSpecular(float metal, float r, float3 baseColor, float3 N, float3 V, f
 
     const float3 fres = Fresnel(f0Base, REFLECTIVITY_F90, LdotH);
 
-    float3 specOut = BRDF(r, fres, NdotV, NdotL, NdotH);
+    float3 specOut = BRDF(r, PBR_SPEC_FRESNEL(fres, baseColor, metal, LdotH), NdotV, NdotL, NdotH);
 #ifdef PBR_SPEC_FADE
     specOut *= NVR_SpecFade.x;	// UNOFFICIAL SpecularFade (above)
 #endif
@@ -260,7 +269,7 @@ float3 PBR(float metal, float r, float3 baseColor, float3 N, float3 V, float3 L,
 
     float3 diff = (1 - metal) * LambertianDiffuse(baseColor, fres) * PBRDiffuseKeep;
 
-    float3 specOut = BRDF(r, fres, NdotV, NdotL, NdotH);
+    float3 specOut = BRDF(r, PBR_SPEC_FRESNEL(fres, baseColor, metal, LdotH), NdotV, NdotL, NdotH);
 #ifdef PBR_SPEC_FADE
     // UNOFFICIAL SpecularFade (above): the highlight out, the diffuse light towards PBRDiffuse's plain form.
     #ifndef PBR_SPEC_FADE_HIGHLIGHT_ONLY
@@ -303,7 +312,7 @@ float3 PBRSunSpecular(float metal, float r, float3 baseColor, float3 N, float3 V
 
     const float3 fres = Fresnel(f0Base, REFLECTIVITY_F90, LdotH);
 
-    float3 specOut = BRDF(r, fres, NdotV, NdotS, NdotH);
+    float3 specOut = BRDF(r, PBR_SPEC_FRESNEL(fres, baseColor, metal, LdotH), NdotV, NdotS, NdotH);
 #ifdef PBR_SPEC_FADE
     specOut *= NVR_SpecFade.x;	// UNOFFICIAL SpecularFade (above)
 #endif
@@ -342,7 +351,7 @@ float3 PBRSun(float metal, float r, float3 baseColor, float3 N, float3 V, float3
 
     float3 diff = (1 - metal) * LambertianDiffuse(baseColor, fres) * PBRDiffuseKeep;
 
-    float3 specOut = BRDF(r, fres, NdotV, NdotS, NdotH);
+    float3 specOut = BRDF(r, PBR_SPEC_FRESNEL(fres, baseColor, metal, LdotH), NdotV, NdotS, NdotH);
 #ifdef PBR_SPEC_FADE
     // UNOFFICIAL SpecularFade (above): the highlight out, the diffuse light towards PBRDiffuse's plain form.
     #ifndef PBR_SPEC_FADE_HIGHLIGHT_ONLY

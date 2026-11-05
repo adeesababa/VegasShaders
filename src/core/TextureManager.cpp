@@ -65,6 +65,18 @@ void TextureManager::Initialize() {
 		}
 	}
 
+	// UNOFFICIAL 2026-11-04 soft particles (Particles.h): with lit particles on at startup, as their vertices carry the size (ParticleSize.h).
+	if (TheSettingManager->GetSettingI("Shaders.Particles.Status", "Enabled")) {
+		if (SUCCEEDED(MakeReadableDepth(dev, screenW, screenH, &mgr->ParticleDepthTexture))) {
+			mgr->RegisterTexture("TESR_ParticleDepth", (IDirect3DBaseTexture9**)&mgr->ParticleDepthTexture);
+			NvAPI_D3D9_RegisterResource(mgr->ParticleDepthTexture);
+		}
+		else {
+			mgr->ParticleDepthTexture = nullptr;
+			Logger::Log("[ERROR] Soft particles: could not create their depth texture; they stay off");
+		}
+	}
+
 	// the water maps are slots the water hooks fill in later
 	mgr->RegisterTexture(WordWaterHeightMapBuffer, &mgr->WaterHeightMapB);
 	mgr->RegisterTexture(WordWaterReflectionMapBuffer, &mgr->WaterReflectionMapB);

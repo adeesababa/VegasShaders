@@ -256,7 +256,8 @@ namespace {
 		"TESR_VolumetricLightData", "TESR_VolumetricLightData2", "TESR_VolumetricLightData3", "TESR_VolumetricLightLayout",
 		"TESR_VolumetricLightGridLayout", "TESR_VolumetricLightGridData", "TESR_FogData", "TESR_SunAmount", "TESR_GameTime",
 		"TESR_VolumetricFogDensity", "TESR_VolumetricFogShape", "TESR_VolumetricFogWind", "TESR_VolumetricFogScatter",
-		"TESR_VolumetricFogWeather", "TESR_VolumetricFogNight", "TESR_VolumetricFogNightScatter", "TESR_CameraPosition" };
+		"TESR_VolumetricFogWeather", "TESR_VolumetricFogNight", "TESR_VolumetricFogNightScatter", "TESR_CameraPosition",
+		"TESR_GameMultisample" };	// (UNOFFICIAL 2026-11-05: the game's MSAA and the composites' sky shares, Compute/MsaaSkyEdge.glsl)
 	struct ExtConstants {
 		D3DXMATRIX	Matrices[_countof(ExtMatrixNames)];
 		D3DXVECTOR4	Vectors[_countof(ExtVectorNames)];
@@ -281,10 +282,18 @@ bool VolumetricLightEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface
 	if (!frame && RenderTarget != RenderedSurface) return false;
 	IDirect3DTexture9* depth = TheShaderManager->Effects.CombineDepth ? TheShaderManager->Effects.CombineDepth->Textures.CombinedDepthTexture : nullptr;
 	IDirect3DTexture9* atlas = TheShaderManager->Effects.ShadowsExteriors ? TheShaderManager->Effects.ShadowsExteriors->ShadowAtlasTexture : nullptr;
-	IDirect3DBaseTexture9* textures[3] = {};
+	// UNOFFICIAL 2026-11-05 (alpha cutouts under the game's MSAA): the composites also read TESR_SkyCoverage (core/SkyCoverage.h), as their
+	// D3D9 shaders do (Includes/MsaaSkyEdge.hlsl). Without the game's MSAA it is never made nor read: the depth stands in for the binding.
+	IDirect3DBaseTexture9* skyCoverage = depth;
+	{
+		std::string name = "TESR_SkyCoverage";
+		IDirect3DBaseTexture9** slot = TheTextureManager->GetTextureSlotByName(name);
+		if (slot && *slot) skyCoverage = *slot;
+	}
+	IDirect3DBaseTexture9* textures[4] = {};
 	UINT count = 0;
 	switch (techniqueIndex) {
-	case 0: textures[0] = TheTextureManager->RenderedTexture; textures[1] = depth; textures[2] = Textures.BlurTexture; count = 3; break;
+	case 0: textures[0] = TheTextureManager->RenderedTexture; textures[1] = depth; textures[2] = Textures.BlurTexture; textures[3] = skyCoverage; count = 4; break;
 	case 1: textures[0] = depth; textures[1] = atlas; count = 2; break;
 	case 2: textures[0] = Textures.TempTexture; count = 1; break;
 	case 3: textures[0] = Textures.MarchTexture; textures[1] = Textures.HistoryTexture; count = 2; break;
@@ -292,14 +301,14 @@ bool VolumetricLightEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface
 	case 5: textures[0] = atlas; textures[1] = fogNoise; count = 2; break;	// the noise is bound whether or not the fog volume reads it
 	case 6: textures[0] = Textures.GridTexture; count = 1; break;
 	case 7: textures[0] = Textures.GridTempTexture; count = 1; break;
-	case 8: textures[0] = TheTextureManager->RenderedTexture; textures[1] = depth; textures[2] = Textures.GridTexture; count = 3; break;
+	case 8: textures[0] = TheTextureManager->RenderedTexture; textures[1] = depth; textures[2] = Textures.GridTexture; textures[3] = skyCoverage; count = 4; break;
 	}
 	for (UINT i = 0; i < count; i++) if (!textures[i]) return false;
 
 	ExtPass& pass = extPasses[techniqueIndex == 4 ? 2 : techniqueIndex];
 	if (!pass.Tried) {
 		pass.Tried = true;
-		NVR_EXT_BINDING_DESC bindings[7] = {};
+		NVR_EXT_BINDING_DESC bindings[8] = {};
 		for (UINT i = 0; i < count; i++) {
 			bindings[i].Set = 1; bindings[i].Binding = i; bindings[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[i].Slot = i;
 			bindings[i].ViewType = techniqueIndex == 5 && i == 1 ? NVR_EXT_VIEW_3D : NVR_EXT_VIEW_2D;
@@ -327,7 +336,7 @@ bool VolumetricLightEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface
 	ID3D9NvrExtBuffer* uniforms = ExtUniforms(extUniforms, &constants, sizeof(constants));
 	if (!uniforms) return false;
 
-	NVR_EXT_RESOURCE_BINDING resources[7] = {};
+	NVR_EXT_RESOURCE_BINDING resources[8] = {};
 	for (UINT i = 0; i < count; i++) {
 		resources[i].Slot = i; resources[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[i].pResource = textures[i];
 	}

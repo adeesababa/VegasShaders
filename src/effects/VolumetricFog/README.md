@@ -323,11 +323,21 @@ test suffixes n / s / k / f).
 - Selected by `NvrDxvkPasses` on Vegas Shaders DXVK (not in rect frames, not for the diagnostic overrides or SM6); ExtDedicated (both passes),
   ExtShadowAO (mode 3), ExtRender (mode 4, full-resolution techniques). PackedFog and HalfStoreProbe stay D3D9.
 - Set 1 bindings: 0 scene, 1 depth, 2 atlas, 3 normals, 4 point shadow, 5 noise (3D), 6 sky table, 7 grid; Apply also 8 fog multiply, 9
-  fog add, 10 AO, 11 sky visibility, 12 SunFar. Stand-ins (the depth buffer) are never read while their flags are 0.
+  fog add, 10 AO, 11 sky visibility, 12 SunFar, 13 the sky shares (TESR_SkyCoverage, UNOFFICIAL 2026-11-05 MsaaEdgeFix: read while
+  NVR_FogGridFlags.z is 1). Stand-ins (the depth buffer) are never read while their flags are 0.
+- UNOFFICIAL 2026-11-05 MsaaEdgeFix ([Main.Main.Quality], on by default; only with the game's MSAA): where the volumetric light's froxel
+  grid is applied here (FogGridLight), a pixel's grid depth is blended from the surface's toward the march distance by the pixel's exact sky
+  share (core/SkyCoverage.h; D3D9: NVR_FogSkyCoverage on stage 15, bound by hand, nothing bound = 0; Vulkan: binding 13 and
+  NVR_FogGridFlags.z). With transparency multisampling a see-through cutout far off (a pylon's lattice, a bush) covers only part of each
+  pixel's samples, but the depth read here is one sample's (the nearest under the DXVK fork), so the see-through part took the air only
+  up to the cutout. Blending the depth instead of the two airs: a second grid lookup took the D3D9 composites past ps_3_0's 224 constants
+  (the air builds up almost evenly along a view, so the two differ by a few percent). Off, or without MSAA: the lookup is the one before
+  (lerp by 0). Bench 2026-11-05 og-desert, MsaaEdgeFix on vs off, VL MaxDistance 15000: pylon head +1.2 (fork, Vulkan) / +1.5 (native D3D9)
+  luma, the rest of the frame |diff| 0.07 (noise); without MSAA on vs off |diff| 0.10 = noise.
 - UNOFFICIAL 2026-11-03 LampHaze: not ported. While its term is on this frame (TESR_VolumetricFogLamps.x > 0: indoors, lamps listed), the
   Vulkan passes (ExtDedicated, ExtRender for the modern full-resolution technique) and the SM6 passes are not used and the D3D9 technique
   draws (logged once: "UNOFFICIAL LampHaze: ..."); outdoors, with LampHaze 0, ClassicLook or LegacyFog they run as before. Porting means
-  the lamp table as a set 1 binding (13), TESR_VolumetricFogLamps in FogExtConstants, LampHazeLight in VolumetricFog.glsl and the .spv
+  the lamp table as a set 1 binding (14; 13 is the sky shares since 2026-11-05), TESR_VolumetricFogLamps in FogExtConstants, LampHazeLight in VolumetricFog.glsl and the .spv
   rebuilt with tools/nvr-dxvk/compile-compute.sh.
 - Set 2 binding 0: FogExtConstants (6 matrices, 54 vectors in FogExtVectorNames order, 9 + 9 SH, 9 colours linearized on the CPU).
 - Push (112 bytes): sampler heap indices (point, linear, wrap), mode, legacy, classic, interior, physicalSky, then NVR_FogLayout,

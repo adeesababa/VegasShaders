@@ -729,8 +729,8 @@ ShaderCollection* ShaderManager::GetShaderCollection(const char* shaderName) {
 	// a ps_3_0 replacement too: D3D9 rejects a 2.x VS paired with a 3.0 PS.
 	if (ShaderNameBegins(shaderName, "STLEAF", 6)) return Shaders.PBR;
 	if (ShaderNameBegins(shaderName, "SKY", 3)) return Shaders.Sky;
-	// UNOFFICIAL lit particles and blood decals: only NOLIGHT016/017.vso, NOLIGHTTEXVC.pso and GDECAL(S) have
-	// replacements on disk; the rest of the NOLIGHT family resolves to no file and stays the game's.
+	// UNOFFICIAL lit particles and blood decals (NOLIGHT006/016/017.vso, NOLIGHTTEXVC.pso, GDECAL(S)); 2026-11-05 soft particles: the rest
+	// of the NOLIGHT family too (Includes/NoLighting.hlsl), except the skinned NOLIGHT008-015.vso, which stay the game's.
 	if (ShaderNameBegins(shaderName, "NOLIGHT", 7) || ShaderNameBegins(shaderName, "GDECAL", 6)) return Shaders.Particles;
 	if (strstr(BloodShaders, shaderName)) return Shaders.Blood;	// (a substring of the list)
 

@@ -245,14 +245,17 @@ float4 CompositeAir(float2 uv, float4 color, float2 air) {
 
 // ---- 0: Composite, full resolution ----
 float2 MarchAirAt(float2 uv, float depth);
+float2 MsaaAirMix(float2 uv, float depth, float2 air, uniform bool grid);
 
 float4 CompositePS(VSOUT IN) : COLOR0 {
 	float2 uv = IN.UVCoord;
 	float4 color = tex2Dlod(TESR_RenderedBuffer, float4(uv, 0, 0));
 	float depth = readDepthLod(uv);
+	[branch] if (MsaaEdgeDebugOn()) return MsaaEdgeDebug(uv, depth, color.rgb);	// UNOFFICIAL 2026-11-05 [Main.Main.Quality] MsaaEdgeDebugView
 	float2 air = MarchAirAt(uv, depth);
+	[branch] if (MsaaEdgeFixOn()) air = MsaaAirMix(uv, depth, air, false);	// UNOFFICIAL 2026-11-05 MsaaEdgeFix: as CompositeGridPS
 	// UNOFFICIAL 2026-11-04 the game's MSAA: as CompositeGridPS (Includes/MsaaSkyEdge.hlsl).
-	[branch] if (depth < farZ * 0.996) {
+	else if (TESR_GameMultisample.z <= 0.5 && depth < farZ * 0.996) {
 		float3 sky;
 		float share = SkyShare(uv, color.rgb, sky);
 		[branch] if (share > 0.0) air = lerp(air, MarchAirAt(uv, farZ), share);
@@ -384,14 +387,32 @@ float2 GridAirAt(float2 uv, float depth) {
 	return float2(lerp(nearSide, farSide, saturate(s - z)) / TESR_VolumetricLightGridData.y, 1.0 - exp(-sigma * planar));
 }
 
+// UNOFFICIAL 2026-11-05 MsaaEdgeFix: the air of a pixel by its exact sky share (Includes/MsaaSkyEdge.hlsl). Surface by depth: its sky share
+// takes the air of the whole view (as 2026-11-04). Sky by depth but only partly sky (a sample-0 resolve: stock DXVK, native D3D9): its
+// surface share takes the air up to the nearest surface round it, instead of the whole view's (the lit air over the bars of a lattice).
+// grid: GridAirAt (Froxels), else MarchAirAt.
+float2 MsaaAirMix(float2 uv, float depth, float2 air, uniform bool grid) {
+	float share = MsaaSkyCoverage(uv);
+	[branch] if (share <= MsaaNoSky) return air;
+	[branch] if (depth < farZ * 0.996) return lerp(air, grid ? GridAirAt(uv, farZ) : MarchAirAt(uv, farZ), share);
+	[branch] if (share >= MsaaAllSky) return air;
+	float surface = MsaaSurfaceDepth(uv, farZ);
+	[branch] if (surface >= farZ * 0.996) return air;
+	return lerp(grid ? GridAirAt(uv, surface) : MarchAirAt(uv, surface), air, share);
+}
+
 float4 CompositeGridPS(VSOUT IN) : COLOR0 {
 	float2 uv = IN.UVCoord;
 	float4 color = tex2Dlod(TESR_RenderedBuffer, float4(uv, 0, 0));
 	float depth = readDepthLod(uv);
+	[branch] if (MsaaEdgeDebugOn()) return MsaaEdgeDebug(uv, depth, color.rgb);	// UNOFFICIAL 2026-11-05 [Main.Main.Quality] MsaaEdgeDebugView
 	float2 air = GridAirAt(uv, depth);
+	// UNOFFICIAL 2026-11-05 MsaaEdgeFix (Includes/MsaaSkyEdge.hlsl): every pixel by its exact sky share (MsaaAirMix below).
+	[branch] if (MsaaEdgeFixOn()) air = MsaaAirMix(uv, depth, air, true);
 	// UNOFFICIAL 2026-11-04 the game's MSAA (Includes/MsaaSkyEdge.hlsl): a pixel on an edge against the sky took the air only up to the
 	// surface, its sky share too (a rim round every leaf and branch against the lit air): that share takes the air of the whole view.
-	[branch] if (depth < farZ * 0.996) {
+	// (MsaaEdgeFix off)
+	else if (TESR_GameMultisample.z <= 0.5 && depth < farZ * 0.996) {
 		float3 sky;
 		float share = SkyShare(uv, color.rgb, sky);
 		[branch] if (share > 0.0) air = lerp(air, GridAirAt(uv, farZ), share);

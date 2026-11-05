@@ -207,6 +207,9 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	// only when on at startup, so that off the object and parallax shaders are exactly what they were.
 	if (TheSettingManager->GetSettingI("Shaders.PBR.Dust", "Enabled")) AppendDefine("DUST_ON", "1");
 	if (TheSettingManager->GetSettingI("Shaders.PBR.MicroShadow", "Enabled")) AppendDefine("MICRO_SHADOW_ON", "1");
+	// UNOFFICIAL 2026-11-05 VanillaBridge (Includes/Object.hlsl, ObjectTemplate / ParallaxTemplate): the object highlights take the authored
+	// Blinn-Phong highlight's width and strength. Defined only when on, so that off the define list and the shaders are exactly as before.
+	if (TheSettingManager->GetSettingI("Shaders.PBR.Main", "VanillaBridge")) AppendDefine("VANILLA_BRIDGE_ON", "1");
 	// UNOFFICIAL 2026-11-02 SpecularFromMap (Includes/Object.hlsl): the maps' alpha (specular level) is used unless switched off; defined
 	// only when off, so the define list is unchanged by default.
 	if (TheSettingManager->GetSettingI("Shaders.PBR.Rmaos", "Enabled") && !TheSettingManager->GetSettingI("Shaders.PBR.Rmaos", "SpecularFromMap"))

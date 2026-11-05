@@ -27,7 +27,8 @@ layout(set = 2, binding = 1, std140) uniform RtConstants {
     vec4 rt3;       // 2026-10-29: x 1 = VNDF-sampled rays (RtVndf), y RoughShare's roughness (above: 1 ray per 2x2 block a frame; 0 off),
                     // z ContactSpread (the eye-distance share at which a hit counts as 'far' for the blur), w GlowBrightness
     vec4 rt4;       // 2026-10-30: x 1 = the hit's ambient from the light grid at the hit (HitAmbientGrid), else the cube's;
-                    // 2026-10-31: y 1 = RayReuse (rough pixels reuse their neighbours' hits), z its lowest roughness
+                    // 2026-10-31: y 1 = RayReuse (rough pixels reuse their neighbours' hits), z its lowest roughness;
+                    // 2026-11-05: w 1 = ShadeOffscreen (a hit out of view shaded from itself, not the cube)
     vec4 lamps[24]; // 2026-10-29: the 12 nearest scene lamps: [2i] xyz camera-relative position, w reach; [2i + 1] rgb colour x dimmer (gamma)
 } rtc;
 

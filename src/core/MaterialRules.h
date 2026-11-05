@@ -14,7 +14,10 @@
 // of NVR's globals so the offline check (tests\material_rules.cpp) runs exactly this code over every texture in the game.
 //
 // Table lines (# starts a comment):
-//   class   <name> metal=<off|guess|mask|full> strength=<0-1> rough=<min>-<max> reflections=<x> tint=<r>,<g>,<b>
+//   class   <name> metal=<off|guess|mask|full> strength=<0-1> rough=<min>-<max> reflections=<x> tint=<r>,<g>,<b> authored=<keep|replace>
+//                                        authored (2026-11-05 VanillaBridge): keep (default) = where the game's own highlight data is
+//                                        (normal map alpha + the mesh's glossiness) the highlight follows it and rough= only fills the
+//                                        gap; replace = rough= decides as before
 //   folder  <prefix> <class> [final]     longest prefix wins; "final" folders are decided before any keyword
 //   keyword <word> <class> [not=<a>,<b>] the file name contains <word> and none of the not= words
 //   file    <path> <class>               one texture, before everything else
@@ -33,6 +36,7 @@ namespace MaterialRules {
 		float		RoughMax = -1.0f;
 		float		Reflections = 1.0f;		// metal's surroundings reflection, times [Shaders.PBR.Metal] Reflections
 		float		Tint[3] = { 0.5f, 0.5f, 0.5f };	// DebugView colour
+		bool		ReplaceAuthored = false;	// UNOFFICIAL 2026-11-05 authored=replace: the rule's roughness over the vanilla highlight data (Object.hlsl BridgeSetup)
 	};
 
 	// "Data\Textures\Weapons\Foo.DDS" -> "textures\weapons\foo.dds"
@@ -177,6 +181,11 @@ namespace MaterialRules {
 						if (dash == std::string::npos || !Number(value.substr(0, dash), rule.RoughMin) || !Number(value.substr(dash + 1), rule.RoughMax)) {
 							error = "rough must be <min>-<max>"; return false;
 						}
+					}
+					else if (key == "authored") {
+						if (value == "keep") rule.ReplaceAuthored = false;
+						else if (value == "replace") rule.ReplaceAuthored = true;
+						else { error = "authored must be keep or replace"; return false; }
 					}
 					else if (key == "tint") {
 						float t[3];

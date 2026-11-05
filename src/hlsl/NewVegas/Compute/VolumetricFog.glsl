@@ -21,6 +21,7 @@ layout(set = 1, binding = 9) uniform texture2D t_fogAdd;       // NVR_FogBufferA
 layout(set = 1, binding = 10) uniform texture2D t_ao;          // NVR_AOBuffer (LINEAR, CLAMP)
 layout(set = 1, binding = 11) uniform texture2D t_skyVis;      // NVR_SkyVis (POINT, CLAMP)
 layout(set = 1, binding = 12) uniform texture2D t_sunFar;      // NVR_SunFar (POINT, CLAMP)
+layout(set = 1, binding = 13) uniform texture2D t_skyCov;      // NVR_FogSkyCoverage (POINT, CLAMP; UNOFFICIAL 2026-11-05 MsaaEdgeFix)
 #endif
 
 layout(set = 2, binding = 0, std140) uniform Constants {
@@ -376,7 +377,13 @@ vec2 FogGridAir(vec2 coord, float depth) {
 }
 
 vec3 FogGridLight(vec3 gammaColor, vec2 coord) {
-    vec2 air = FogGridAir(coord, readDepthLod(coord));
+    float gridDepth = readDepthLod(coord);
+#ifdef FOG_APPLY
+    // UNOFFICIAL 2026-11-05 MsaaEdgeFix: the .fx's FogGridDepthMsaa (gridFlags.z = on, t_skyCov the exact sky shares; off, the binding is
+    // a stand-in and is not read).
+    if (pc.gridFlags.z > 0.5) gridDepth = mix(min(gridDepth, cb.vlData.w), cb.vlData.w, POINT_LOD(t_skyCov, coord).r);
+#endif
+    vec2 air = FogGridAir(coord, gridDepth);
     float cosTheta = dot(normalize(toWorld(coord)), cb.smoothedSunDir.xyz);
     float g = cb.vlData2.y;
     float phase = min((1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * cosTheta, 1.0e-4), 1.5), 8.0);

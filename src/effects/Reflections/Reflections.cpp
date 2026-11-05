@@ -24,6 +24,7 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.RainWetness = std::clamp(TheSettingManager->GetSettingF(section, "RainWetness"), 0.0f, 2.0f);
 	Settings.InteriorFloors = std::clamp(TheSettingManager->GetSettingF(section, "InteriorFloors"), 0.0f, 2.0f);
 	Settings.Roughness = std::clamp(TheSettingManager->GetSettingF(section, "Roughness"), 0.02f, 1.0f);
+	Settings.Mirror = std::clamp(TheSettingManager->GetSettingF(section, "Mirror"), 0.0f, 1.0f);	// UNOFFICIAL 2026-11-05
 	Settings.WetRoughness = std::clamp(TheSettingManager->GetSettingF(section, "WetRoughness"), 0.02f, 1.0f);
 	Settings.MaxDistance = std::clamp(TheSettingManager->GetSettingF(section, "MaxDistance"), 200.0f, 20000.0f);
 	Settings.Steps = std::clamp(TheSettingManager->GetSettingI(section, "Steps"), 8, 64);
@@ -79,6 +80,7 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.RtHitAmbientGrid = TheSettingManager->GetSettingI(rt, "HitAmbientGrid") != 0;	// UNOFFICIAL 2026-10-30
 	Settings.RtRayReuse = TheSettingManager->GetSettingI(rt, "RayReuse") != 0;	// UNOFFICIAL 2026-10-31
 	Settings.RtReuseRoughness = std::clamp(TheSettingManager->GetSettingF(rt, "ReuseRoughness"), 0.0f, 1.0f);
+	Settings.RtShadeOffscreen = TheSettingManager->GetSettingI(rt, "ShadeOffscreen") != 0;	// UNOFFICIAL 2026-11-05
 	Settings.RtWeapon = std::clamp(TheSettingManager->GetSettingF(rt, "Weapon"), 0.0f, 2.0f);	// UNOFFICIAL 2026-10-30
 	Settings.RtWater = TheSettingManager->GetSettingI(rt, "Water") != 0;	// UNOFFICIAL 2026-10-31
 	Settings.RtSkyPanorama = TheSettingManager->GetSettingI(rt, "SkyPanorama") != 0;	// UNOFFICIAL 2026-10-31
@@ -1004,6 +1006,7 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	uniforms.grid = Constants.Grid;
 	uniforms.grid2 = Constants.Grid2;
 	uniforms.grid3 = Constants.Grid3;
+	uniforms.grid3.w = Settings.Mirror;	// UNOFFICIAL 2026-11-05 Mirror: the reflecting surfaces' F0 floor, 0.04 .. 1 (ReflectionsComposite.frag)
 	uniforms.material = Constants.Material;
 	uniforms.material.w = GlassMask::ThisFrame() ? Settings.GlassReflect * (TheShaderManager->GameState.isExterior ? Settings.ReflectivityExterior : Settings.ReflectivityInterior) : 0.0f;	// UNOFFICIAL 2026-10-29
 	uniforms.depthConstants = *depthConstants;
@@ -1012,7 +1015,7 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	uniforms.sky = extSky;
 	// UNOFFICIAL 2026-10-31 RT water: z 1 = water pixels reflect with RT rays this frame (RayGen casts, the composite leaves them to
 	// the water shaders), w their roughness (Reflections.glsl Reflectivity).
-	uniforms.sky.z = waterFrame && RtWanted() ? 1.0f : 0.0f;
+	uniforms.sky.z = waterFrame && RtWanted() ? (Settings.RtWaterSkipPlanar ? 2.0f : 1.0f) : 0.0f;	// (2026-11-05: 2 = the planar pass is skipped)
 	uniforms.sky.w = Settings.RtWaterRoughness;
 	uniforms.flags = D3DXVECTOR4(ReflMaterial::CompiledIn() ? 1.0f : 0.0f, ReflMaterial::AddCompiledIn() ? 1.0f : 0.0f,
 		ReflMaterial::OccCompiledIn() ? 1.0f : 0.0f, materialBound ? 1.0f : 0.0f);
@@ -1085,7 +1088,7 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 		rtu.sunColor = sc.sunColor;	// as the game gives it (gamma); ReflectionsRT.glsl linearizes
 		rtu.rt2.w = (float)RtLampCount;	// UNOFFICIAL 2026-10-29: the lamps at the hits
 		rtu.rt3 = D3DXVECTOR4(Settings.RtVndf ? 1.0f : 0.0f, Settings.RtRoughShare, Settings.RtContactSpread, Settings.RtGlowBrightness);
-		rtu.rt4 = D3DXVECTOR4(Settings.RtHitAmbientGrid ? 1.0f : 0.0f, Settings.RtRayReuse ? 1.0f : 0.0f, Settings.RtReuseRoughness, 0.0f);	// UNOFFICIAL 2026-10-30 / 31
+		rtu.rt4 = D3DXVECTOR4(Settings.RtHitAmbientGrid ? 1.0f : 0.0f, Settings.RtRayReuse ? 1.0f : 0.0f, Settings.RtReuseRoughness, Settings.RtShadeOffscreen ? 1.0f : 0.0f);	// UNOFFICIAL 2026-10-30 / 31; w 2026-11-05 ShadeOffscreen
 		memcpy(rtu.lamps, RtLampData, sizeof(RtLampData));
 		ID3D9NvrExtBuffer* rtBuffer = extRtUniforms.Buffer;
 		if (!rtBuffer || memcmp(&rtu, &RtUploaded, sizeof(rtu))) {

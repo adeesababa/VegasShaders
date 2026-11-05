@@ -1754,6 +1754,7 @@ namespace MaterialRulesDraw {
 			values[3] = rule.Reflections;
 			values[4] = rule.RoughMin;
 			values[5] = rule.RoughMax;
+			values[7] = rule.ReplaceAuthored ? 1.0f : 0.0f;	// UNOFFICIAL 2026-11-05 authored=replace (Object.hlsl BridgeSetup: TESR_MaterialRough.w)
 			values[8] = rule.Tint[0];
 			values[9] = rule.Tint[1];
 			values[10] = rule.Tint[2];
@@ -2955,6 +2956,7 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 	// 3.0 shader with the game's 2.x one. Where only one side of a NOLIGHT draw has a replacement -- NOLIGHTTEXVC.pso
 	// behind the game's glow/muzzle-flash vertex shaders, or NOLIGHT016/017.vso in front of the flame/spark pixel
 	// shader -- the draw gets the game's own pair. Skipped entirely while the collection is off.
+	// (2026-11-05 soft particles: every NOLIGHT shader has a replacement but the skinned NOLIGHT008-015.vso, so those are the draws left here.)
 	if (VertexShader && PixelShader && TheShaderManager->Shaders.Particles && TheShaderManager->Shaders.Particles->Enabled) {
 		const bool nvrVertex = VertexShader->ShaderHandleBackup && VertexShader->ShaderHandle != VertexShader->ShaderHandleBackup;
 		const bool nvrPixel = PixelShader->ShaderHandleBackup && PixelShader->ShaderHandle != PixelShader->ShaderHandleBackup;
@@ -3293,6 +3295,24 @@ static void DepthOnlyStandard(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 Arg4)
 	OnePassDepth::DepthDrawn = true;
 	ClothWind::PassGeometry = nullptr;
 	ClothWind::AfterDraw(device);
+}
+
+// UNOFFICIAL 2026-11-05 soft particles: BSShaderNoLighting::SetupGeometryConstants 0xBC9A50 (vtable slot 0x10BB2AC), run for every
+// NoLighting geometry between its shader bind and its draw. The blended ones (particles, glows, the dust storm walls) are drawn past
+// RenderPassStandard/SkinnedHook, so this is where each gets its soft size.
+static VirtFuncDetour NoLightingConstantsDetour;
+static void __fastcall NoLightingConstantsHook(void* shader, void*, void* properties) {
+	ThisStdCall(NoLightingConstantsDetour.GetOverwrittenAddr(), shader, properties);
+	const PointShadowForward::RenderPassView* pass = *(const PointShadowForward::RenderPassView* const*)0x011F91E0;	// BSShaderManager::pCurrentRenderPass
+	if (pass) ParticleShaders::ForDraw(pass->geometry, pass->passEnum, ShaderSplit::CurrentContext == ShaderSplit::World);
+}
+
+void InstallSoftParticleHook() {
+	if (*(UInt32*)0x010BB2AC != 0x00BC9A50) {
+		Logger::Log("Soft particles: BSShaderNoLighting::SetupGeometryConstants is already replaced (another plugin?); no fade");
+		return;
+	}
+	NoLightingConstantsDetour.ReplaceVirtualFunc(0x010BB2AC, &NoLightingConstantsHook);
 }
 
 void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 Arg4) {
@@ -3635,6 +3655,7 @@ void __fastcall RenderWorldSceneGraphHook(Main* This, UInt32 edx, Sun* SkySun, U
 	if (TAA) TAA->BeginJitter(FrameWorldCalls == 1);
 	// UNOFFICIAL terrain blending (off by default): the world's depth is copied as the first land shader of this scene binds.
 	TerrainShaders::BeginWorldScene();
+	ParticleShaders::BeginWorldScene();	// UNOFFICIAL 2026-11-04 soft particles: the same, at the first alpha-blended NoLighting draw
 	if (FrameWorldCalls == 1) ShadowAtlas::WorldStart(TheRenderManager->device);	// UNOFFICIAL 2026-10-30 ShadowAtlas WorldStartConvert (test)
 	{
 		// Game geometry drawn with NVR's replacement shaders, including per-object sun shadows.
@@ -3672,6 +3693,7 @@ void __fastcall RenderWorldSceneGraphHook(Main* This, UInt32 edx, Sun* SkySun, U
 	}
 
 	TerrainShaders::EndWorldScene();
+	ParticleShaders::EndWorldScene();
 	// After the material pass, not before: it redraws world geometry over the scene, and must land on exactly the same
 	// jittered pixels the world did.
 	if (TAA) TAA->EndJitter();
@@ -3769,11 +3791,21 @@ void __fastcall RenderReflectionsHook(WaterManager* This, UInt32 edx, NiCamera* 
 	ReflectionProbe::HookCamera = Camera;
 	// UNOFFICIAL 2026-10-31 RT water ([Shaders.Reflections.RT] WaterSkipPlanar): the water shaders read the RT reflection this frame,
 	// not the planar map, so the planar pass is not drawn (ReflectionsEffect::UpdateWaterConstants decides, once a frame).
+	// (2026-11-05 rtfull-lake3) but not on every frame: the pass also draws maps the water shaders read besides the reflection (the
+	// water's depth: its see-through depth and shore), and skipped from the first frame after a load they were never drawn: streaky,
+	// see-through water with the lake floor showing (og-lake). Drawn on every WaterPlanarRefresh-th frame (and the first), else skipped.
 	if (ReflectionsEffect* reflections = TheShaderManager->Effects.Reflections) {
 		if (reflections->WaterSkipsPlanar()) {
-			static bool logged = false;
-			if (!logged) { logged = true; Logger::Log("UNOFFICIAL Reflections: RT water: the planar water reflection pass is skipped while RT holds the water."); }
-			return;
+			static UInt32 lastDrawn = 0, refreshFrame = 0xFFFFFFFFu;
+			static int refresh = 8;
+			const UInt32 frame = TheFrameRateManager->FrameNumber;
+			if (refreshFrame != frame) { refreshFrame = frame; refresh = TheSettingManager->GetSettingI("Shaders.Reflections.RT", "WaterPlanarRefresh"); }
+			if (refresh <= 0 || frame - lastDrawn < (UInt32)refresh) {
+				static bool logged = false;
+				if (!logged) { logged = true; Logger::Log("UNOFFICIAL Reflections: RT water: the planar water reflection pass is skipped while RT holds the water (drawn every %d frames for the water's other maps).", refresh); }
+				return;
+			}
+			lastDrawn = frame;
 		}
 	}
 	if (!TheSettingManager->SettingsMain.Main.ForceReflections) {

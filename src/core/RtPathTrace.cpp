@@ -33,6 +33,7 @@ namespace {
 		bool	denoise = false;		// PTDenoise (2026-11-03): interactive: each frame's own paths through the shared RT denoiser, no mean
 		bool	specular = true;		// PTSpecular (2026-11-02 e): GGX highlights + reflections (roughness / metal: the MaterialBuffer on screen)
 		bool	glowLights = false;		// PTGlowLights (2026-11-03 b): glow-mapped meshes sampled as lights (RtPathTrace.comp GlowSample)
+		bool	glowFromFrame = true;	// PTGlowFromFrame (2026-11-05): glowing surfaces the camera sees take the game's pixel
 		bool	lightGrid = true;		// PTLightGrid (2026-11-04): the lamps through a world grid (each cell's list), not every lamp at every hit
 		int		lightGridMin = 40;		// PTLightGridMinLamps (test only): the grid from this many lamps on
 		int		bounceAlpha = 1;		// PTBounceAlpha (2026-11-04 b): bounce rays' alpha test: 1 as the camera's, 0 cut-outs solid, 2 cut-outs left out, 3 the nearest card's texel
@@ -126,6 +127,7 @@ namespace {
 		S.denoise = TheSettingManager->GetSettingI(kSection, "PTDenoise") != 0;
 		S.replace = TheSettingManager->GetSettingI(kSection, "PTReplace") != 0;
 		S.glowLights = TheSettingManager->GetSettingI(kSection, "PTGlowLights") != 0;
+		S.glowFromFrame = TheSettingManager->GetSettingI(kSection, "PTGlowFromFrame") != 0;
 		S.lightGrid = TheSettingManager->GetSettingI(kSection, "PTLightGrid") != 0;
 		S.lightGridMin = (std::max)(TheSettingManager->GetSettingI(kSection, "PTLightGridMinLamps"), 1);
 		S.bounceAlpha = i("PTBounceAlpha", 0, 3);
@@ -431,6 +433,7 @@ namespace {
 			flags |= 256u;
 		if (S.specular) flags |= 128u;
 		if ((S.gameLamps & 1) || S.gameLamps == 4) flags |= 2048u;	// (2026-11-03 rtspec) PTGameLamps: the game's falloff
+		if (S.glowFromFrame) flags |= 8192u;	// (2026-11-05) PTGlowFromFrame
 		if (S.denoise && imageAlbedoOut >= 0) flags |= 512u;	// (2026-11-03) demodulated for the denoiser
 		// (2026-11-02 b) the sky on misses: RT reflections' SkyPanorama (the sky as the screen saw it, clouds and all; needs the Reflections
 		// effect with [Shaders.Reflections.RT] SkyPanorama), last frame's, while it is fresh; else the 2-colour gradient

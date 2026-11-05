@@ -39,6 +39,7 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4 fogNight;                 // TESR_VolumetricFogNight
     vec4 fogNightScatter;          // TESR_VolumetricFogNightScatter
     vec4 cameraPosition;           // TESR_CameraPosition
+    vec4 gameMultisample;          // TESR_GameMultisample (UNOFFICIAL 2026-11-05: the composites' sky shares, MsaaSkyEdge.glsl)
 } cb;
 
 layout(push_constant) uniform Push {

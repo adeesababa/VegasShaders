@@ -25,6 +25,10 @@ vec3 RtHitColour(vec3 hitW, vec4 hitData, vec4 shade, vec3 worldR, float roughne
         return linearize(textureLod(sampler2D(t_rendered, LINEAR_S), at, 0.0).rgb);
     }
     vec4 env = !inView && CubeOn > 0.0 ? EnvAlong(normalize(hitW), roughness) : vec4(0.0);
+    // 2026-11-05 ShadeOffscreen: an out-of-view hit whose draw's colour the helper knows is shaded from itself (its texture or average
+    // colour, its normal, the sun through its shadow ray, the lamps) instead of the cube toward it: the cube is seen from near the camera,
+    // 64 px, a little behind in time, so the people, plants and things behind you showed as a smear of what lay that way (or nothing)
+    if (rtc.rt4.w > 0.5 && (hitFlags & 2u) != 0u) env.a = 0.0;
     vec3 hitNormal = (hitFlags & 4u) != 0u ? OctDecode(hitData.zw) : -worldR;
     int keyLamp = int(hitFlags >> 4u) - 1;   // -1: none (outdoors by day shade.a is the sun's)
     vec3 shaded = RtShadeHit(hitW, hitNormal, shade.rgb, shade.a, keyLamp);
@@ -151,7 +155,9 @@ void main() {
     // UNOFFICIAL 2026-11-04 (rtwater) the water (RT Water): a ray that met nothing within Distance takes no fallback here, so its share
     // stays missing and the water shader shows the planar map there (Includes/Water.hlsl getRTWaterReflection: by the confidence), which
     // reaches the far shore and the LOD land; before, the far cliffs of og-lake came out as the sky panorama (they are past Distance).
-    bool waterMiss = WaterRtOn && rtOpen && abs(cb.cameraPosition.z + surfaceW.z - cb.waterSettings.x) < max(2.0, ray.x * 0.002);
+    // (2026-11-05 rtfull-lake2: not with WaterSkipPlanar: the planar map is not drawn then and the water shader paints the horizon
+    // colour there, so every missed ray (the sky, the far cliffs) turned the whole lake one flat pale colour: a miss takes the sky)
+    bool waterMiss = WaterRtOn && !WaterPlanarSkipped && rtOpen && abs(cb.cameraPosition.z + surfaceW.z - cb.waterSettings.x) < max(2.0, ray.x * 0.002);
     vec4 grid = vec4(0.0), env = vec4(0.0);
     // UNOFFICIAL 2026-10-31 SkyPanorama: a ray that met nothing on its way out is the sky (or something past Distance in the haze):
     // the panorama as seen, all of the missing share, no horizon fade; not the cube (seen from the camera, it holds whatever lay

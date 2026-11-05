@@ -14,6 +14,7 @@ public:
 		float	RainWetness;	// outdoors: how much the rain's wetness adds
 		float	InteriorFloors;	// indoors: how much floors reflect
 		float	Roughness;		// dry surfaces (0 mirror .. 1 matte)
+		float	Mirror;			// 2026-11-05: 0 real stone/tile (F0 0.04) .. 1 a true mirror (F0 1): how much of the reflection shows at any angle
 		float	WetRoughness;	// wet surfaces
 		float	MaxDistance;	// ray length, game units
 		int		Steps;
@@ -62,6 +63,7 @@ public:
 		bool	RtHitAmbientGrid;	// 2026-10-30: a hit's ambient from the light grid at the hit (AmbientLight's), else the cube near the camera
 		bool	RtRayReuse;			// 2026-10-31: rough pixels reuse their neighbours' ray hits as samples of their own lobe (stochastic SSR resolve)
 		float	RtReuseRoughness;	// 2026-10-31: from this roughness on (RayReuse)
+		bool	RtShadeOffscreen;	// 2026-11-05: a hit out of view is shaded from itself (texture, normal, sun, lamps), not taken from the surroundings cube
 		float	RtWeapon;			// 2026-10-30: the first-person weapon reflects the RT scene, this strong (0 off)
 		bool	RtWater;			// 2026-10-31: water pixels get RT rays; the water shaders read them in place of the planar map
 		bool	RtSkyPanorama;		// 2026-10-31: a sky panorama gathered from the screen's sky pixels; RT misses (and the sky fallback) take it

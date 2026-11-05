@@ -4,6 +4,22 @@
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
 #include "../../core/RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
 
+extern D3DXVECTOR4 NvrGameMultisample;	// UNOFFICIAL 2026-11-05 Hooks/Settings.cpp (TESR_GameMultisample: x samples, y shares made, z MsaaEdgeFix)
+
+namespace {
+	// UNOFFICIAL 2026-11-05 MsaaEdgeFix: the exact sky shares (core/SkyCoverage.h) for the volumetric light's grid applied here, when the
+	// game's MSAA is on, this frame's shares were made and the fix is on (NVR_FogGridFlags.z / push.gridFlags.z); else null.
+	IDirect3DBaseTexture9* FogSkyCoverage(const char* path) {
+		if (NvrGameMultisample.x <= 1.0f || NvrGameMultisample.y < 0.5f || NvrGameMultisample.z < 0.5f) return nullptr;
+		std::string name = "TESR_SkyCoverage";
+		IDirect3DBaseTexture9** slot = TheTextureManager->GetTextureSlotByName(name);
+		IDirect3DBaseTexture9* texture = slot ? *slot : nullptr;
+		static bool told = false;
+		if (texture && !told) { told = true; Logger::Log("UNOFFICIAL MsaaEdgeFix: the volumetric light's grid applied in the fog takes each pixel's sky share (%s)", path); }
+		return texture;
+	}
+}
+
 // UNOFFICIAL 2026-10-17 Skylighting v2: the quarter-resolution sky visibility on stage 12 (NVR_SkyVis), point sampled (the shader
 // does its own depth-aware upsample). Not a TESR_ sampler: those bind by their order in the file.
 static void BindSky(IDirect3DDevice9* Device, IDirect3DTexture9* sky) {
@@ -696,8 +712,9 @@ bool VolumetricFogEffect::RenderDedicated(IDirect3DDevice9* Device, IDirect3DSur
 	// UNOFFICIAL froxel grid: on stage 11 while this draws, with the flags that make the fog read it.
 	D3DXHANDLE gridHandle = ParameterHandle(paramGridFlags, "NVR_FogGridFlags");
 	const bool grid = gridTexture && gridHandle;
+	IDirect3DBaseTexture9* skyCoverage = grid ? FogSkyCoverage("D3D9") : nullptr;	// UNOFFICIAL 2026-11-05 MsaaEdgeFix (stage 15)
 	if (gridHandle) {
-		D3DXVECTOR4 gridFlags(grid ? 1.0f : 0.0f, grid ? 1.0f : 0.0f, 0.0f, 0.0f);
+		D3DXVECTOR4 gridFlags(grid ? 1.0f : 0.0f, grid ? 1.0f : 0.0f, skyCoverage ? 1.0f : 0.0f, 0.0f);
 		Effect->SetVector(gridHandle, &gridFlags);
 	}
 	if (grid) {
@@ -706,6 +723,14 @@ bool VolumetricFogEffect::RenderDedicated(IDirect3DDevice9* Device, IDirect3DSur
 		const DWORD states[][2] = { {D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP}, {D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP},
 			{D3DSAMP_MAGFILTER, D3DTEXF_LINEAR}, {D3DSAMP_MINFILTER, D3DTEXF_LINEAR}, {D3DSAMP_MIPFILTER, D3DTEXF_NONE} };
 		for (const auto& s : states) TheRenderManager->SetSamplerState(11, (D3DSAMPLERSTATETYPE)s[0], s[1]);
+	}
+	// (the shader reads stage 15 whenever it applies the grid: nothing bound there reads 0, the fix off)
+	Device->SetTexture(15, skyCoverage);
+	TheRenderManager->renderState->NoteDeviceTexture(15, skyCoverage);
+	if (skyCoverage) {
+		const DWORD states[][2] = { {D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP}, {D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP},
+			{D3DSAMP_MAGFILTER, D3DTEXF_POINT}, {D3DSAMP_MINFILTER, D3DTEXF_POINT}, {D3DSAMP_MIPFILTER, D3DTEXF_NONE} };
+		for (const auto& s : states) TheRenderManager->SetSamplerState(15, (D3DSAMPLERSTATETYPE)s[0], s[1]);
 	}
 	UINT passes = 0;
 	result = Effect->Begin(&passes, 0);
@@ -759,6 +784,10 @@ bool VolumetricFogEffect::RenderDedicated(IDirect3DDevice9* Device, IDirect3DSur
 	if (grid) {
 		Device->SetTexture(11, nullptr);
 		TheRenderManager->renderState->NoteDeviceTexture(11, nullptr);
+	}
+	if (skyCoverage) {
+		Device->SetTexture(15, nullptr);
+		TheRenderManager->renderState->NoteDeviceTexture(15, nullptr);
 	}
 	if (gridHandle) {
 		// The other paths must not read a grid that is not bound.
@@ -1159,8 +1188,10 @@ bool VolumetricFogEffect::ExtDedicated(IDirect3DDevice9* Device, IDirect3DSurfac
 		if (ao && compositeSkyTexture) inputs[11] = compositeSkyTexture;
 	}
 	grid = gridTexture && ParameterHandle(paramGridFlags, "NVR_FogGridFlags");
-	push.gridFlags = grid ? D3DXVECTOR4(1.0f, 1.0f, 0.0f, 0.0f) : D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
+	IDirect3DBaseTexture9* skyCoverage = grid ? FogSkyCoverage("Vulkan") : nullptr;	// UNOFFICIAL 2026-11-05 MsaaEdgeFix (binding 13)
+	push.gridFlags = grid ? D3DXVECTOR4(1.0f, 1.0f, skyCoverage ? 1.0f : 0.0f, 0.0f) : D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
 	if (grid) inputs[7] = gridTexture;
+	if (skyCoverage) inputs[13] = skyCoverage;
 
 	char suffix[32];
 	_snprintf_s(suffix, sizeof(suffix), _TRUNCATE, "l%uc%ui%up%u", push.legacy, push.classic, push.interior, push.physicalSky);

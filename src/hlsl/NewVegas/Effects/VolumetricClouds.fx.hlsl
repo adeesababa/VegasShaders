@@ -695,18 +695,32 @@ float4 CompositePS(VSOUT IN) : COLOR0 {
 	float2 huv = rectToScreen(uv) + TESR_CloudsHistoryScale.zw;
 	float4 color = tex2Dlod(TESR_RenderedBuffer, float4(uv, 0, 0));
 	float depth = readDepthLod(uv);
+	[branch] if (MsaaEdgeDebugOn()) return MsaaEdgeDebug(uv, depth, color.rgb);	// UNOFFICIAL 2026-11-05 [Main.Main.Quality] MsaaEdgeDebugView
+	bool sky = depth >= farZ * 0.996;
+	// UNOFFICIAL 2026-11-05 MsaaEdgeFix (Includes/MsaaSkyEdge.hlsl): every pixel by its exact sky share. A mixed pixel takes the clouds over
+	// its sky share only (a pixel of a lattice far off, sky by depth under sample-0 resolves, took them whole: clouds over the bars).
+	[branch] if (MsaaEdgeFixOn()) {
+		float share = MsaaSkyCoverage(uv);
+		[branch] if (share > MsaaNoSky && share < MsaaAllSky) {
+			float4 clouds = CloudsHere(huv);
+			float3 behind = MsaaSkyBehind(uv, color.rgb);
+			float3 lin = linearize(max(color.rgb, 0.0)) + share * (behind * (clouds.a - 1.0) + clouds.rgb * TESR_CloudsLayout.w);
+			return float4(delinearize(max(lin, 0.0)), color.a);
+		}
+		sky = share >= MsaaAllSky;
+	}
 	// UNOFFICIAL 2026-11-04 the game's MSAA (Includes/MsaaSkyEdge.hlsl): a pixel on an edge against the sky took no clouds, and its sky
-	// share kept the clear sky (a bright rim round every leaf and branch). It gets the clouds over that share.
-	[branch] if (depth < farZ * 0.996) {
-		float3 sky;
-		float share = SkyShare(uv, color.rgb, sky);
+	// share kept the clear sky (a bright rim round every leaf and branch). It gets the clouds over that share. (MsaaEdgeFix off)
+	else if (TESR_GameMultisample.z <= 0.5 && !sky) {
+		float3 skyBefore;
+		float share = SkyShare(uv, color.rgb, skyBefore);
 		[branch] if (share > 0.0) {
 			float4 clouds = CloudsHere(huv);
-			float3 lin = linearize(max(color.rgb, 0.0)) + share * (sky * (clouds.a - 1.0) + clouds.rgb * TESR_CloudsLayout.w);
+			float3 lin = linearize(max(color.rgb, 0.0)) + share * (skyBefore * (clouds.a - 1.0) + clouds.rgb * TESR_CloudsLayout.w);
 			return float4(delinearize(max(lin, 0.0)), color.a);
 		}
 	}
-	[branch] if (depth < farZ * 0.996) {
+	[branch] if (!sky) {
 		// not sky: the clouds' shadow, and their reflection on water
 		[branch] if (ShadowStrength <= 0.0) return color;
 		float3 eye = toWorld(uv);                                  // camera-relative world per unit of depth

@@ -218,6 +218,7 @@ namespace {
 		ID3D9NvrExtRtSeq*		rtSeq = nullptr;	// fork patch 0034 (the arena's sequence texel, 2026-10-30); null without it
 		bool		actorsOn = false;					// [Main.Main.RayTracing] Actors (read at each helper start)
 		bool		walkingPlayer = false;				// Gather's walk of the player's own node (NVR_RT_MASK_PLAYER on its rigid parts)
+		bool		firstPersonBody = true;				// UNOFFICIAL 2026-11-05 [Main.Main.RayTracing] FirstPersonBody: the body is traced in first person too
 		bool		walkingFar = false;					// UNOFFICIAL 2026-10-31: Gather's walk of the far object LOD (FarObjectLOD; NVR_RT_MASK_FAR)
 		bool		farLodOn = false;					// [Main.Main.RayTracing] FarObjectLOD (live)
 		bool		farLandOn = false;					// UNOFFICIAL 2026-10-31 [Main.Main.RayTracing] FarLandLOD (live): LOD land in the same ring
@@ -1632,7 +1633,11 @@ namespace {
 					if (n->IsKindOf<NiSwitchNode>()) farWalk[6]++;
 				}
 			}
-			if (!object || (object->m_flags & NiAVObject::NiFlags::APP_CULLED) || ((!land || lod) && !inReach(object))) continue;
+			// UNOFFICIAL 2026-11-05 FirstPersonBody: in first person the game culls the root of the player's third-person body (its children
+			// are not flagged): that one node is walked anyway, so the body shows in reflections, casts its sun shadow and darkens its feet
+			// ("RT CORE: player: first person; body node CULLED; 0.0 body instances a frame" before, rtfull-lake / -int)
+			const bool playerRoot = walkingPlayer && firstPersonBody && object == root;
+			if (!object || ((object->m_flags & NiAVObject::NiFlags::APP_CULLED) && !playerRoot) || ((!land || lod) && !inReach(object))) continue;
 			// UNOFFICIAL 2026-11-03 FarLandLOD: a far LOD land quad whose area reaches into the loaded cells stays out: the ring test above
 			// lets in coarse quads (4-cell blocks and up, bound radius ~11600) that cover the loaded land, and where they stand above it they
 			// block every sun / sky / bounce ray from the near ground (the reference path tracer's black ground, rtpt-2 / rtpt-4). The loaded
@@ -1778,6 +1783,7 @@ namespace {
 		farRadius = (std::max)(radius, TheSettingManager->GetSettingF("Main.Main.RayTracing", "FarRadius"));
 		actorStillSkip = TheSettingManager->GetSettingI("Main.Main.RayTracing", "ActorStillSkip") != 0;
 		actorStillThreshold = (std::max)(0.0f, TheSettingManager->GetSettingF("Main.Main.RayTracing", "ActorStillThreshold"));
+		firstPersonBody = TheSettingManager->GetSettingI("Main.Main.RayTracing", "FirstPersonBody") != 0;
 		actorRebuild = (UInt32)(std::max)(0, TheSettingManager->GetSettingI("Main.Main.RayTracing", "ActorRebuildInterval"));
 		arenaUsed = 0;
 		waiting = 0;
@@ -1787,13 +1793,6 @@ namespace {
 			const UInt32 count = cells->size * cells->size;
 			const UInt32 landBefore = skips[1][kTaken];
 			for (UInt32 i = 0; i < count; i++) WalkCell(cells->GetCell(i));
-			if (actorsOn && rtSkin && Player) {	// the player's third-person body (not in the cells' lists)
-				walkingPlayer = true;
-				const UInt32 before = record->instanceCount;
-				Walk(Player->GetNode(), false);
-				playerInstances += record->instanceCount - before;	// (2026-10-30) the scene log: is the body traced in first person?
-				walkingPlayer = false;
-			}
 			// LOD land only when the loaded cells gave no land geometry this frame (rtsun-8 at og-lake: every land node empty, the ground on
 			// screen is LOD terrain). With the full land there, LOD land stays out: its coarse quads stand above the real ground and cast
 			// false shadows on it (rtsun-9 at og-goodsprings: black slabs on the road and the house front).
@@ -1821,6 +1820,15 @@ namespace {
 			}
 		}
 		else if (Player) WalkCell(Player->parentCell);
+		// the player's third-person body (not in the cells' lists). (2026-11-05: indoors too: it was walked only in the exterior branch above,
+		// so indoors the player was never in the RT scene, first or third person: rtfull-body2 at Lucky 38, 0.0 body instances)
+		if (actorsOn && rtSkin && Player && Player->GetNode()) {
+			walkingPlayer = true;
+			const UInt32 before = record->instanceCount;
+			Walk(Player->GetNode(), false);
+			playerInstances += record->instanceCount - before;	// (2026-10-30) the scene log: is the body traced in first person?
+			walkingPlayer = false;
+		}
 		treeProbe = false;
 		if (grassOn) AddGrass();	// UNOFFICIAL 2026-10-30: the grass drawn this frame (RtCore::NoteGrass)
 		instances = record->instanceCount;

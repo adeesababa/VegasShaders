@@ -380,6 +380,7 @@ tomlValue* SettingManager::Configuration::UserSection(const char* section) {
 // first call the version is current and it returns at once.
 // (UnofficialSettingsVersion is declared above Configuration::Init, which hands it to the install check)
 extern bool ParallaxLiteDistanceMigrationPending;  // effects/Terrain.cpp (version 65)
+extern D3DXVECTOR4 NvrGameMultisample;	// UNOFFICIAL 2026-11-05 Hooks/Settings.cpp (TESR_GameMultisample; .z / .w set below)
 
 void SettingManager::Configuration::UpdateOldDefaults() {
 	if (!TomlConfig.is_table()) return;
@@ -784,6 +785,16 @@ void SettingManager::LoadSettings() {
 		Configuration::ConfigNode node;
 		const int reach = Config.FillNode(&node, "Main.Main.Quality", "SmoothNormals") ? node.IntValue : 0;
 		SettingsMain.Main.SmoothNormals = max(0, min(reach, 256));
+	}
+	{
+		// UNOFFICIAL 2026-11-05 alpha cutouts under the game's MSAA (Effects/Includes/MsaaSkyEdge.hlsl): TESR_GameMultisample.z = the fix on,
+		// .w = the debug view (Hooks/Settings.cpp owns .x, core/SkyCoverage.h .y).
+		Configuration::ConfigNode node;
+		SettingsMain.Main.MsaaEdgeFix = boolSetting("Main.Main.Quality", "MsaaEdgeFix", true);
+		const int view = Config.FillNode(&node, "Main.Main.Quality", "MsaaEdgeDebugView") ? node.IntValue : 0;
+		SettingsMain.Main.MsaaEdgeDebugView = max(0, min(view, 1));
+		NvrGameMultisample.z = SettingsMain.Main.MsaaEdgeFix ? 1.0f : 0.0f;
+		NvrGameMultisample.w = (float)SettingsMain.Main.MsaaEdgeDebugView;
 	}
 	SettingsMain.Main.LampMaskScissor = boolSetting(performance, "LampMaskScissor", true);
 	SettingsMain.Main.InteriorShadowFold = boolSetting(performance, "InteriorShadowFold", false);	// off: not bit-exact next to the void (intshadow-LOG.md)
@@ -1406,8 +1417,8 @@ void SettingManager::SetSettingS(const char* section, const char* key, const cha
 		node.IntValue = atoi(value);
 	else if (node.Type == Kind::Float)
 		node.FloatValue = (float)atof(value);
-	else if (node.Type == Kind::Boolean)
-		node.BoolValue = !_stricmp(value, "true") || (_stricmp(value, "false") && atoi(value) != 0);	// 1.0.4.1: "true" too (atoi("true") is 0: the menu's simple choices wrote "...=true" as false)
+	else if (node.Type == Kind::Boolean)	// 2026-11-05: "true" / "false" too (atoi("true") is 0: the menu's simple choices wrote
+		node.BoolValue = !_stricmp(value, "true") || (_stricmp(value, "false") && atoi(value) != 0);	// "...=true" and got false)
 
 	SetSetting(&node);
 }

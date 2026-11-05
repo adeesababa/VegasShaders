@@ -183,6 +183,10 @@
 #if defined(PS) && defined(SPECULAR) && defined(SPEC_FADE_ON) && SPEC_FADE_ON
     #define PBR_SPEC_FADE
 #endif
+// UNOFFICIAL 2026-11-05 VanillaBridge (as ObjectTemplate.hlsl; Includes/Object.hlsl): the highlight variants with Toggles. Off: as before.
+#if defined(PS) && defined(VANILLA_BRIDGE_ON) && VANILLA_BRIDGE_ON && defined(SPECULAR) && defined(PAR_TOGGLES)
+    #define NVR_VANILLA_BRIDGE
+#endif
 #include "includes/Object.hlsl"	// shared code
 #ifdef PS
     #define SHADOW_CLOUD_IN 1   // UNOFFICIAL 2026-11-04 ForwardCloudShadows (Includes/Shadow.hlsl): the clouds' shadow on the sun term (compiled in only when on at startup)
@@ -730,6 +734,9 @@ PS_OUTPUT main(PS_INPUT pin)
 
         #ifdef RMAOS
             RmaosRead(offsetUV.xy);	// UNOFFICIAL _rmaos map (Object.hlsl)
+        #endif
+        #ifdef NVR_VANILLA_BRIDGE
+            BridgeSetup(nmap.a, glossPower);	// UNOFFICIAL 2026-11-05 VanillaBridge (Object.hlsl)
         #endif
         float rough = HudRainRoughness(getRoughness(nmap.a));	// UNOFFICIAL: wet under the rain drops
         SetDiffuseEnergyKeep(nmap.xyz, pin.viewDir.xyz, rough);	// UNOFFICIAL 2026-10-16 EnergySplit (Includes/PBR.hlsl): once per pixel, every lamp reuses it

@@ -649,6 +649,7 @@ static const RestartSetting kRestartSettings[] = {
 	{ "Shaders.Terrain.Macro",                "Enabled",            RestartRule::Changed },	// TERRAIN_MACRO (2026-11-04)
 	{ "Shaders.PBR.Dust",                     "Enabled",            RestartRule::Changed },	// DUST_ON (2026-11-04)
 	{ "Shaders.PBR.MicroShadow",              "Enabled",            RestartRule::Changed },	// MICRO_SHADOW_ON (2026-11-04)
+	{ "Shaders.PBR.Main",                     "VanillaBridge",      RestartRule::Changed },	// VANILLA_BRIDGE_ON (2026-11-05)
 	{ "Shaders.HandBlood.Status",             "Enabled",            RestartRule::Changed },
 	{ "Shaders.Cloth.Main",                   "Enabled",            RestartRule::TurnOn },
 	{ "Shaders.WetnessEffects.HudRaindrops",  "Enabled",            RestartRule::TurnOn },	// HUD_RAIN_ON: on at start
@@ -1535,10 +1536,20 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.PBR.LampFalloff", "Falloff", "Lamp falloff speed", nullptr, "How fast a lamp dims with distance. Small gives a bright spot and a long dim tail." },
 	{ "Shaders.PBR.LampFalloff", "Brightness", "Lamp brightness", nullptr, "How bright lamps are while this is on." },
 	// Reflections (Main)
+	// 2026-11-05: one choice that sets every setting the floor reflections' visibility depends on, so each look shows what it says
+	// (separately, Specular occlusion hid sharp reflections on dark floors and physically faint floors showed only lamps).
+	{ "Shaders.Reflections.Main", nullptr, "Look",
+		"Realistic: Mirror=0.0 Roughness=0.4 InteriorFloors=0.0 GroundSheen=0.0 SpecularOcclusion=1.0 | "
+		"Glossy floors: Mirror=0.3 Roughness=0.12 InteriorFloors=1.0 GroundSheen=1.0 SpecularOcclusion=0.0 | "
+		"Mirror (showcase): Mirror=1.0 Roughness=0.02 InteriorFloors=2.0 GroundSheen=2.0 SpecularOcclusion=0.0",
+		"Realistic: only shiny materials (tiles, glass, metal, wet ground) reflect, as in life: mostly lamps and bright things show. "
+		"Glossy floors: every floor gets a clear sheen with people and objects in it. Mirror: every floor is a perfect mirror, to show "
+		"off reflections (and ray-traced ones). Turning Specular occlusion back on (Realistic) takes a restart." },
 	{ "Shaders.Reflections.Main", "GroundSheen", "Dry ground reflections", nullptr, "How much dry ground, such as roads and pavements, mirrors its surroundings. Streets pick up neon and lamps at night." },
 	{ "Shaders.Reflections.Main", "RainWetness", "Wet ground reflections", nullptr, "How much rain makes the ground mirror neon, lamps and sky. Covered areas stay dry." },
 	{ "Shaders.Reflections.Main", "InteriorFloors", "Floor reflections indoors", nullptr, "How much floors indoors mirror the room, wood and carpet too." },
 	{ "Shaders.Reflections.Main", "Roughness", "Dry reflection blur", nullptr, "Lower gives mirror-like dry reflections; higher blurs them to a glow." },
+	{ "Shaders.Reflections.Main", "Mirror", "Mirror floors", nullptr, "0 is real polished stone: you mostly see bright lamps in it unless you look along the floor. 1 turns reflecting floors into true mirrors that show people and objects at any angle. Use with Dry reflection blur near 0.02." },
 	{ "Shaders.Reflections.Main", "WetRoughness", "Wet reflection blur", nullptr, "Lower gives sharp mirror-like reflections in puddles; higher blurs them." },
 	{ "Shaders.Reflections.Main", "MaterialReflect", "Smooth surface reflections", nullptr, "How much smooth materials such as tiles, glass and polished counters reflect. Needs material maps on." },
 	{ "Shaders.Reflections.Main", "DrawDistance", "Reflection distance", nullptr, "How far away surfaces still reflect." },
@@ -1621,15 +1632,14 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.Skin.Main", "Roughness", "Skin roughness (lower is oilier)", nullptr, "Lower gives tight, bright highlights. Higher gives a matte look." },
 	{ "Shaders.Skin.Main", "Scattering", "Skin softness (light under the skin)", nullptr, "Light spreads under the skin, softening the line between light and shadow, with a warm red edge." },
 	{ "Shaders.Skin.Main", "Translucency", "Light through ears and fingers", nullptr, "Thin parts such as ears and fingers glow red when the light is behind them." },
-	{ "Shaders.Skin.Main", "Sheen", "Soft glow on skin edges", nullptr, "A soft, velvety glow along cheeks, ears and noses where light skims the skin." },
 	{ "Shaders.Skin.Main", "SkyReflection", "Sky reflection on skin", nullptr, "Skin reflects the sky at glancing angles. Outdoors only." },
 	{ "Shaders.Skin.Main", "RainWetness", "Wet skin in rain", nullptr, "How wet and shiny skin gets in the rain." },
+	{ "Shaders.Skin.Main", "VanillaMatchedHighlights", "Vanilla-strength skin highlights", nullptr, "One makes skin highlights as strong as the game's own; zero keeps the physically based strength." },
 	// Skin (Interiors)
 	{ "Shaders.Skin.Interiors", "SpecularStrength", "Skin shine", nullptr, "How strongly skin catches lamp light indoors. Zero is flat and dry, high looks oily." },
 	{ "Shaders.Skin.Interiors", "Roughness", "Skin roughness (lower is oilier)", nullptr, "Lower gives tight, bright highlights indoors. Higher gives a matte look." },
 	{ "Shaders.Skin.Interiors", "Scattering", "Skin softness (light under the skin)", nullptr, "Light spreads under the skin indoors, softening the edge of shadows." },
 	{ "Shaders.Skin.Interiors", "Translucency", "Light through ears and fingers", nullptr, "Ears and fingers glow red when a lamp is behind them." },
-	{ "Shaders.Skin.Interiors", "Sheen", "Soft glow on skin edges", nullptr, "A soft, velvety glow along cheeks, ears and noses indoors." },
 	{ "Shaders.Skin.Interiors", "ScreenSpace", "Soft, waxy skin glow", nullptr, "Spreads light across the skin on screen for a softer, waxier look indoors." },
 	{ "Shaders.Skin.Interiors", "Width", "Skin glow spread", nullptr, "How far that soft glow spreads. Higher is softer and waxier." },
 	// Skin (Scattering)
@@ -1944,7 +1954,8 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.Foliage.Main", "Power", "Glow tightness (how close to the sun)", nullptr, "Higher shows the glow only when looking almost straight at the sun." },
 	// Particles (Main)
 	{ "Shaders.Particles.Main", "Strength", "Lighting on smoke, dust and blood", nullptr, "Smoke, dust and blood are lit by the scene instead of looking flat. Zero is the game's look." },
-	{ "Shaders.Particles.Main", "Brightness", "Particle brightness", nullptr, "Raise if particles look too dark next to the scene; lower if too bright." },
+	{ "Shaders.Particles.Main", "SoftScale", "Soft smoke and dust edges", nullptr, "Smoke, dust, blood and sparks fade where they meet the ground and walls instead of cutting a hard line. Zero is off. Needs particle lighting on at startup." },
+	{ "Shaders.Particles.Main", "MeshSoftScale", "Soft glow and flash edges", nullptr, "The same for glows, lamp cards, muzzle flashes and dust storm walls. Lower it if big dust storms look too faint near the ground." },
 	{ "Shaders.Particles.Main", "SunShare", "Sunlight on particles", nullptr, "How much sunlight particles catch outdoors. Shaded ones get only ambient light and lamps." },
 	// GPUParticles (Main)
 	{ "Shaders.GPUParticles.Main", "Enabled", "Rain and snow drawn on the graphics card (needs the DXVK fork)", nullptr, "Draws rain and snow as many more drops and flakes outdoors. Needs the DXVK fork." },
@@ -3464,14 +3475,14 @@ static const MenuGroup kMenuGroups[] = {
 
 	// Shaders.Reflections.RT
 	{ "Shaders.Reflections.RT", "What reflections show off screen",
-		"ScreenTolerance, EstimateBrightness, SunShadows, HitLamps, HitAmbientGrid, HitTextures, GlowBrightness, SkyPanorama",
+		"ShadeOffscreen, ScreenTolerance, EstimateBrightness, SunShadows, HitLamps, HitAmbientGrid, HitTextures, GlowBrightness, SkyPanorama",
 		FogType::None, true, "How things behind you or hidden from view are lit and coloured when they show in a reflection.", nullptr },
 	{ "Shaders.Reflections.RT", "Glossy surfaces",
 		"VisibleNormals, RayReuse, ReuseRoughness, ContactSharpness, ContactSpread, RoughShare, RoughReach",
 		FogType::None, false, "Blurred reflections on worn tiles, satin metal and wet stone: how sharp they stay and how cheap they are.", nullptr },
 	{ "Shaders.Reflections.RT", "Weapon", "Weapon, WeaponMetal, WeaponRoughness",
 		FogType::None, false, "Your first-person weapon reflects the ray traced scene.", nullptr },
-	{ "Shaders.Reflections.RT", "Water", "Water, WaterSkipPlanar, WaterRoughness",
+	{ "Shaders.Reflections.RT", "Water", "Water, WaterSkipPlanar, WaterPlanarRefresh, WaterRoughness",
 		FogType::None, false, "Water reflects the ray traced scene instead of the game's own water reflection.", nullptr },
 
 	// Shaders.Sandstorm.Main
@@ -4309,6 +4320,175 @@ static bool RenderSimpleEffectPage() {
 	}
 	ImGui::EndTable();
 	return true;
+}
+
+// ---- What is hiding effects right now ---------------------------------------------------------------------------------------
+// 2026-11-05 (user, after an hour of "the rays show in the debug view but I see no reflection": the master switch, a debug view left
+// on, specular occlusion and physically faint floors each hid it in turn): "add a note for each setting that could override and make
+// other effects virtually invisible if they're on ... with the dead space at the bottom". Every page ends with the notes that apply
+// NOW, each with a button that undoes it. kHidingNotes holds the hand-written ones; the Heads up rules (kConflictRules) whose setting is
+// at its value and whose other side is on are listed too. tools/check_menu_notes.py checks that every debug view in the defaults is
+// in kDebugViews.
+struct DebugViewKey { const char* Section; const char* Key; const char* Name; };
+static const DebugViewKey kDebugViews[] = {
+	{ "Main.Main.RayTracing", "PTDebugView", "Path tracing" },
+	{ "Main.Main.ReducedQuality", "SunLayersDebug", "Sun layers" },
+	{ "Shaders.AmbientOcclusion.Skylighting", "DebugView", "Skylighting" },
+	{ "Shaders.AmbientOcclusion.RT", "DebugView", "Ray-traced ambient occlusion" },
+	{ "Shaders.AmbientLight.Main", "DebugView", "Ambient light" },
+	{ "Shaders.Flashlight.Deferred", "DebugView", "Flashlight" },
+	{ "Shaders.Grass.GPUGrass", "DebugView", "GPU grass" },
+	{ "Shaders.Grass.Interaction", "Debug", "Grass interaction" },
+	{ "Shaders.DitherBuster.Main", "DebugView", "Dither buster" },
+	{ "Shaders.TAA.Main", "DebugView", "TAA" },
+	{ "Shaders.TAA.FSR", "ReactiveDebug", "FSR reactive mask" },
+	{ "Shaders.TAA.FSR", "DebugView", "FSR" },
+	{ "Shaders.PBR.Metal", "DebugView", "Metal" },
+	{ "Shaders.PBR.MaterialRules", "DebugView", "Material rules" },
+	{ "Shaders.PBR.Rmaos", "DebugView", "Material maps" },
+	{ "Shaders.POM.Displacement", "DebugView", "Object displacement" },
+	{ "Shaders.ShadowsExteriors.Main", "FitToDepthDebug", "Sun shadow fit" },
+	{ "Shaders.ShadowsExteriors.RT", "DebugView", "Ray-traced sun shadows" },
+	{ "Shaders.ShadowsExteriors.ShadowMaps", "CharacterShadowMapDebug", "Character shadow map" },
+	{ "Shaders.ShadowsExteriors.TerrainShadows", "DebugView", "Terrain shadows" },
+	{ "Shaders.CloudShadows.Main", "DebugView", "Cloud shadows" },
+	{ "Shaders.ShadowsInteriors.Forward", "DebugView", "Lamp shadows (forward)" },
+	{ "Shaders.ShadowsInteriors.Deferred", "DebugView", "Lamp shadows (deferred)" },
+	{ "Shaders.ShadowsInteriors.RT", "DebugView", "Ray-traced lamp shadows" },
+	{ "Shaders.ShadowsInteriors.RT", "ExteriorDebug", "Ray-traced lamp shadows outdoors" },
+	{ "Shaders.ShadowsInteriors.RT", "DebugLamp", "Ray-traced lamp shadows (one lamp)" },
+	{ "Shaders.DustMotes.Main", "DebugView", "Dust motes" },
+	{ "Shaders.LocalExposure.Main", "DebugView", "Local exposure" },
+	{ "Shaders.Reflections.Main", "DebugView", "Reflections" },
+	{ "Shaders.Reflections.RT", "DebugView", "Ray-traced reflections" },
+	{ "Shaders.VolumetricClouds.Main", "ShadowDebug", "Cloud shadow" },
+	{ "Shaders.VolumetricClouds.Main", "ReflectionDebug", "Cloud reflections" },
+	{ "Shaders.HandBlood.Main", "DebugView", "Hand blood" },
+	{ "Shaders.BloodFlow.Main", "DebugView", "Blood flow" },
+	{ "Shaders.BloodFlow.Fluid", "DebugView", "Blood fluid" },
+	{ "Shaders.Skin.Debug", "DebugView", "Skin" },
+	{ "Shaders.SnowAccumulation.Main", "CapturedNormalsDebugView", "Snow normals" },
+	{ "Shaders.Terrain.Blending", "DebugView", "Terrain blending" },
+	{ "Shaders.Terrain.Blending", "Debug", "Terrain blending (debug)" },
+	{ "Shaders.Terrain.Displacement", "DebugView", "Terrain displacement" },
+	{ "Shaders.WetWorld.Main", "PersistentDebugView", "Wet world" },
+	{ "Shaders.WetnessEffects.HudRaindrops", "DebugView", "Raindrops on screen" },
+	{ "Shaders.WetnessEffects.Reflections", "DebugView", "Wet reflections" },
+};
+
+static float SettingF(const char* section, const char* key) { return TheSettingManager->GetSettingF(section, key); }
+static bool ReflectionsShown() { return TheSettingManager->SettingsMain.Main.RenderEffects && EffectOn("Reflections"); }
+static bool RtReflectionsOn() { return ReflectionsShown() && SettingOn("Shaders.Reflections.RT", "Enabled"); }
+// The user asked for clear reflections: a strong or sharp setting.
+static bool WantsClearReflections() {
+	return SettingF("Shaders.Reflections.Main", "Roughness") <= 0.15f || SettingF("Shaders.Reflections.Main", "InteriorFloors") >= 1.0f ||
+		SettingF("Shaders.Reflections.Main", "GroundSheen") >= 1.0f || SettingF("Shaders.Reflections.Main", "Mirror") > 0.0f;
+}
+
+struct HidingNote {
+	bool (*Active)();
+	const char* Text;
+	const char* Fix;		// the button
+	const char* Sets;		// what the button writes: "Section/Key=Value Section/Key=Value"; "!effect:Name" switches that effect on
+};
+static const HidingNote kHidingNotes[] = {
+	{ []() { return !TheSettingManager->SettingsMain.Main.RenderEffects; },
+		"ALL effects are switched off (the master switch: the modifier key + the menu key, Alt+O by default). Changing settings shows "
+		"nothing until they are on again.", "Turn effects on", "Main.Main.Misc/RenderEffects=true" },
+	{ []() { return ReflectionsShown() && SettingF("Shaders.Reflections.Main", "SpecularOcclusion") > 0.0f &&
+			SettingF("Shaders.Reflections.Main", "Mirror") < 1.0f && WantsClearReflections(); },
+		"Specular occlusion dims reflections on floors darker than what they reflect: on dark polished floors people and objects "
+		"vanish from the reflection and only lamps remain.", "Turn specular occlusion off", "Shaders.Reflections.Main/SpecularOcclusion=0.0" },
+	{ []() { return ReflectionsShown() && SettingF("Shaders.Reflections.Main", "Mirror") <= 0.0f && WantsClearReflections(); },
+		"Floors reflect like real stone and tile: about 4 % looking down (more toward the horizon), so mostly bright lamps show in "
+		"them. For a clear mirror that shows people at any angle, raise Mirror floors.", "Make floors mirrors",
+		"Shaders.Reflections.Main/Mirror=1.0 Shaders.Reflections.Main/Roughness=0.02" },
+	{ []() { return ReflectionsShown() && !TheShaderManager->GameState.isExterior && SettingF("Shaders.Reflections.Main", "InteriorFloors") <= 0.0f &&
+			SettingF("Shaders.Reflections.Main", "MaterialReflect") <= 0.0f; },
+		"Indoors nothing reflects: Floor reflections indoors and Smooth surface reflections are both 0.", "Floors reflect indoors",
+		"Shaders.Reflections.Main/InteriorFloors=1.0" },
+	{ []() { return TheSettingManager->SettingsMain.Main.RenderEffects && SettingOn("Shaders.Reflections.RT", "Enabled") && !EffectOn("Reflections"); },
+		"Ray-traced reflections are on but the Reflections effect is off: they do nothing until it is on.", "Turn Reflections on", "!effect:Reflections" },
+	{ []() { return TheSettingManager->SettingsMain.Main.RenderEffects && AnyRtOn() && !SettingOn("Main.Main.RayTracing", "Actors"); },
+		"People are left out of the ray-traced scene: no people in ray-traced reflections, and no ray-traced shadows from them.",
+		"Put people in", "Main.Main.RayTracing/Actors=true" },
+	{ []() { return RtReflectionsOn() && !SettingOn("Main.Main.RayTracing", "HitTextures"); },
+		"Ray-traced reflections show each object as one flat colour (real textures are off).", "Use real textures",
+		"Main.Main.RayTracing/HitTextures=true" },
+	{ []() { return RtReflectionsOn() && !SettingOn("Main.Main.RayTracing", "AlphaTested"); },
+		"Fences, leaves, grates and other see-through meshes are missing from ray-traced reflections and shadows.", "Put them in",
+		"Main.Main.RayTracing/AlphaTested=true" },
+	{ []() { return TheSettingManager->SettingsMain.Main.RenderEffects && AnyRtOn() && !RtCore::Running(); },
+		"A ray-traced effect is on but ray tracing is not running (see the Ray tracing page's first line for why): it shows nothing.",
+		nullptr, nullptr },
+};
+
+static void ApplySets(const char* sets) {
+	if (!sets) return;
+	const std::string all(sets);
+	for (const bool on : { true, false }) {	// "!effect:Name" switches an effect on, "!effectoff:Name" off (its own switch, as the sidebar)
+		const std::string tag = on ? "!effect:" : "!effectoff:";
+		if (all.rfind(tag, 0) != 0) continue;
+		const std::string name = all.substr(tag.size());
+		if (TheSettingManager->GetMenuShaderEnabled(name.c_str()) != on) TheShaderManager->SwitchShaderStatus(name.c_str());
+		return;
+	}
+	std::stringstream parts(all);
+	std::string kv;
+	while (parts >> kv) {
+		const size_t slash = kv.find('/'), eq = kv.find('=');
+		if (slash == std::string::npos || eq == std::string::npos || eq < slash) continue;
+		TheSettingManager->SetSettingS(kv.substr(0, slash).c_str(), kv.substr(slash + 1, eq - slash - 1).c_str(), kv.substr(eq + 1).c_str());
+	}
+	TheSettingManager->LoadSettings();
+}
+
+static void RenderHidingNotes() {
+	struct Line { std::string Text, Fix, Sets; };
+	std::vector<Line> lines;
+	for (const HidingNote& n : kHidingNotes)
+		if (n.Active()) lines.push_back({ n.Text, n.Fix ? n.Fix : "", n.Sets ? n.Sets : "" });
+	std::string views;
+	std::string reset;
+	for (const DebugViewKey& d : kDebugViews)
+		if (TheSettingManager->GetSettingF(d.Section, d.Key) != 0.0f) {
+			views += (views.empty() ? "" : ", ") + std::string(d.Name);
+			reset += std::string(d.Section) + "/" + d.Key + "=0 ";
+		}
+	if (!views.empty())
+		lines.push_back({ "A debug view is on (" + views + "): it replaces or tints the normal picture.", "Turn debug views off", reset });
+	for (const ConflictRule& r : kConflictRules) {
+		if (!r.Applies || !r.Applies()) continue;	// (the always-on ones are warnings for the moment of switching, not hiders)
+		const bool boolean = !strcmp(r.Value, "true");
+		const bool at = boolean ? SettingOn(r.Section, r.Key) : TheSettingManager->GetSettingI(r.Section, r.Key) == atoi(r.Value);
+		if (!at) continue;
+		const std::string section(r.Section);
+		const bool status = boolean && !strcmp(r.Key, "Enabled") && section.size() > 15 && section.rfind("Shaders.", 0) == 0 &&
+			section.compare(section.size() - 7, 7, ".Status") == 0;
+		lines.push_back({ r.Text, boolean ? "Turn it off" : "",
+			status ? "!effectoff:" + section.substr(8, section.size() - 15) : boolean ? section + "/" + r.Key + "=false" : std::string() });
+	}
+	if (lines.empty()) return;
+
+	// In the page's empty space: pushed to the bottom when there is room, else after the rows.
+	const float lineH = ImGui::GetTextLineHeightWithSpacing();
+	float need = ImGui::GetFrameHeightWithSpacing() * 2.0f;
+	for (const Line& l : lines) need += lineH * (1.0f + (float)l.Text.size() / 110.0f) + (l.Fix.empty() ? 0.0f : ImGui::GetFrameHeightWithSpacing());
+	const float room = ImGui::GetContentRegionAvail().y;
+	if (room > need) ImGui::Dummy(ImVec2(0.0f, room - need));
+	ImGui::Separator();
+	ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "%s", lines.size() == 1 ? "1 thing may be hiding effects right now" :
+		(std::to_string(lines.size()) + " things may be hiding effects right now").c_str());
+	for (size_t i = 0; i < lines.size(); i++) {
+		ImGui::PushID((int)i + 7100);
+		ImGui::Bullet();
+		ImGui::SameLine();
+		ImGui::PushTextWrapPos(0.0f);
+		ImGui::TextUnformatted(lines[i].Text.c_str());
+		ImGui::PopTextWrapPos();
+		if (!lines[i].Fix.empty() && ImGui::SmallButton(lines[i].Fix.c_str())) ApplySets(lines[i].Sets.c_str());
+		ImGui::PopID();
+	}
 }
 
 // ---- The page -----------------------------------------------------------------------------------------------------------
@@ -5240,6 +5420,7 @@ static void DrawTwoPanels() {
 	DrawSidebarSplitter(height, defaultW, minW, maxW, gapW);
 	ImGui::BeginChild("##content", ImVec2(0.0f, height), ImGuiChildFlags_Borders);
 	RenderContent();
+	RenderHidingNotes();	// 2026-11-05: what is hiding effects right now, in the page's empty space
 	ImGui::EndChild();
 }
 

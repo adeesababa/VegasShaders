@@ -103,6 +103,8 @@ bool SkyPanorama() { return (uint(p.accum.w) & 16u) != 0u; }
 bool ScreenFrame() { return (uint(p.accum.w) & 32u) != 0u; }
 bool NormalAtlas() { return (uint(p.accum.w) & 64u) != 0u; }
 bool LampImage() { return (uint(p.accum.w) & 1024u) != 0u; }
+// (2026-11-05) PTGlowFromFrame (flag 8192): a glowing surface the camera sees where the game's frame shows it takes the frame's pixel
+bool GlowFromFrame() { return (uint(p.accum.w) & 8192u) != 0u; }
 // (2026-11-03 rtspec) PTGameLamps (flag 2048): a lamp falls off as the game lights it (Pointlights.hlsl vanillaAtt 1 - (d/r)^2, decoded
 // like a colour by LinFalloff: FalloffMatch 1, gamma 2.2; LampFalloff's shape off, the default); else (1 - d/r)^2, as RT GI
 float LampFall(float x) { return (uint(p.accum.w) & 2048u) != 0u ? pow(max(1.0 - x * x, 0.0), 2.2) : (1.0 - x) * (1.0 - x); }
@@ -426,12 +428,15 @@ Surface HitSurface(vec3 albedo, uint instance) {
 // (2026-11-02 b) The screen's surface at this pixel (flag 8): x 1 = found (a world draw wrote its colour there), the position (camera
 // relative), its normal and its colour, linear; (2026-11-02 e) its roughness and metal from the MaterialBuffer (flag 256: r = class +
 // 0.49 x metal, b = roughness or -1; class 4 land, 5 plants). Its distance from the eye is compared with the traced first hit.
+bool gScreenDrawnElse = false;   // (2026-11-05) the game drew something at this pixel that NVR's AlbedoBuffer did not capture
 bool ScreenHit(ivec2 pixel, out vec3 hit, out vec3 n, out Surface s) {
 	hit = n = vec3(0.0);
 	s = HitSurface(vec3(0.0));
+	gScreenDrawnElse = false;
 	if (!GBuffer()) return false;
 	float d = imageLoad(gDepth, pixel).r;
 	vec4 a = imageLoad(gAlbedo, pixel);
+	gScreenDrawnElse = d > 0.0 && d < 0.9999 && a.a < 0.5;
 	if (!(d > 0.0 && d < 0.9999) || a.a < 0.5) return false;
 	vec2 uv = (vec2(pixel) + 0.5) * p.size.zw + p.rect.xy;
 	hit = (p.forward.xyz + p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0)) * (d * p.forward.w);
@@ -491,8 +496,16 @@ vec3 Path(vec3 dir) {
 				while (rayQueryProceedEXT(q)) {}
 			}
 		}
+		// (2026-11-05 rtfull-gs-body) the camera's rays leave the far LOD out (NVR_RT_MASK_FAR 0x80: FarLandLOD / FarObjectLOD): where the
+		// screen has no world surface of NVR's, the game draws that distant land itself and a camera ray that met its coarse quads showed
+		// them as grey slabs (Goodsprings' hills under PTRealtime once the far ring had loaded); missing it, the ray takes the game's frame.
+		// Bounce and shadow rays keep it. (Three calls with constant masks: a variable mask cost the default path 5-8 %, section 27.)
+		else if (bounce == 0) {
+			rayQueryInitializeEXT(q, scene, AlphaTest() ? 0u : gl_RayFlagsOpaqueEXT, 0x7Fu, pos + p.origin.xyz, 1.0, dir, rayLength);
+			Proceed(q);
+		}
 		else {
-			rayQueryInitializeEXT(q, scene, AlphaTest() ? 0u : gl_RayFlagsOpaqueEXT, 0xFFu, pos + p.origin.xyz, bounce == 0 ? 1.0 : 0.0, dir, rayLength);
+			rayQueryInitializeEXT(q, scene, AlphaTest() ? 0u : gl_RayFlagsOpaqueEXT, 0xFFu, pos + p.origin.xyz, 0.0, dir, rayLength);
 			Proceed(q);
 		}
 		bool traced = rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT;
@@ -521,7 +534,10 @@ vec3 Path(vec3 dir) {
 			t = rayQueryGetIntersectionTEXT(q, true);
 			// (2026-11-03) a camera ray that meets only the far LOD (past SceneRadius: FarLandLOD / FarObjectLOD, coarse, average colours)
 			// where the screen has no world surface of NVR's: the game's own frame shows that distance better
-			if (bounce == 0 && !screen && t > 8192.0 && ScreenFrame() && view != 2 && view != 3 && view != 4 && view < 5) {
+			// (2026-11-05 rtfull-gs-pt / -pt2) also wherever the game drew something the AlbedoBuffer did not capture (its own distant
+			// terrain and object LOD, grass): the RT scene holds the full mesh there with one 64 px atlas tile (section 5), and Goodsprings'
+			// hill came out as grey slabs under PTRealtime. The game's frame shows what it drew.
+			if (bounce == 0 && !screen && (t > 8192.0 || gScreenDrawnElse) && ScreenFrame() && view != 2 && view != 3 && view != 4 && view < 5) {
 				radiance = pow(max(imageLoad(gFrame, gPixel).rgb, vec3(0.0)), vec3(2.2));
 				break;
 			}
@@ -538,6 +554,13 @@ vec3 Path(vec3 dir) {
 			}
 			// (2026-11-03 b) PTGlowLights: a bounce ray's glow inside a glow light's sphere could also have come from that light's sample
 			// at the previous hit (Direct, GlowSample): MIS weight pdf_bounce / (pdf_bounce + pdf_light) (the camera's own rays: full)
+			// UNOFFICIAL 2026-11-05 PTGlowFromFrame: a glowing mesh (glow map / emissive material) the camera sees directly, where the screen
+			// shows the same surface, is the game's own pixel (as the sky): its glow map read as light is far dimmer than the game draws it
+			// (Lucky 38's red lamp globes came out dark under PTRealtime, section 31). No first surface: the denoiser leaves it exact.
+			if (bounce == 0 && view == 0 && screen && GlowFromFrame() && ScreenFrame() && (records[instance].flags & RT_HIT_GLOW_FLAG) != 0u) {
+				radiance = pow(max(imageLoad(gFrame, gPixel).rgb, vec3(0.0)), vec3(2.2));
+				break;
+			}
 			if ((view == 0 || (view >= 5 && view != 8 && bounce > 0)) && GlowAtlas() && p.skyHorizon.w > 0.0) {
 				vec3 glow = rtHitGlow(instance, prim, bary);
 				float mis = 1.0;

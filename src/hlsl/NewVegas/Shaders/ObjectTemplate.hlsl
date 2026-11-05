@@ -324,6 +324,24 @@
         #define PBR_SPEC_FADE_HIGHLIGHT_ONLY
     #endif
 #endif
+// UNOFFICIAL 2026-11-05 VanillaBridge ([Shaders.PBR.Main] VanillaBridge, restart: VANILLA_BRIDGE_ON from ShaderRecord::BuildDefines;
+// Includes/Object.hlsl): the highlight takes the authored Blinn-Phong highlight's width and strength (normal map alpha + the mesh's
+// glossiness). In the pixel shaders that draw a highlight and know the glossiness: every SPECULAR variant with Toggles (c27.z), and
+// the 4+ lamp OPT ones (PSLightColor[1].w). Not hair (its strands have their own highlight look), and not the 6-lamp OPT shader at
+// the driver's slot limit (NVR_SLOT_TIGHT: the bridge costs ~46 slots there, ~40 in the one-sun SPECULAR shaders). Off: the shaders
+// exactly as before.
+#ifndef VANILLA_BRIDGE_ON
+    #define VANILLA_BRIDGE_ON 0
+#endif
+#if defined(PS) && VANILLA_BRIDGE_ON && defined(SPECULAR) && !defined(HAIR) && !defined(NVR_SLOT_TIGHT)
+    #ifndef OPT
+        #define NVR_VANILLA_BRIDGE
+    #elif defined(LIGHTS)
+        #if LIGHTS > 3
+            #define NVR_VANILLA_BRIDGE
+        #endif
+    #endif
+#endif
 #include "includes/Object.hlsl"
 // UNOFFICIAL: the camera matrices Shadow.hlsl rebuilds world positions with move out of c100-c107 in skinned vertex
 // shaders: the game's bone upload reaches past Bones[54] (c97) and overwrote them, so actors sampled the sun shadow
@@ -1297,6 +1315,9 @@ PS_OUTPUT main(PS_INPUT IN) {
     #ifdef RMAOS
         RmaosRead(IN.uv.xy);	// UNOFFICIAL _rmaos map (Object.hlsl): read once, here at top level
     #endif
+    #if defined(NVR_VANILLA_BRIDGE) && defined(OBJ_TOGGLES)
+        BridgeSetup(normal.a, Toggles.z);	// UNOFFICIAL 2026-11-05 VanillaBridge (Object.hlsl): the authored highlight, before the roughness
+    #endif
     float rough = getRoughness(normal.a);
 
     // Geometric specular AA -- see the comment on SpecularAA itself. Unconditional: this is a
@@ -2008,6 +2029,7 @@ PS_OUTPUT main(PS_INPUT IN) {
     #ifdef RMAOS
         RmaosRead(IN.uv.xy);	// UNOFFICIAL _rmaos map (Object.hlsl): read once, here at top level
     #endif
+    BridgeSetup(normal.a, glossPow);	// UNOFFICIAL 2026-11-05 VanillaBridge (Object.hlsl; nothing without NVR_VANILLA_BRIDGE)
     float roughness = getRoughness(normal.a);
     // UNOFFICIAL 2026-10-13 (user: polished marble walls in the casinos flickered round their lamps): the same geometric
     // specular AA as the other path above. This 4+ lamp path had none, so a glossy wall (material rules' stonepolished)

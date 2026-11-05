@@ -1,6 +1,7 @@
 #include "Hooks.h"
 #include "../../core/PointShadowForward.h"
 #include "../../core/ClothWind.h"	// UNOFFICIAL 2026-10-19 cloth round 5: the partition draw hook
+#include "../../core/ParticleSize.h"	// UNOFFICIAL 2026-11-04 soft particles
 
 namespace {
 	// One Detours redirection: the game function pointer variable and the function that replaces it.
@@ -102,6 +103,8 @@ void AttachHooks() {
 	}
 
 	InstallGrassFirstHooks();	// UNOFFICIAL 2026-10-17 GrassFirst (Render.cpp): pass-through unless [Shaders.Grass.Main] DrawFirst = true
+	// UNOFFICIAL 2026-11-04 ParticleSize (core/ParticleSize.h): each particle's size on its vertices, for soft particles; lit particles on at startup only.
+	if (TheSettingManager->GetSettingI("Shaders.Particles.Status", "Enabled")) { ParticleSize::Install(); InstallSoftParticleHook(); }
 	// UNOFFICIAL 2026-10-19 cloth round 5 (core/ClothWind.h DrawPartition): the game's two per-partition draw calls in
 	// BSBatchRenderer::RenderPassImmediately_Skinned, so worn cloth can have its per-vertex weights in vertex stream 1. Only when the
 	// cloth code is compiled in ([Shaders.Cloth.Main] Enabled at startup) and both calls are the game's; otherwise mask 4 stays.

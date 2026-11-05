@@ -83,7 +83,12 @@ float4 main(PS_IN IN, out float depth : DEPTH) : COLOR0 {
     const float4 stored = tex2Dlod(FL_Normals, uv4);
     depth = 0.0f;
     clip(stored.b - 1.0e-3f);	// nothing the G-buffer holds here
-    const float keep = tex2Dlod(FL_Albedo, uv4).a;	// 1 - fog: the share of added light the draw's fog lets through
+    // 1 - fog: the share of added light the draw's fog lets through. 2026-11-05 (user: the beam "pokes through" the terrain, a lit patch with
+    // a jagged edge): not for the land (MaterialBuffer class 4), which writes 1 there whatever its fog, but in terrain blending's Smooth fade
+    // is drawn alpha-blended, so the albedo buffer's alpha came out 0 on stretches of it while its colour and normal were right (flashlight
+    // DebugView checks): the beam skipped that land and lit only the rest. The land takes the full light.
+    const float landClass = floor(tex2Dlod(FL_Material, uv4).r + 0.01f);
+    const float keep = abs(landClass - 4.0f) < 0.5f ? 1.0f : tex2Dlod(FL_Albedo, uv4).a;
     clip(keep - 1.0e-4f);
 
     // the pixel's camera-relative position along its view ray (DeferredLamps.hlsl DLPixel)

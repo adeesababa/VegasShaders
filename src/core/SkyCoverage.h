@@ -139,8 +139,12 @@ namespace SkyCoverage {
 	inline DWORD InFront() { return TheRenderManager->IsReversedDepth() ? D3DCMP_LESS : D3DCMP_GREATER; }
 
 	// Before the world's depth resolve (Render.cpp): the scene target and its multisampled depth buffer are bound.
+	// UNOFFICIAL 2026-11-05 (alpha cutouts): TESR_GameMultisample.y = 1 while TESR_SkyCoverage holds this frame's shares, 0 when this
+	// frame's could not be made (no multisampled target bound, masks failed): the effects then fall back to the depth alone instead of
+	// reading a stale or empty mask (Includes/MsaaSkyEdge.hlsl takes the share for every pixel now, sky by depth too).
 	inline void Draw(IDirect3DDevice9* d) {
 		Drawn = false;
+		NvrGameMultisample.y = 0.0f;
 		Scope s(d);
 		if (!s.ok) return;
 		d->SetRenderTarget(0, MaskMS);
@@ -148,6 +152,7 @@ namespace SkyCoverage {
 		s.Quad(AtFar(), FALSE, 0xF, WhitePS);
 		d->StretchRect(MaskMS, NULL, TextureSurface, NULL, D3DTEXF_NONE);	// the resolve averages the samples: the sky share
 		Drawn = true;
+		NvrGameMultisample.y = 1.0f;
 	}
 
 	// After the first-person render (Render.cpp): the depth buffer holds the first-person model alone (cleared before it).

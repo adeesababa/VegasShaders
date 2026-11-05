@@ -96,6 +96,12 @@ void PBRShaders::UpdateSettings() {
 	// UNOFFICIAL 2026-11-01 HairHighlight (SM3003.pso.hlsl TESR_HairData): the hair's strand highlight times this, and GameLook = added as
 	// the game adds it (missing keys, an older toml: 1 and the game's look).
 	HairData.x = std::clamp(RmaosScaleOr1("Shaders.PBR.Main", "HairHighlight"), 0.0f, 4.0f) - 1.0f;
+	// UNOFFICIAL 2026-11-05 VanillaBridge (Includes/Object.hlsl): compiled in at startup (VanillaBridge, ShaderRecord); the amount is live
+	// (0 = the old highlight exactly; a missing key, an older toml: 1). Sent in TESR_PBRData.x (UpdateConstants).
+	Settings.Default.VanillaBridgeAmount = std::clamp(RmaosScaleOr1("Shaders.PBR.Main", "VanillaBridgeAmount"), 0.0f, 1.0f);
+	// VanillaBridgeOverMaps (live): + 2 in the same lane, the bridge then also decides the highlight where an _rmaos map is bound
+	// (the map keeps its occlusion and metal). Off by default: an _rmaos map decides, as agreed with the PBR-Reloaded fork's author.
+	if (TheSettingManager->GetSettingI("Shaders.PBR.Main", "VanillaBridgeOverMaps")) Settings.Default.VanillaBridgeAmount += 2.0f;
 	{ SettingManager::Configuration::ConfigNode node; HairData.y = (!TheSettingManager->Config.FillNode(&node, "Shaders.PBR.Main", "HairHighlightGameLook") || node.BoolValue) ? 1.0f : 0.0f; }
 	// UNOFFICIAL CubeReflections (Includes/LiveCube.hlsl): metal and the env maps reflect the live surroundings cube that the
 	// Reflections effect keeps (CubeMap); applied in UpdateConstants only while that cube is kept up.
@@ -314,7 +320,7 @@ void PBRShaders::UpdateConstants() {
 	// Used only when SKYLIGHTING_MODE is 1; the SH path has no direction to lean.
 	Constants.ExtraData.z = weather(&PBRSettings::SkylightingDirectionality);
 
-	Constants.Data.x = weather(&PBRSettings::Metallicness);
+	Constants.Data.x = Settings.Default.VanillaBridgeAmount;	// UNOFFICIAL 2026-11-05 VanillaBridge (Object.hlsl BridgeSetup); was the Metallicness scale, which no shader read
 	Constants.Data.y = weather(&PBRSettings::Roughness);
 	Constants.Data.z = weather(&PBRSettings::LightScale);
 	// AmbientScale keeps its original lookup: the wet side falls back to the Default group's AmbientScale indoors (not Interiors')

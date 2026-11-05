@@ -9,12 +9,36 @@ layout(set = 1, binding = 1) uniform texture2D t_depth;      // TESR_DepthBuffer
 layout(set = 1, binding = 2) uniform texture2D t_normals;    // TESR_NormalsBuffer (POINT, CLAMP)
 layout(set = 1, binding = 3) uniform texture2D t_shadow;     // TESR_CloudShadow (LINEAR, CLAMP)
 layout(set = 1, binding = 4) uniform texture2D t_history;    // TESR_CloudHistory (LINEAR, CLAMP)
+layout(set = 1, binding = 5) uniform texture2D t_skycov;     // TESR_SkyCoverage (POINT, CLAMP; the depth when the game's MSAA is off; UNOFFICIAL 2026-11-05)
 
 #define CLOUDS_HISTORY
 #include "VolumetricClouds.glsl"
 
 // Includes/Depth.hlsl readDepthLod
 float readDepthLod(vec2 coord) { return POINT_LOD(t_depth, coord).x * farZ; }
+
+#include "MsaaSkyEdge.glsl"
+
+// The clouds of this pixel from the history (the .fx's CloudsHere, without RenderScale: the Vulkan composite never had it).
+vec4 CloudsHere(vec2 at) {
+    vec4 clouds;
+    if (LowTexel.x < cb.reciprocalResolution.x * 0.99) {
+        vec2 q = 0.25 * cb.reciprocalResolution.xy;
+        clouds = 0.25 * (LINEAR_LOD(t_history, at + vec2(-q.x, -q.y)) + LINEAR_LOD(t_history, at + vec2(q.x, -q.y)) +
+            LINEAR_LOD(t_history, at + vec2(-q.x, q.y)) + LINEAR_LOD(t_history, at + q));
+    }
+    else clouds = CatmullRom(at);
+    if (Sharpness > 0.0) {
+        vec4 n0 = LINEAR_LOD(t_history, at + vec2(LowTexel.x, 0.0));
+        vec4 n1 = LINEAR_LOD(t_history, at - vec2(LowTexel.x, 0.0));
+        vec4 n2 = LINEAR_LOD(t_history, at + vec2(0.0, LowTexel.y));
+        vec4 n3 = LINEAR_LOD(t_history, at - vec2(0.0, LowTexel.y));
+        vec4 lo = min(min(min(n0, n1), min(n2, n3)), clouds), hi = max(max(max(n0, n1), max(n2, n3)), clouds);
+        vec4 sharpened = clouds + (clouds - 0.25 * (n0 + n1 + n2 + n3)) * (1.5 * Sharpness);
+        clouds = clamp(sharpened, lo, hi);
+    }
+    return clouds;
+}
 
 float CloudShadowAt(vec3 world) {
     vec3 light = ShadowLight();
@@ -28,7 +52,20 @@ float CloudShadowAt(vec3 world) {
 vec4 Composite() {
     vec4 color = POINT_LOD(t_rendered, uv);
     float depth = readDepthLod(uv);
-    if (depth < farZ * 0.996) {
+    if (MsaaEdgeDebugOn()) return MsaaEdgeDebug(uv, depth, color.rgb);
+    bool sky = depth >= farZ * 0.996;
+    // UNOFFICIAL 2026-11-05 MsaaEdgeFix: as the .fx's CompositePS.
+    if (MsaaEdgeFixOn()) {
+        float share = MsaaSkyCoverage(uv);
+        if (share > MsaaNoSky && share < MsaaAllSky) {
+            vec4 clouds = CloudsHere(uv);
+            vec3 behind = MsaaSkyBehind(uv, color.rgb);
+            vec3 lin = linearize(max(color.rgb, vec3(0.0))) + share * (behind * (clouds.a - 1.0) + clouds.rgb * cb.cloudLayout.w);
+            return vec4(delinearize(max(lin, vec3(0.0))), color.a);
+        }
+        sky = share >= MsaaAllSky;
+    }
+    if (!sky) {
         if (ShadowStrength <= 0.0) return color;
         vec3 eye = toWorld(uv);
         vec3 world = (cb.cameraPosition.xyz + eye * depth) * MetresPerUnit;
@@ -49,22 +86,7 @@ vec4 Composite() {
         }
         return color;
     }
-    vec4 clouds;
-    if (LowTexel.x < cb.reciprocalResolution.x * 0.99) {
-        vec2 q = 0.25 * cb.reciprocalResolution.xy;
-        clouds = 0.25 * (LINEAR_LOD(t_history, uv + vec2(-q.x, -q.y)) + LINEAR_LOD(t_history, uv + vec2(q.x, -q.y)) +
-            LINEAR_LOD(t_history, uv + vec2(-q.x, q.y)) + LINEAR_LOD(t_history, uv + q));
-    }
-    else clouds = CatmullRom(uv);
-    if (Sharpness > 0.0) {
-        vec4 n0 = LINEAR_LOD(t_history, uv + vec2(LowTexel.x, 0.0));
-        vec4 n1 = LINEAR_LOD(t_history, uv - vec2(LowTexel.x, 0.0));
-        vec4 n2 = LINEAR_LOD(t_history, uv + vec2(0.0, LowTexel.y));
-        vec4 n3 = LINEAR_LOD(t_history, uv - vec2(0.0, LowTexel.y));
-        vec4 lo = min(min(min(n0, n1), min(n2, n3)), clouds), hi = max(max(max(n0, n1), max(n2, n3)), clouds);
-        vec4 sharpened = clouds + (clouds - 0.25 * (n0 + n1 + n2 + n3)) * (1.5 * Sharpness);
-        clouds = clamp(sharpened, lo, hi);
-    }
+    vec4 clouds = CloudsHere(uv);
     vec3 lin = linearize(max(color.rgb, vec3(0.0))) * clouds.a + clouds.rgb * cb.cloudLayout.w;
     return vec4(delinearize(max(lin, vec3(0.0))), color.a);
 }

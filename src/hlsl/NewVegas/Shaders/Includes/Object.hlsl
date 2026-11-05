@@ -7,6 +7,49 @@
 static float RmaosSpecular = 1.0f;
 #define PBR_DIELECTRIC_F0 (0.04f * RmaosSpecular)
 #endif
+
+// UNOFFICIAL 2026-11-05 VanillaBridge ([Shaders.PBR.Main] VanillaBridge, restart: VANILLA_BRIDGE_ON; VanillaBridgeAmount live, TESR_PBRData.x).
+// The game draws an object's highlight as Blinn-Phong: mask x (N.H)^n x the light, where the mask is the normal map's alpha (a
+// highlight STRENGTH, not a gloss map) and n the mesh's glossiness (NiMaterialProperty, the game's Toggles.z). NVR drew every
+// highlight with GGX at F0 0.04 and a roughness of (1 - mask) or a material class's: the mask set the WIDTH, n was dropped and the
+// strength was fixed, so authored glints (power armour, polished metal; n 30-100, mask 0.3-0.7) became faint wide sheens. The
+// bridge gives the GGX highlight the authored one's width, peak and energy instead (derivation and measurements: effects\PBR\README.md):
+//   width: Blinn-Phong (N.H)^n ~ exp(-n t^2 / 2) is the Beckmann lobe of alpha^2 = 2 / (n + 2) (Walter et al. 2007). GGX at that
+//          alpha, peak matched (below), has 0.77-0.91 of Blinn-Phong's half width and 1.04-1.20 x its energy for n 2-200 (GGX: a
+//          narrower core, longer tails). An exact energy match would need alpha^2 = (1.7-1.9) / (n + 2) and narrows the core to 0.73;
+//          the least-squares shape fit is (1.9-2.6) / (n + 2): 2 sits between them.
+//   peak:  GGX lit and seen head-on returns D(1) x F x Vis x N.L x pi = F / (4 alpha^2) of the light (Vis = 1/4, both Smith terms),
+//          the game's returns mask: F0 = 4 alpha^2 x mask = 8 mask / (n + 2) (at most 1). Normalised Blinn-Phong would need
+//          (n + 8) / (8 pi); the game's lobe is not normalised, which is why F0 falls as n rises: a sharp lobe of the same peak holds
+//          less energy.
+//   mask:  used as it is, not decoded: with linear lighting the game's gamma-space sum (albedo + mask) x light is matched on
+//          average over albedo 0.05-0.6 and mask 0.05-1 (mean error +0.004 of full scale; decoding the mask: -0.14).
+// Only the highlight takes the bridged F0; the diffuse keeps the dielectric's (1 - F) share (PBR.hlsl PBR_SPEC_FRESNEL), so surfaces
+// keep their diffuse light. Metal keeps the bridged strength, tinted by its colour's hue. Where the mask is (nearly) 0 the game drew
+// no highlight and the old roughness and F0 fill the gap (BridgeT ramps over mask 0-0.04): matte surfaces are unchanged. An _rmaos map
+// (RMAOS_ACTIVE) decides on its own, as before; a material class with authored=replace (MaterialRules.h) keeps its rule's look.
+// Compiled in only where the template defines NVR_VANILLA_BRIDGE (the highlight-drawing object and parallax pixel shaders that know n);
+// VanillaBridgeAmount 0 gives the old values exactly (lerp by 0).
+#ifdef NVR_VANILLA_BRIDGE
+static float BridgeT = 0.0f;		// how much the vanilla data decides this pixel's highlight (BridgeSetup)
+static float BridgeF0 = 0.04f;		// the authored highlight's reflectance, 8 mask / (n + 2)
+static float BridgeRough = 1.0f;	// its roughness, (2 / (n + 2))^(1/4) (GGX() takes roughness^4 = alpha^2)
+static float BridgeTMap = 0.0f;	// VanillaBridgeOverMaps: BridgeT where an _rmaos map is active (applied after the map's roughness)
+#define BRIDGE_OVER_MAP(r) lerp((r), BridgeRough, BridgeTMap)
+#ifndef PBR_DIELECTRIC_F0
+    #define PBR_DIELECTRIC_F0 0.04f
+#endif
+// The highlight's F0 (before Reflectivity): the old one where BridgeT is 0, the authored strength where it is 1 (metal: tinted by
+// its colour's hue, normalised to its brightest channel, so the strength stays the authored one).
+float3 BridgeSpecF0(float3 baseColor, float metal) {
+    const float3 plain = lerp(PBR_DIELECTRIC_F0, baseColor, metal);
+    const float3 hue = baseColor / max(max(baseColor.r, max(baseColor.g, baseColor.b)), 1e-4f);
+    return lerp(plain, BridgeF0 * lerp(1.0f, hue, metal), BridgeT);
+}
+#define PBR_SPEC_F0(baseColor, metal) BridgeSpecF0((baseColor), (metal))
+#else
+#define BRIDGE_OVER_MAP(r) (r)
+#endif
 #ifdef __INTELLISENSE__
     #include "Pointlights.hlsl"
     #include "PBR.hlsl"
@@ -26,7 +69,7 @@ static float RmaosSpecular = 1.0f;
 #endif
 #define LinSky(c) LinColor(c)
 
-float4 TESR_PBRData : register(c32);	// y roughness scale, z light scale, w ambient scale
+float4 TESR_PBRData : register(c32);	// x VanillaBridgeAmount (2026-11-05; was the unused Metallicness), y roughness scale, z light scale, w ambient scale
 float4 TESR_PassRedirect : register(c210);	// UNOFFICIAL ExactPassSums (core/PassSums.h): x 1 = this added pass draws into NVR's buffer, linear
 float4 TESR_PBRExtraData : register(c33);	// x saturation, y sky strength, z sky directionality, w metal fade distance
 // UNOFFICIAL 2026-10-17 LinearPreDecode (ObjectTemplate.hlsl LIN_PREDECODED): the strengths LinScale would decode per pixel, decoded
@@ -167,18 +210,50 @@ float ReflMaterialAlpha(float alpha) {
 #define ReflMaterialAlpha(alpha) (alpha)
 #endif
 
+// UNOFFICIAL 2026-11-05 VanillaBridge (see the top of this file): this pixel's authored highlight, from the normal map's alpha
+// (mask) and the mesh's glossiness (shine: Toggles.z, or PSLightColor[1].w in the 4+ lamp OPT shaders). Call once per pixel before
+// getRoughness / getMetalRoughness and the lighting, after RmaosRead.
+#ifdef NVR_VANILLA_BRIDGE
+void BridgeSetup(float mask, float shine) {
+    const float n = clamp(shine, 2.0f, 2048.0f);	// (2: F0 = mask; the game's own default glossiness when a mesh has none is in range)
+    const float a2 = 2.0f / (n + 2.0f);
+    BridgeRough = saturate(max(sqrt(sqrt(a2)), 0.043f) * TESR_PBRData.y);	// [Shaders.PBR.*] Roughness scales it as it scaled the old one
+    BridgeF0 = min(4.0f * a2 * saturate(mask), 1.0f);
+    // TESR_PBRData.x: VanillaBridgeAmount, + 2 with VanillaBridgeOverMaps (PBR.cpp). Mask below 0.04: no highlight authored, the old look fills the gap.
+    const bool overMaps = TESR_PBRData.x > 1.5f;
+    float t = saturate(mask * 25.0f) * (overMaps ? TESR_PBRData.x - 2.0f : TESR_PBRData.x);
+    #ifdef MATERIAL_RULES
+        t = (TESR_MaterialRule.x > 0.0f && TESR_MaterialRough.w > 0.5f) ? 0.0f : t;	// the class opted out (authored=replace)
+    #endif
+    #ifdef RMAOS
+        // the map decides (FadeIn: as it blends in), unless VanillaBridgeOverMaps: then the map keeps its occlusion (and metal), the highlight's
+        // roughness and strength come from the game's data (getRoughness / getMetalRoughness apply BridgeTMap after the map's roughness)
+        BridgeTMap = RMAOS_ACTIVE && overMaps ? t : 0.0f;
+        t = RMAOS_ACTIVE && !overMaps ? (RMAOS_FADING ? t * (1.0f - NVR_Rmaos.x) : 0.0f) : t;
+    #endif
+    BridgeT = t;
+}
+#else
+#define BridgeSetup(mask, shine)
+#endif
+
 // Roughness from the normal map's gloss (alpha), scaled by [Shaders.PBR] Roughness; a material rule or an _rmaos map overrides it.
+// UNOFFICIAL 2026-11-05 VanillaBridge: where BridgeT > 0, towards the authored highlight's roughness (the rule fills only the gap).
 float getRoughness(float glossAmt) {
     #ifdef RMAOS
-        if (RMAOS_ACTIVE && !RMAOS_FADING) return max(RmaosValue.r, 0.02f);
+        if (RMAOS_ACTIVE && !RMAOS_FADING) return BRIDGE_OVER_MAP(max(RmaosValue.r, 0.02f));
     #endif
     float r = saturate(max(0.043, 1 - glossAmt) * TESR_PBRData.y);
     #ifdef MATERIAL_RULES
         [flatten] if (TESR_MaterialRule.x > 0.0f && TESR_MaterialRough.x >= 0.0f)
             r = lerp(TESR_MaterialRough.x, TESR_MaterialRough.y, saturate(1.0f - glossAmt));
     #endif
+    #ifdef NVR_VANILLA_BRIDGE
+        r = lerp(r, BridgeRough, BridgeT);
+    #endif
     #ifdef RMAOS
         if (RMAOS_ACTIVE) r = RMAOS_FADING ? lerp(r, max(RmaosValue.r, 0.02f), NVR_Rmaos.x) : max(RmaosValue.r, 0.02f);	// FadeIn
+        r = BRIDGE_OVER_MAP(r);	// UNOFFICIAL 2026-11-05 VanillaBridgeOverMaps (0 weight otherwise)
     #endif
     return r;
 }
@@ -376,7 +451,7 @@ float getMetalFade(float3 cameraRelativePos) {
 // Metal's roughness: satin where the mask is bare, polished where it is painted (the mask is no gloss map, see above).
 float getMetalRoughness(float specMask) {
     #ifdef RMAOS
-        if (RMAOS_ACTIVE && !RMAOS_FADING) return max(RmaosValue.r, 0.02f);
+        if (RMAOS_ACTIVE && !RMAOS_FADING) return BRIDGE_OVER_MAP(max(RmaosValue.r, 0.02f));
     #endif
     float roughness = lerp(TESR_PBRMetalLook.x, TESR_PBRMetalLook.y, getMetalMask(specMask));
     #ifdef MATERIAL_RULES
@@ -384,8 +459,12 @@ float getMetalRoughness(float specMask) {
         [flatten] if (TESR_MaterialRule.x > 0.0f && TESR_MaterialRough.x >= 0.0f)
             roughness = lerp(TESR_MaterialRough.y, TESR_MaterialRough.x, getMetalMask(specMask));
     #endif
+    #ifdef NVR_VANILLA_BRIDGE
+        roughness = lerp(roughness, BridgeRough, BridgeT);	// UNOFFICIAL 2026-11-05 VanillaBridge: the authored finish where there is one
+    #endif
     #ifdef RMAOS
         if (RMAOS_ACTIVE) roughness = RMAOS_FADING ? lerp(roughness, max(RmaosValue.r, 0.02f), NVR_Rmaos.x) : max(RmaosValue.r, 0.02f);	// FadeIn
+        roughness = BRIDGE_OVER_MAP(roughness);	// UNOFFICIAL 2026-11-05 VanillaBridgeOverMaps (0 weight otherwise)
     #endif
     return roughness;
 }
