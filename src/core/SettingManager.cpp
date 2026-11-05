@@ -1407,7 +1407,7 @@ void SettingManager::SetSettingS(const char* section, const char* key, const cha
 	else if (node.Type == Kind::Float)
 		node.FloatValue = (float)atof(value);
 	else if (node.Type == Kind::Boolean)
-		node.BoolValue = atoi(value) != 0;
+		node.BoolValue = !_stricmp(value, "true") || (_stricmp(value, "false") && atoi(value) != 0);	// 1.0.4.1: "true" too (atoi("true") is 0: the menu's simple choices wrote "...=true" as false)
 
 	SetSetting(&node);
 }
