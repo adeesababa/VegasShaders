@@ -293,7 +293,7 @@ namespace {
 		bool		actorsOn = false;					// [Main.Main.RayTracing] Actors (read at each helper start)
 		bool		walkingPlayer = false;				// Gather's walk of the player's own node (NVR_RT_MASK_PLAYER on its rigid parts)
 		bool		playerHidden = false;				// (2026-11-07) ... in first person: its instances get NVR_RT_CUSTOM_HIDDEN (not drawn)
-		bool		firstPersonBody = true;				// UNOFFICIAL 2026-11-05 [Main.Main.RayTracing] FirstPersonBody: the body is traced in first person too
+		bool		firstPersonBody = false;			// UNOFFICIAL 2026-11-05 [Main.Main.RayTracing] FirstPersonBody: the body is traced in first person too (2026-11-07: off by default)
 		bool		walkingFar = false;					// UNOFFICIAL 2026-10-31: Gather's walk of the far object LOD (FarObjectLOD; NVR_RT_MASK_FAR)
 		bool		farLodOn = false;					// [Main.Main.RayTracing] FarObjectLOD (live)
 		bool		farLandOn = false;					// UNOFFICIAL 2026-10-31 [Main.Main.RayTracing] FarLandLOD (live): LOD land in the same ring

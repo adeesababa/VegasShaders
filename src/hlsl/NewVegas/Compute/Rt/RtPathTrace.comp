@@ -373,6 +373,22 @@ vec3 GlowSample(vec3 lift, vec3 n, vec3 v, Surface s, vec4 sphere, int index, fl
 float gGlowTotal;   // (2026-11-03 b) the last Direct()'s glow pick total (the bounce ray's MIS weight at the next hit needs it)
 ivec2 gPixel;   // the pixel this thread traces (ScreenHit)
 
+// UNOFFICIAL 2026-11-07 the flashlight (RtPathTrace.cpp Lamps): always lamp 0 when it is on; its cone in the frame row's texel 15 .x
+// (the lamp image: the lamp texels' spare word carries ReSTIR's number remap) or lampColor[0].w (no lamp image): 1 + (angle x 512 + u)
+// x 512 + v, the cone's half-angle in degrees and its direction octahedral, 9 bits each; 0 = no flashlight. The share of lamp k reaching
+// `toPoint` (lamp -> point, unit): full inside half the cone, nothing outside it, smooth between (as the game's own flashlight pass)
+float LampSpot(int k, vec3 toPoint) {
+	if (k != 0) return 1.0;
+	const float code = LampImage() ? FrameTexel(15).x : p.lampColor[0].w;
+	if (code < 0.5) return 1.0;
+	const uint c = uint(code - 1.0 + 0.5);
+	const vec2 e = vec2(float((c >> 9u) & 511u), float(c & 511u)) / 511.0 * 2.0 - 1.0;
+	vec3 d = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+	if (d.z < 0.0) d.xy = (1.0 - abs(d.yx)) * vec2(d.x >= 0.0 ? 1.0 : -1.0, d.y >= 0.0 ? 1.0 : -1.0);
+	const float angle = radians(float(c >> 18u));
+	return smoothstep(cos(angle), cos(0.5 * angle), dot(normalize(d), toPoint));
+}
+
 #ifndef PT_RESTIR_GI
 // ---- UNOFFICIAL 2026-11-07 PTRestirDI: ReSTIR DI for the lamps at the first hit (RT-PATH-TRACING.md section 47; Bitterli et al. 2020,
 // as RTXDI does it). The lamp loop's pick stays the first candidate (resampled importance sampling over EVERY lamp in reach: the source
@@ -396,7 +412,7 @@ bool LampAt(int k, vec3 hit, vec3 n, out vec3 light, out vec3 pos) {
 	vec3 l = pos - hit;
 	const float dist = length(l), reach = b.y;
 	if (dist >= reach || dist < 1.0e-3) return false;
-	light = vec3(c, d.x) * (LampFall(dist / reach) * max(dot(n, l / dist), 0.0));
+	light = vec3(c, d.x) * (LampFall(dist / reach) * max(dot(n, l / dist), 0.0) * LampSpot(k, -l / dist));
 	return dot(light, vec3(0.2126, 0.7152, 0.0722)) > 0.0;
 }
 float RestirTarget(vec3 light, vec3 pos, vec3 hit, Surface s, vec3 n, vec3 v) {
@@ -679,7 +695,7 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 		vec3 l = pos.xyz - hit;
 		float dist = length(l), reach = pos.w;
 		if (dist >= reach || dist < 1.0e-3) continue;
-		vec3 light = colour.rgb * (LampFall(dist / reach) * max(dot(n, l / dist), 0.0));
+		vec3 light = colour.rgb * (LampFall(dist / reach) * max(dot(n, l / dist), 0.0) * LampSpot(k, -l / dist));
 		float w = dot(light, vec3(0.2126, 0.7152, 0.0722));
 		if (!(w > 0.0)) continue;
 		total += w;
@@ -719,7 +735,7 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 		vec3 l = pos.xyz - hit;
 		float dist = length(l), reach = pos.w;
 		if (dist >= reach || dist < 1.0e-3) continue;
-		vec3 light = colour.rgb * (LampFall(dist / reach) * max(dot(n, l / dist), 0.0));
+		vec3 light = colour.rgb * (LampFall(dist / reach) * max(dot(n, l / dist), 0.0) * LampSpot(k, -l / dist));
 		float w = dot(light, vec3(0.2126, 0.7152, 0.0722));
 		if (!(w > 0.0)) continue;
 		total += w;
@@ -799,6 +815,13 @@ vec3 Indirect(vec3 c) {
 	return cap > 0.0 && l > cap ? c * (cap / l) : c;
 }
 
+// (2026-11-07) a committed hit into the path's locals (traced, qT, qInstance, qPrim, qBary, qToScene): a rayQueryEXT cannot be copied
+#define PT_TAKE_HIT(Q) { traced = rayQueryGetIntersectionTypeEXT(Q, true) == gl_RayQueryCommittedIntersectionTriangleEXT; if (traced) { \
+	qT = rayQueryGetIntersectionTEXT(Q, true); qInstance = rayQueryGetIntersectionInstanceIdEXT(Q, true); \
+	qPrim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(Q, true)); qBary = rayQueryGetIntersectionBarycentricsEXT(Q, true); \
+	qToScene = rayQueryGetIntersectionObjectToWorldEXT(Q, true); } }
+#define NVR_RT_CUSTOM_HIDDEN 2u   // NvrRtProtocol.h: the player's own body and gear in first person (traced, not drawn)
+
 vec3 Path(vec3 dir) {
 	vec3 pos = vec3(0.0), radiance = vec3(0.0), throughput = vec3(1.0);
 	int bounces = int(p.accum.y + 0.5), view = int(p.misc.w + 0.5);
@@ -819,6 +842,11 @@ vec3 Path(vec3 dir) {
 		// (two calls, not variable flags / mask: one call with them cost the default path 5-8 % in helper replays)
 		const int alphaMode = int(p.rect.w + 0.5);   // PTBounceAlpha: 1 tested as the camera's rays, 0 cut-outs solid, 2 left out, 3 the nearest card's texel
 		const float rayLength = bounce > 0 && p.grid[2].z > 0.0 ? p.grid[2].z : p.misc.z;   // PTBounceDistance (0: misc.z)
+		bool traced = false;
+		float qT = 0.0;
+		uint qInstance = 0u, qPrim = 0u;
+		vec2 qBary = vec2(0.0);
+		mat4x3 qToScene = mat4x3(1.0);
 		if (bounce > 0 && alphaMode != 1) {   // opaque: no candidates to confirm; 2 without NVR_RT_MASK_ALPHA (FORK-RT-CORE.md's mask table)
 			rayQueryInitializeEXT(q, scene, gl_RayFlagsOpaqueEXT, alphaMode == 2 ? 0xEFu : 0xFFu, pos + p.origin.xyz, 0.0, dir, rayLength);
 			while (rayQueryProceedEXT(q)) {}
@@ -829,20 +857,39 @@ vec3 Path(vec3 dir) {
 				rayQueryInitializeEXT(q, scene, gl_RayFlagsOpaqueEXT, 0xEFu, pos + p.origin.xyz, past, dir, rayLength);
 				while (rayQueryProceedEXT(q)) {}
 			}
+			PT_TAKE_HIT(q);
 		}
 		// (2026-11-05 rtfull-gs-body) the camera's rays leave the far LOD out (NVR_RT_MASK_FAR 0x80: FarLandLOD / FarObjectLOD): where the
 		// screen has no world surface of NVR's, the game draws that distant land itself and a camera ray that met its coarse quads showed
 		// them as grey slabs (Goodsprings' hills under PTRealtime once the far ring had loaded); missing it, the ray takes the game's frame.
-		// Bounce and shadow rays keep it. (Three calls with constant masks: a variable mask cost the default path 5-8 %, section 27.)
+		// Bounce and shadow rays keep it. (Constant masks: a variable mask cost the default path 5-8 %, section 27.)
+		// (2026-11-07, a tester's "the player's head projected over the entire sky") the camera's rays also pass over the player's own body
+		// in first person (FirstPersonBody: traced for shadows and reflections, not drawn; instance custom index NVR_RT_CUSTOM_HIDDEN, as
+		// RtLampPrimary.comp). The eye sits inside that body's head, so the one camera ray through everything met the inside of the head
+		// first: where the screen has no surface (the sky) the picture was the head's inside (hair, a hat, an eye) filling the sky, and on
+		// every other pixel the traced hit never matched the screen's, so the first hit lost its real texture, normal map and glow. Two
+		// queries now: the world without cut-outs and people (0x0F: land, objects, lamp glass, lamp models; opaque), then cut-outs, people
+		// and the player's rigid parts (0x70) up to that hit, every candidate tested, the hidden ones passed over; the nearer is the hit.
 		else if (bounce == 0) {
-			rayQueryInitializeEXT(q, scene, AlphaTest() ? 0u : gl_RayFlagsOpaqueEXT, 0x7Fu, pos + p.origin.xyz, 1.0, dir, rayLength);
-			Proceed(q);
+			rayQueryInitializeEXT(q, scene, gl_RayFlagsOpaqueEXT, 0x0Fu, pos + p.origin.xyz, 1.0, dir, rayLength);
+			while (rayQueryProceedEXT(q)) {}
+			PT_TAKE_HIT(q);
+			rayQueryEXT qp;
+			rayQueryInitializeEXT(qp, scene, gl_RayFlagsNoOpaqueEXT, 0x70u, pos + p.origin.xyz, 1.0, dir, traced ? qT : rayLength);
+			while (rayQueryProceedEXT(qp)) {
+				if (rayQueryGetIntersectionTypeEXT(qp, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+				if ((rayQueryGetIntersectionInstanceCustomIndexEXT(qp, false) & NVR_RT_CUSTOM_HIDDEN) != 0u) continue;
+				if (!AlphaTest() || rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(qp, false), uint(rayQueryGetIntersectionPrimitiveIndexEXT(qp, false)),
+				                                rayQueryGetIntersectionBarycentricsEXT(qp, false)))
+					rayQueryConfirmIntersectionEXT(qp);
+			}
+			if (rayQueryGetIntersectionTypeEXT(qp, true) == gl_RayQueryCommittedIntersectionTriangleEXT) PT_TAKE_HIT(qp);
 		}
 		else {
 			rayQueryInitializeEXT(q, scene, AlphaTest() ? 0u : gl_RayFlagsOpaqueEXT, 0xFFu, pos + p.origin.xyz, 0.0, dir, rayLength);
 			Proceed(q);
+			PT_TAKE_HIT(q);
 		}
-		bool traced = rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT;
 		// (2026-11-02 b) the first hit from the screen: its colour (the land's blended layers, decals the atlas lacks) and smooth normal
 		// where the traced hit is the same surface (within 3 % or 8 units); the screen's surface alone where the rays see nothing or
 		// something else (grass, people, things not in the RT scene): it lights and bounces, with no glow of its own.
@@ -852,7 +899,7 @@ vec3 Path(vec3 dir) {
 		vec3 hit, n, v = -dir;
 		Surface surf;
 		float t;
-		if (screen && (!traced || abs(rayQueryGetIntersectionTEXT(q, true) - length(sHit)) > max(0.03 * length(sHit), 8.0))) {
+		if (screen && (!traced || abs(qT - length(sHit)) > max(0.03 * length(sHit), 8.0))) {
 			hit = sHit; n = sN; surf = sS; t = length(sHit);
 		}
 		else {
@@ -865,7 +912,7 @@ vec3 Path(vec3 dir) {
 				else if (bounce == 0 && view != 3) radiance = view == 2 || view == 4 || view >= 5 ? vec3(0.0) : Sky(dir);
 				break;
 			}
-			t = rayQueryGetIntersectionTEXT(q, true);
+			t = qT;
 			// (2026-11-03) a camera ray that meets only the far LOD (past SceneRadius: FarLandLOD / FarObjectLOD, coarse, average colours)
 			// where the screen has no world surface of NVR's: the game's own frame shows that distance better
 			// (2026-11-05 rtfull-gs-pt / -pt2) also wherever the game drew something the AlbedoBuffer did not capture (its own distant
@@ -875,9 +922,9 @@ vec3 Path(vec3 dir) {
 				radiance = pow(max(imageLoad(gFrame, gPixel).rgb, vec3(0.0)), vec3(2.2));
 				break;
 			}
-			uint instance = rayQueryGetIntersectionInstanceIdEXT(q, true), prim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, true));
-			vec2 bary = rayQueryGetIntersectionBarycentricsEXT(q, true);
-			mat4x3 toScene = rayQueryGetIntersectionObjectToWorldEXT(q, true);
+			uint instance = qInstance, prim = qPrim;
+			vec2 bary = qBary;
+			mat4x3 toScene = qToScene;
 			n = HitNormal(instance, prim, toScene, dir);
 			hit = pos + dir * t;
 #ifndef RT_NO_REAL_TEXTURES

@@ -56,7 +56,7 @@ template <> std::string SettingManager::ToString<int>(const int number) {
 }
 
 // The user config's [_Unofficial] SettingsVersion this build brings it up to (UpdateOldDefaults, below).
-static const int UnofficialSettingsVersion = 75;  // 53 was an enhanced-water step, since removed
+static const int UnofficialSettingsVersion = 76;  // 53 was an enhanced-water step, since removed
 
 // UNOFFICIAL 2026-10-30: a setting is read only when the defaults file lists it (FillNode), so a line in the user's toml that
 // this build does not know (a key from a newer or an older build, a typo) silently did nothing. Each one is logged once per
@@ -600,6 +600,15 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 	}
 	// 2026-11-01 flicker bench: deferred lamp shadows flickered with TAA's jitter where lamps sit on a surface; PrecisionBias 1 -> 4 (a saved 1, the old default, moves once).
 	if (version < 75) replace("Shaders.ShadowsInteriors.Deferred", "PrecisionBias", 1.0, 4.0, false);
+	// 2026-11-07 (test 5 testers): FirstPersonBody off by default (its shadow is the third-person pose: a "reverse shadow" cut-out on the floor;
+	// the path tracer drew the inside of the head over the sky). A saved true, the old default, goes off once.
+	if (version < 76) {
+		tomlValue* saved = UserSection("Main.Main.RayTracing");
+		if (saved && saved->contains("FirstPersonBody") && saved->at("FirstPersonBody").is_boolean() && saved->at("FirstPersonBody").as_boolean()) {
+			(*saved)["FirstPersonBody"] = false;
+			changed += std::string(changed.empty() ? "" : ", ") + "Main.Main.RayTracing.FirstPersonBody true -> false";
+		}
+	}
 	if (!changed.empty())
 		Logger::Log("UNOFFICIAL settings: old defaults saved by an earlier build moved to the new defaults: %s. "
 			"Change them in the menu and press Save if you want the old values back.", changed.c_str());

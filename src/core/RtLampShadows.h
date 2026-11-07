@@ -183,6 +183,51 @@ namespace RtLampShadows {
 	// (RtFlashTrace.comp, 1 lit / 0 blocked, screen space); Flashlight's shadow pass reads it instead of its shadow map
 	// (FlashlightShadowsRT.frag), and the shadow map is not drawn meanwhile.
 	inline int imageFlash = -1, flashShader = -1;
+	// UNOFFICIAL 2026-11-07 the first-person model's lamps (a tester's red patches on the gun outdoors, ExteriorForward): the arms, the gun and
+	// the Pip-Boy are never in the traced scene, so their lookup never matches and a lamp with no map to fall back to (outdoors, ManyLights'
+	// lamps without one) lit them fully however blocked (a red neon lamp inside its sign). RtLampEye.comp traces the table's lamps from the
+	// eye (a few rays over each lamp's disc, the trace's own masks without people); NVR reads the 256 values back two frames later (a ring of
+	// three system-memory copies: no stall) and keys them by lamp, and the first-person draws take that visibility for those lamps
+	// (PointShadowForward::SetForPass: slot -2 - v).
+	inline int imageEye = -1, eyeShader = -1;
+	inline IDirect3DTexture9* EyeTexture = nullptr;
+	inline IDirect3DSurface9* EyeSurface = nullptr;
+	inline IDirect3DSurface9* EyeSys[3] = {};
+	struct EyeSnapshot { UInt32 frame = 0; bool pending = false; int count = 0; int slot[ManyIds] = {}; const void* light[ManyIds] = {}; };
+	inline EyeSnapshot EyeRing[3];
+	inline UInt32 EyeRecorded = 0, EyeVisFrame = 0, EyeReads = 0;
+	inline std::unordered_map<const void*, float> EyeVis;
+	inline bool EyeWanted() { return Player && Player->IsFirstPerson(); }
+	// The readbacks two or more frames old: the newest becomes EyeVis (lamp -> how much of it the eye sees)
+	inline void ReadEye() {
+		const UInt32 now = TheFrameRateManager->FrameNumber;
+		for (int i = 0; i < 3; i++) {
+			EyeSnapshot& s = EyeRing[i];
+			if (!s.pending || now - s.frame < 2 || !EyeSys[i]) continue;
+			s.pending = false;
+			D3DLOCKED_RECT lock;
+			if (FAILED(EyeSys[i]->LockRect(&lock, nullptr, D3DLOCK_READONLY))) continue;
+			const float* v = (const float*)lock.pBits;
+			if (s.frame >= EyeVisFrame) {
+				EyeVis.clear();
+				for (int k = 0; k < s.count; k++) {
+					const float x = v[s.slot[k]];
+					EyeVis[s.light[k]] = x >= 0.0f && x <= 1.0f ? x : 1.0f;
+				}
+				EyeVisFrame = s.frame;
+				if (EyeReads++ % 1800 == 0) Logger::Log("UNOFFICIAL RT lamp shadows: first-person lamps from the eye: %d lamp(s) read back (frame %u)", s.count, s.frame);
+			}
+			EyeSys[i]->UnlockRect();
+		}
+	}
+	// How much of this lamp the eye sees (the first-person model's shadow for it); false: no recent answer (then as before)
+	inline bool EyeVisibility(const void* light, float& v) {
+		if (!light || EyeVis.empty() || TheFrameRateManager->FrameNumber - EyeVisFrame > 8) return false;
+		auto found = EyeVis.find(light);
+		if (found == EyeVis.end()) return false;
+		v = found->second;
+		return true;
+	}
 	inline IDirect3DTexture9* FlashTexture = nullptr;
 	inline IDirect3DSurface9* FlashSurface = nullptr;
 	inline bool FlashThisFrame = false, FlashLive = false;
@@ -416,6 +461,9 @@ namespace RtLampShadows {
 		RtConstant[1] = (std::max)(TheSettingManager->GetSettingF(kSection, "DepthTolerance"), 0.004f);	// at least the depth code's step
 		RtConstant[2] = log2f((std::max)(Traced.farZ, 2.0f)) / 4095.0f;
 		RtConstant[3] = ScreenSourceFrame || ActorsFromCubeMaps() ? 1.0f : 0.0f;	// the capsule / contact buffer: always the darker of it and the lamp's map
+		// (2026-11-07) + 1 / the result's width: PointShadowTraced's edge search reads the four neighbours one texel away where a silhouette
+		// pixel's own texel holds the other side of the edge (the shaders test w < 0.5 for the flag: the texel stays below 0.5)
+		if (TextureWidth > 2) RtConstant[3] += 1.0f / (float)TextureWidth;
 		const int debugView = TheSettingManager->GetSettingI(kSection, "DebugView");
 		// DebugView 4 (2026-10-31 ManyLights): R, the other lamps' traced share (x 5)
 		Mode = debugView == 1 ? 2.0f : debugView == 2 ? 3.0f : debugView == 3 ? 4.0f : debugView == 4 ? 5.0f : 1.0f;
@@ -542,6 +590,7 @@ namespace RtLampShadows {
 	inline void Setup() {
 		const UINT w = TheRenderManager->width, h = TheRenderManager->height;
 		imageDepth = RtCore::AddImage("NVR RT lamps depth", w, h, NVR_EXT_SHARED_R32F);
+		imageEye = RtCore::AddImage("NVR RT lamps from the eye", 256, 1, NVR_EXT_SHARED_R32F);	// (2026-11-07) RtLampEye.comp
 		imageNormals = RtCore::AddImage("NVR RT lamps normals", w, h, NVR_EXT_SHARED_RGBA16F);
 		imageResult = RtCore::AddImage("NVR RT lamps", w, h, NVR_EXT_SHARED_RG32F);
 		imageTable = RtCore::AddImage("NVR RT lamp table", TableWidth, 1, NVR_EXT_SHARED_RG32F);
@@ -768,6 +817,28 @@ namespace RtLampShadows {
 		}
 		else if (!inputsIn && (!RtCore::CopyIn(imageDepth, depth) || !RtCore::CopyIn(imageNormals, normals))) return;
 		if (!RtCore::CopyIn(imageTable, TableTexture)) return;
+		// (2026-11-07) the first-person model's lamps: last frames' answers in, this frame's eye rays out (one small pass, 256 lamps)
+		ReadEye();
+		if (imageEye >= 0 && eyeShader >= 0 && EyeWanted() && RtCore::PassesLeft() >= 3) {
+			if (!EyeTexture && SUCCEEDED(Device->CreateTexture(256, 1, 1, D3DUSAGE_RENDERTARGET, D3DFMT_R32F, D3DPOOL_DEFAULT, &EyeTexture, nullptr))) {
+				EyeTexture->GetSurfaceLevel(0, &EyeSurface);
+				for (int i = 0; i < 3; i++) if (FAILED(Device->CreateOffscreenPlainSurface(256, 1, D3DFMT_R32F, D3DPOOL_SYSTEMMEM, &EyeSys[i], nullptr))) EyeSys[i] = nullptr;
+			}
+			const int ring = EyeRecorded % 3;
+			EyeSnapshot& snap = EyeRing[ring];
+			if (EyeSurface && EyeSys[ring] && !snap.pending) {
+				PassConstants e = c;	// the trace's own masks, stop, LampModelDistance, alpha test and eye (origin)
+				e.size[0] = 256.0f; e.size[1] = 1.0f;
+				const int eyeImages[9] = { imageDepth, imageNormals, imageResult, imageTable, imageEye, imageDepth, imageDepth, imageDepth, AlphaImage() };
+				if (RtCore::AddPass(eyeShader, eyeImages, 9, 0x10, &e, sizeof(e), 4, 1) && RtCore::CopyOut(imageEye, EyeSurface, 256, 1) &&
+					SUCCEEDED(Device->GetRenderTargetData(EyeSurface, EyeSys[ring]))) {
+					snap.frame = TheFrameRateManager->FrameNumber; snap.pending = true; snap.count = 0;
+					for (int i = 0; i < LampCount && snap.count < ManyIds; i++)
+						if (Lamps[i].light && Lamps[i].slot >= 0 && Lamps[i].slot < 256) { snap.slot[snap.count] = Lamps[i].slot; snap.light[snap.count] = Lamps[i].light; snap.count++; }
+					EyeRecorded++;
+				}
+			}
+		}
 		// Exteriors: the mask variant, its result copied out for ApplyExteriorMask this frame; nothing is reprojected
 		if (TheShaderManager->GameState.isExterior && !ExteriorForwardFrame) {
 			static UINT maskWidth = 0, maskHeight = 0;
@@ -1156,6 +1227,7 @@ namespace RtLampShadows {
 		manyShader = RtCore::AddShader("RtLampTraceMany");
 		restirShader = RtCore::AddShader("RtLampTraceRestir");
 		primaryShader = RtCore::AddShader("RtLampPrimary");	// (2026-11-07) SameFrame
+		eyeShader = RtCore::AddShader("RtLampEye");	// (2026-11-07) the first-person model's lamps
 		RtCore::AddUser(TheUser);
 	}
 

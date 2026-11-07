@@ -1192,6 +1192,8 @@ static bool sceneCameraMove(Ctx& c) {
 #include "rt_host_refl.inl"	// (2026-11-07) the RT reflection denoiser vs the exact glossy reflection (docs/next/RT-REFLECTION-DENOISER.md)
 #include "rt_host_light.inl"	// (2026-11-06) the path tracer's lamp falloff: game vs physical (PTLampFalloff)	// (2026-11-06) chain-link: fine cut-outs through the 64 x 64 atlas slot
 #include "rt_host_pt.inl"	// (2026-11-07) the path tracer's quality scenes: ReSTIR DI (PTRestirDI)
+#include "rt_host_pthidden.inl"	// (2026-11-07) the path tracer's camera rays pass over the hidden first-person body
+#include "rt_host_denoisepeople.inl"	// (2026-11-07) RtDenoise RGB: PeopleHistory (the path tracer's dialogue ghosting)
 
 // ------------------------------------------------------------------------------------------------------------------------------
 int main(int argc, char** argv) {
@@ -1282,9 +1284,11 @@ int main(int argc, char** argv) {
 		{ "sigmalamps", "RT shadow denoiser, lamps of physical size vs the exact soft shadow, still + moving (RtLampTraceSigma + RtShadowDenoise)", [&] { return sceneSigmaLamps(c); } },
 		{ "sigmasun", "RT shadow denoiser on the sun (10 deg disc + the real 0.53 deg) vs the exact soft shadow, still + moving (RtSunShadow + RtShadowDenoise)", [&] { return sceneSigmaSun(c); } },
 		{ "refldenoise", "RT reflection denoiser (FFX port / ours) vs the old Temporal + Blur and the exact glossy reflection, still + slide + turn (RtReflDenoise*)", [&] { return sceneReflDenoise(c); } },
+		{ "denoisepeople", "RtDenoise RGB temporal (the path tracer's): people's pixels keep PeopleHistory frames (dialogue ghosting)", [&] { return sceneDenoisePeople(c); } },
 		{ "lamplookup", "the lamp shaders' lookup PointShadowTraced (D3D9 ps_3_0)", [&] { return sceneLampLookup(c); } },
 		{ "scenepick", "RtCore's scene picking rules + record packing (RtScenePick.h)", [&] { return sceneScenePick(c); } },
 		{ "movingrest", "ManyLights histories under a walking person: MovingCasterHistory 0 vs 2 (RtLampTraceMany + RtLampTraceRestir)", [&] { return sceneMovingRest(c); } },
+		{ "pthidden", "path tracer camera rays vs the hidden first-person body round the eye (the head over the sky; RtPathTrace)", [&] { return scenePtHidden(c); } },
 		{ "sameframe", "SameFrame lamp shadows: camera rays + trace in one exchange, a walking caster, the hidden first-person body (RtLampPrimary + RtLampTrace + PointShadowTraced)", [&] { return sceneSameFrame(c); } },
 	};
 	int failed = 0, ran = 0;

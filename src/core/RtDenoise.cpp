@@ -242,7 +242,7 @@ namespace RtDenoise {
 			tried = true;
 			temporal = Make("RtDenoiseTemporal", 5, 192);	// (2026-11-03: + rect)	// 2026-10-31: + motion, backbone (stand-ins when off)
 			atrous = Make("RtDenoiseAtrous", 3, 48);
-			temporalRgb = Make("RtDenoiseTemporalRgb", 6, 192, 2);
+			temporalRgb = Make("RtDenoiseTemporalRgb", 7, 192, 2);	// (2026-11-07: + the captured normals, PeopleHistory)
 			backbonePipe = Make("RtBackbone", 3, 160);
 			atrousRgb = Make("RtDenoiseAtrousRgb", 3, 48, 2);
 		}
@@ -288,7 +288,8 @@ namespace RtDenoise {
 			float rect[4];		// (2026-11-03) xy this frame's RenderRect scale, zw last frame's
 			UInt32 samplerIndex;
 			float clampK;		// (2026-11-06) RGB mode: HistoryClamp
-			UInt32 pad[2];
+			float peopleCap;	// (2026-11-07) RGB mode: PeopleHistory (0 off)
+			UInt32 pad;
 		} t = {};
 		t.rect[0] = scaleX; t.rect[1] = scaleY; t.rect[2] = rescaled ? scaleX : d->lastScale[0]; t.rect[3] = rescaled ? scaleY : d->lastScale[1];
 		d->lastScale[0] = scaleX; d->lastScale[1] = scaleY;
@@ -344,8 +345,11 @@ namespace RtDenoise {
 		else {
 			IDirect3DSurface9* nowA = Surface(d->history[now]);
 			IDirect3DSurface9* nowB = Surface(d->historyB[now]);
-			IUnknown* temporalImages[6] = { Noisy, d->history[last], depth, d->historyB[last], motionImage, sharedImage };
-			ok = nowA && nowB && Draw(temporalRgb, nowA, temporalImages, 6, &t, sizeof(t), nowB);
+			// (2026-11-07) PeopleHistory: the captured normals mark people's pixels (alpha > 1.5); without them (CapturedNormals off) no cap
+			IDirect3DBaseTexture9* captured = S.PeopleHistory > 0.0f ? Texture("TESR_CapturedNormalsBuffer") : nullptr;
+			t.peopleCap = captured ? S.PeopleHistory : 0.0f;
+			IUnknown* temporalImages[7] = { Noisy, d->history[last], depth, d->historyB[last], motionImage, sharedImage, captured ? (IUnknown*)captured : (IUnknown*)depth };
+			ok = nowA && nowB && Draw(temporalRgb, nowA, temporalImages, 7, &t, sizeof(t), nowB);
 			if (nowA) nowA->Release();
 			if (nowB) nowB->Release();
 			IDirect3DTexture9* sourceA = d->history[now];

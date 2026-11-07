@@ -51,6 +51,7 @@ namespace {
 		float	denoiseClamp = 0.0f;	// (2026-11-06) PTDenoiseClamp
 		int		denoiseIterations = 2;	// PTDenoiseIterations / PTDenoiseHistory (2026-11-04 c, test only): PTDenoise's a-trous passes (2: section 30; was 4), history frames
 		float	denoiseHistory = 32.0f;
+		float	denoisePeopleHistory = 4.0f;	// (2026-11-07) PTDenoisePeopleHistory: people's pixels keep at most this many frames (0 off)
 		bool	restirGI = false;		// PTRestirGI (2026-11-04 d): ReSTIR GI on the first bounce (with PTDenoise; RtPathTraceGI.spv + RtRestirGI.spv)
 		float	restirMaxM = 20.0f, restirSpatial = 4.0f, restirRadius = 16.0f, restirDepth = 0.03f, restirNormal = 0.9f;	// its test keys
 		// UNOFFICIAL 2026-11-07 PTRestirDI (RT-PATH-TRACING.md section 47): ReSTIR DI for the lamps at the first hit, reservoirs in the helper's
@@ -169,6 +170,7 @@ namespace {
 		S.denoiseIterations = i("PTDenoiseIterations", 0, 5);
 		S.denoiseHistory = f("PTDenoiseHistory", 1.0f, 256.0f);
 		S.denoiseClamp = f("PTDenoiseClamp", 0.0f, 8.0f);
+		S.denoisePeopleHistory = f("PTDenoisePeopleHistory", 0.0f, 256.0f);
 		S.lastSky = i("PTLastSky", -1, 1);
 		S.lastBounce = i("PTLastBounce", -1, 1);
 		S.lampFalloff = i("PTLampFalloff", 0, 1);
@@ -241,7 +243,7 @@ namespace {
 		struct Lamp { D3DXVECTOR4 pos, colour; float distance; };
 		// (2026-11-06 c) PTLampFalloff 1: the lamp reaches twice as far (the inverse-square tail; RtPathTrace.comp LampFall) and its colour is
 		// x PTLampGain; the cull, the lamp image and the light grid all see the stretched reach
-		auto physical = [&](Lamp& l) { if (S.lampFalloff == 1) { l.pos.w *= 2.0f; l.colour *= S.lampGain; l.distance = (std::max)(D3DXVec3Length((const D3DXVECTOR3*)&l.pos) - l.pos.w, 0.0f); } };
+		auto physical = [&](Lamp& l) { if (S.lampFalloff == 1) { l.pos.w *= 2.0f; { const float code = l.colour.w; l.colour *= S.lampGain; l.colour.w = code; } l.distance = (std::max)(D3DXVec3Length((const D3DXVECTOR3*)&l.pos) - l.pos.w, 0.0f); } };
 		Lamp lamps[ShadowCubeMapsMax + TrackedLightsMax];
 		int found = 0;
 		const D3DXVECTOR4& eye = TheRenderManager->CameraPosition;
@@ -261,6 +263,34 @@ namespace {
 				(std::max)(D3DXVec3Length(&rel) - p.w, 0.0f) };
 		};
 		ShaderManager* sm = TheShaderManager;
+		// UNOFFICIAL 2026-11-07 (a tester's video: the flashlight under PTRealtime lit only a rubble pile and a curb, the pixels where the
+		// picture falls back to the game's frame) the flashlight is NVR's own spot light (Flashlight.cpp PublishLightConstants: the shared
+		// TESR_SpotLight* constants; FlashlightDeferred draws it on the G-buffer), not a game lamp, so the path tracer never had it. It is a
+		// lamp here, its cone in the colour's w: 1 + (angle x 512 + u) x 512 + v, the cone's half-angle in whole degrees and its direction
+		// octahedral in 9 bits each (an exact integer below 2^24; RtPathTrace.comp LampSpot); 0 = a plain lamp.
+		Lamp flash = {};
+		bool haveFlash = false;
+		{
+			const D3DXVECTOR4& fp = sm->SpotLightPosition[0];
+			const D3DXVECTOR4& fd = sm->SpotLightDirection[0];
+			const D3DXVECTOR4& fc = sm->SpotLightColor[0];
+			const float len = sqrtf(fd.x * fd.x + fd.y * fd.y + fd.z * fd.z);
+			if (fp.w > 10.0f && fc.w > 0.0f && len > 1.0e-3f && (fc.x + fc.y + fc.z) > 0.0f) {
+				float dx = fd.x / len, dy = fd.y / len, dz = fd.z / len;
+				const float n1 = fabsf(dx) + fabsf(dy) + fabsf(dz);
+				float ox = dx / n1, oy = dy / n1;
+				if (dz < 0.0f) { const float tx = (1.0f - fabsf(oy)) * (ox >= 0.0f ? 1.0f : -1.0f), ty = (1.0f - fabsf(ox)) * (oy >= 0.0f ? 1.0f : -1.0f); ox = tx; oy = ty; }
+				const UInt32 qu = (UInt32)(std::min)((std::max)((ox * 0.5f + 0.5f) * 511.0f + 0.5f, 0.0f), 511.0f);
+				const UInt32 qv = (UInt32)(std::min)((std::max)((oy * 0.5f + 0.5f) * 511.0f + 0.5f, 0.0f), 511.0f);
+				const UInt32 angle = (UInt32)(std::min)((std::max)(fd.w + 0.5f, 1.0f), 63.0f);
+				const D3DXVECTOR3 rel(fp.x - eye.x, fp.y - eye.y, fp.z - eye.z);
+				const float ls = GameLightScale();
+				flash.pos = D3DXVECTOR4(rel.x, rel.y, rel.z, fp.w);
+				flash.colour = D3DXVECTOR4(Lin(fc.x) * fc.w * ls, Lin(fc.y) * fc.w * ls, Lin(fc.z) * fc.w * ls, (float)(1u + (angle * 512u + qu) * 512u + qv));
+				flash.distance = 0.0f;	// at the eye: always the first lamp
+				haveFlash = true;
+			}
+		}
 		// (rtspec) PTGameLamps 4: the game's lamp table's active lamps this frame (the deferred pass's lamps), nearest first, kLampsMax at most
 		// (2026-11-07) PTAllLamps: every table lamp that is not hidden, not only those the game lit this view with (section 47)
 		const std::vector<ManyLamps::ActiveLamp>& source = S.allLamps > 0 ? ManyLamps::AllLamps : ManyLamps::ActiveLamps;
@@ -275,6 +305,7 @@ namespace {
 					(std::max)(D3DXVec3Length(&rel) - a.reach, 0.0f) });
 			}
 			for (Lamp& l : table) physical(l);
+			if (haveFlash) { Lamp f = flash; physical(f); f.distance = -1.0f; table.push_back(f); }	// (2026-11-07) the flashlight
 			std::sort(table.begin(), table.end(), [](const Lamp& a, const Lamp& b) { return a.distance < b.distance; });
 			lampCount = (std::min)((int)table.size(), kLampsMax);
 			for (int i = 0; i < lampCount; i++) { memcpy(lampData[i].pos, &table[i].pos, 16); memcpy(lampData[i].colour, &table[i].colour, 16); }
@@ -282,9 +313,11 @@ namespace {
 			for (int i = 0; i < first; i++) { memcpy(c.lampPos[i], &table[i].pos, 16); memcpy(c.lampColor[i], &table[i].colour, 16); }
 			return first;
 		}
+		if (haveFlash) lamps[found++] = flash;	// (2026-11-07) first: add() then leaves out a game lamp at its place (the Pip-Boy light on the beam)
 		for (int s = 0; s < ShadowCubeMapsMax; s++) add(sm->BatchLightPosition[s], sm->BatchLightColor[s]);
 		for (int t = 0; t < TrackedLightsMax; t++) add(sm->LightPosition[t], sm->LightColor[ShadowCubeMapsScreen + t]);
 		for (int i = 0; i < found; i++) physical(lamps[i]);
+		if (haveFlash) lamps[0].distance = -1.0f;	// the flashlight: always the first lamp
 		std::sort(lamps, lamps + found, [](const Lamp& a, const Lamp& b) { return a.distance < b.distance; });
 		lampCount = (std::min)(found, kLampsMax);	// (2026-11-03) all of them for the lamp image
 		for (int i = 0; i < lampCount; i++) { memcpy(lampData[i].pos, &lamps[i].pos, 16); memcpy(lampData[i].colour, &lamps[i].colour, 16); }
@@ -554,6 +587,10 @@ namespace {
 					memcpy(t + 8 * (lampCount + i), v, sizeof(v));
 				}
 				if (restir || cache || energy) FrameRow(c, (float*)((char*)r.pBits + (size_t)r.Pitch * kFrameRow), t, tw, th);
+				{	// (2026-11-07) the flashlight's cone (lamp 0) in the frame row's texel 15 (RtPathTrace.comp LampSpot; RtRestirRow fills 0-14)
+					float* row = (float*)((char*)r.pBits + (size_t)r.Pitch * kFrameRow);
+					row[30] = lampCount > 0 ? lampData[0].colour[3] : 0.0f; row[31] = 0.0f;
+				}
 				lampTexture->UnlockRect(0);
 				if (RtCore::CopyIn(imageLamps, lampTexture)) { flags |= 1024u | (gridOn ? 4096u : 0u) | (restir ? 262144u : 0u) | (cache ? 524288u : 0u) | (restir || cache || energy ? 1048576u : 0u); c.misc[0] = (float)lampCount; c.rect[2] = (float)glowCount; }
 				else restirState.valid = false;
@@ -635,16 +672,17 @@ namespace {
 		std::vector<char> spirv;
 		ID3D9NvrExt* ext = DxvkCompute::Extension();
 		if (!ext || !DxvkCompute::LoadSpirv("RtPathTraceShow", spirv)) return nullptr;
-		NVR_EXT_BINDING_DESC bindings[4] = {
+		NVR_EXT_BINDING_DESC bindings[5] = {
 			{ 1, 0, NVR_EXT_BIND_SAMPLED_IMAGE, 0, NVR_EXT_VIEW_2D, FALSE, 0 },
 			{ 1, 1, NVR_EXT_BIND_SAMPLED_IMAGE, 1, NVR_EXT_VIEW_2D, FALSE, 0 },
 			{ 1, 2, NVR_EXT_BIND_SAMPLED_IMAGE, 2, NVR_EXT_VIEW_2D, FALSE, 0 },
+			{ 1, 3, NVR_EXT_BIND_SAMPLED_IMAGE, 3, NVR_EXT_VIEW_2D, FALSE, 0 },	// (2026-11-07) TESR_DepthBufferViewModel
 			{ 0, 0, NVR_EXT_BIND_SAMPLER, 0, NVR_EXT_VIEW_2D, FALSE, 4 },
 		};
 		NVR_EXT_GRAPHICS_PIPELINE_DESC desc = {};
 		desc.pFragmentSpirv = spirv.data();
 		desc.FragmentSpirvSize = (UINT)spirv.size();
-		desc.BindingCount = 4;
+		desc.BindingCount = 5;
 		desc.pBindings = bindings;
 		desc.PushConstantSize = 32;
 		desc.UsesSamplerHeap = TRUE;
@@ -693,6 +731,7 @@ namespace {
 			settings.Channels = 3;
 			settings.IgnoreRr = true;
 			settings.MaxHistory = S.denoiseHistory;
+			settings.PeopleHistory = S.denoisePeopleHistory;	// (2026-11-07) a tester's dialogue ghosting: a talking face, 32 frames of history
 			settings.HistoryClamp = S.denoiseClamp;	// (2026-11-06)	// (2026-11-04 c: test keys; 32 frames as before, 2 a-trous passes since section 30, was 4)
 			settings.Iterations = S.denoiseIterations;
 			settings.ValueSigma = S.denoiseSigma;	// (2026-11-06) PTDenoiseSigma (4 = RtDenoise's default, as before)
@@ -717,16 +756,24 @@ namespace {
 		// (2026-11-03) the overlay after a RenderScale upscale reads the rect-layout trace at uv x scale (into the scene: texel for texel)
 		const float uvScale[2] = { hdr ? 1.0f : tracedScale[0], hdr ? 1.0f : tracedScale[1] };
 		memcpy(push.pad, uvScale, sizeof(uvScale));
-		NVR_EXT_RESOURCE_BINDING bindings[4] = {};
+		// UNOFFICIAL 2026-11-07 (testers: "the first-person model is see-through", hands that show the mirror behind them, the gun gone
+		// under PTRealtime) the first-person model (arms, gun, Pip-Boy) is drawn before this point but is not in the traced scene, and the
+		// G-buffer the trace starts from is the world's: under it the trace saw the world behind, and this pass painted that over the
+		// model. Now the model's pixels keep the game's own (TESR_DepthBufferViewModel: 1 = normal depth, the model where < 0.9; 2 =
+		// reversed, where > 0.01, as Reflections' IsWeapon)
+		IDirect3DTexture9* viewModel = TheTextureManager->DepthTextureViewModel;
+		push.pad[2] = viewModel ? (TheRenderManager->DepthConstants.z == 0.0f ? 1u : 2u) : 0u;
+		NVR_EXT_RESOURCE_BINDING bindings[5] = {};
 		bindings[0].Slot = 0; bindings[0].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[0].pResource = shown;
 		bindings[1].Slot = 1; bindings[1].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[1].pResource = modulate ? albedoTexture : shown;
 		bindings[2].Slot = 2; bindings[2].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[2].pResource = displayTexture;	// (the raw trace: sky / frame pixels)
-		bindings[3].Slot = 0; bindings[3].Type = NVR_EXT_BIND_SAMPLER; bindings[3].pResource = point;
+		bindings[3].Slot = 3; bindings[3].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[3].pResource = viewModel ? (IDirect3DBaseTexture9*)viewModel : (IDirect3DBaseTexture9*)displayTexture;
+		bindings[4].Slot = 0; bindings[4].Type = NVR_EXT_BIND_SAMPLER; bindings[4].pResource = point;
 		NVR_EXT_DRAW_DESC draw = {};
 		draw.pPipeline = pipeline;
 		draw.TargetCount = 1;
 		draw.Targets[0].pResource = RenderTarget;
-		draw.BindingCount = 4;
+		draw.BindingCount = 5;
 		draw.pBindings = bindings;
 		draw.pPushData = &push;
 		draw.PushDataSize = sizeof(push);

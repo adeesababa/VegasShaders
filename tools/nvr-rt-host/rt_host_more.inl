@@ -952,10 +952,15 @@ static bool sceneLampLookup(Ctx& c) {
 			}
 			if (pass == 1 && !many) break;
 			if (!fillTex(pos, posB, 4) || !fillTex(slots, slotB, 1)) return false;
+			// (2026-11-07) twice: as before (c215.w 0: no edge search), then with the edge search (c215.w = 1 / the result's width, as
+			// RtLampShadows sets it): silhouette pixels whose own texel holds the other side of the edge take a neighbour with their depth.
+			// It must answer more pixels, leave fewer "another depth" ones, and never answer wrong.
+			int edgesWithout = -1;
+			for (int search = 0; search < 2; search++) {
 			// the lookup's constants, as PointShadowForward::Bind sets them (RT_ONLY: the reprojection at c200)
 			const V3 pe = camA.eye - camB.eye, ax = camA.r * camA.p00, ay = camA.u * camA.p11, aw = camA.f;
 			const float reproject[16] = { ax.x, ay.x, 0, aw.x, ax.y, ay.y, 0, aw.y, ax.z, ay.z, 0, aw.z, -dot(ax, pe), -dot(ay, pe), 0, -dot(aw, pe) };
-			const float rt[4] = { 1.0f, 0.02f, std::log2(camA.farZ) / 4095.0f, 0.0f };
+			const float rt[4] = { 1.0f, 0.02f, std::log2(camA.farZ) / 4095.0f, search ? 1.0f / S : 0.0f };
 			const float slotsC[8] = { -1, -1, -1, -1, -1, -1, -1, many ? 1.0f / 4096.0f : 1.0f / 1024.0f };
 			const float size[4] = { float(S), float(S), 1.0f / S, 1.0f / S };
 			h.dev->SetVertexShader(vsObj); h.dev->SetPixelShader(psObj);
@@ -982,7 +987,7 @@ static bool sceneLampLookup(Ctx& c) {
 			std::vector<float> got;
 			if (!readTex(h, out, got, 1)) return false;
 			// the CPU: where does B's point land in A, and what did A's trace hold for that lamp there
-			int answered = 0, checked = 0, bad = 0, notTraced = 0, off = 0, shown = 0, restAnswers = 0;
+			int answered = 0, checked = 0, bad = 0, notTraced = 0, off = 0, shown = 0, restAnswers = 0, edges = 0;
 			for (UINT p = 0; p < S * S; p++) {
 				const Want& wt = want[p];
 				if (!wt.valid || !wt.stable) continue;
@@ -1006,14 +1011,18 @@ static bool sceneLampLookup(Ctx& c) {
 					if (e.stable) for (int a = 0; a < (many ? 2 : 3); a++) if (e.slot[a] == wt.lamp) ok1 = false;
 				} else if (g <= -2.0f && g >= -3.0f) {
 					ok1 = true;   // another depth there in A (an edge the B point is hidden behind in A): allowed, counted below
+					edges++;
 				} else ok1 = false;
 				if (!ok1) { bad++; if (shown++ < 5) say("    %s pixel %u: lookup %.4f for lamp %d, expected lit %.0f (in A at %.3f %.3f)\n", many ? "ManyLights" : "48 lamps", p, g, wt.lamp, wt.lit, ua, va); }
 			}
-			const bool pass1 = bad == 0 && (pass == 1 ? restAnswers > checked / 2 : answered > checked / 2);
-			say("  lamp lookup (PointShadowTraced, %s, %s): %d pixels of B checked, %d answered from A's trace, %d not traced there, %d off A's screen, %d wrong -> %s\n",
-				many ? "ManyLights" : "RtLampTrace 48 lamps", pass == 0 ? "each pixel's strongest lamp" : "a lamp outside the top two (R)", checked, answered, notTraced, off, bad,
-				pass1 ? "ok" : "BAD");
+			const bool fewerEdges = !search || edgesWithout < 0 || edges <= edgesWithout;
+			const bool pass1 = bad == 0 && fewerEdges && (pass == 1 ? restAnswers > checked / 2 : answered > checked / 2);
+			say("  lamp lookup (PointShadowTraced, %s, %s, %s): %d pixels of B checked, %d answered from A's trace, %d not traced there, %d off A's screen, %d another depth, %d wrong -> %s\n",
+				many ? "ManyLights" : "RtLampTrace 48 lamps", pass == 0 ? "each pixel's strongest lamp" : "a lamp outside the top two (R)",
+				search ? "edge search on" : "no edge search", checked, answered, notTraced, off, edges, bad, pass1 ? "ok" : "BAD");
 			if (!pass1) { ok = false; dumpPfm(many ? "lookup_many" : "lookup_lamps", got, S, S, 1); }
+			if (!search) edgesWithout = edges;
+			}
 		}
 		releaseWorld(h, ids);
 	}

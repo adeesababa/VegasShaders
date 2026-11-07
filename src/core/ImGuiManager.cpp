@@ -3971,6 +3971,11 @@ static bool IsMovedShaderEntry(const std::string& name) {
 static std::string MenuEntryLabel(const std::string& name) {
 	if (name == "TAA") return "TAA / FSR / DLSS##TAA";
 	if (name == "SunFar") return "SunFar (mountain and flat-cloud shadow pass)##SunFar";
+	// UNOFFICIAL 2026-11-07 (user: "why is the exterior setting underneath interior"): the two shadow effects are named after the game's
+	// old split, but ShadowsInteriors is the LAMPS' shadows (indoors and, with its RT section, street lamps outdoors at night) and
+	// ShadowsExteriors the sun's; the sections keep their names in the settings files
+	if (name == "ShadowsInteriors") return "Lamp shadows (ShadowsInteriors)##ShadowsInteriors";
+	if (name == "ShadowsExteriors") return "Sun shadows (ShadowsExteriors)##ShadowsExteriors";
 	return name;
 }
 // The same for a page in the sidebar (by its full path; the section keeps its name in the settings files).

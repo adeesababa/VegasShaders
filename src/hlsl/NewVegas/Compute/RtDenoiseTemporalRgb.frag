@@ -11,6 +11,7 @@ layout(set = 1, binding = 2) uniform texture2D t_depth;      // TESR_DepthBuffer
 layout(set = 1, binding = 3) uniform texture2D t_historyB;   // last frame's output 1
 layout(set = 1, binding = 4) uniform texture2D t_motion;     // UNOFFICIAL 2026-10-31 DenoiseBackbone: as RtDenoiseTemporal.frag
 layout(set = 1, binding = 5) uniform texture2D t_backbone;
+layout(set = 1, binding = 6) uniform texture2D t_captured;   // (2026-11-07) TESR_CapturedNormalsBuffer (a stand-in when peopleCap is 0)
 
 layout(push_constant) uniform Push {
     mat4 prevViewProj;
@@ -25,7 +26,8 @@ layout(push_constant) uniform Push {
                          // zw last frame's (its history's part); 1 when off
     uint samplerIndex;
     float clampK;        // (2026-11-06) HistoryClamp: the history clamped to the new frame's 3 x 3 mean +- clampK x its deviation (0 off)
-    uint pad[2];
+    float peopleCap;     // (2026-11-07) PeopleHistory: people's pixels (captured normal alpha > 1.5) keep at most this many frames (0 off)
+    uint pad;
 } pc;
 
 layout(location = 0) in vec2 uv;
@@ -56,6 +58,10 @@ void main() {
             // a short history there (backbone.z frames, GIMovingHistory) instead of 16 frames trailing behind it
             if (pc.backbone.z > 0.5 && dot(own, own) > 0.0625) cap = min(cap, pc.backbone.z);
         }
+        // (2026-11-07) a face talks and changes expression with no motion the reprojection knows of: on people's pixels (the skin
+        // templates write captured normal alpha 2: skin, skinned armour, clothes) a short history, so the old mouth and the hat's old
+        // shadow do not trail behind (the path tracer's dialogue ghosting; PTDenoisePeopleHistory)
+        if (pc.peopleCap > 0.5 && textureLod(sampler2D(t_captured, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).a > 1.5) cap = min(cap, pc.peopleCap);
         const vec4 clip = pc.prevViewProj * vec4(p, 1.0);
         if (clip.w > 0.0) {
             const vec2 prevUv = vec2(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
