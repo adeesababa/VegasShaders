@@ -27,7 +27,7 @@ layout(push_constant) uniform Push {
     uint samplerIndex;
     float clampK;        // (2026-11-06) HistoryClamp: the history clamped to the new frame's 3 x 3 mean +- clampK x its deviation (0 off)
     float peopleCap;     // (2026-11-07) PeopleHistory: people's pixels (captured normal alpha > 1.5) keep at most this many frames (0 off)
-    uint pad;
+    float antiLag;       // (2026-11-07) AntiLag: k, the fast history's window in standard errors (0 off)
 } pc;
 
 layout(location = 0) in vec2 uv;
@@ -42,7 +42,8 @@ void main() {
     const float l = luma(value);
     const float viewZ = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).r * pc.forward.w;
     vec4 a = vec4(value, 1.0);
-    vec4 b = vec4(l * l, viewZ, 0.0, 0.0);
+    // b: z / w (2026-11-07) the FAST history (AntiLag): its luminance mean and second moment over the last kFast frames
+    vec4 b = vec4(l * l, viewZ, l, l * l);
     // (2026-10-31, rt-ao-sky) at half size (backbone.w 1) the mask over this pixel's 2 x 2 full-size pixels (uv sits on their corner):
     // a thin newly seen edge is not missed by the one tap a point sample takes
     const bool fresh = pc.backbone.y > 0.5 && (pc.backbone.w > 0.5
@@ -82,6 +83,27 @@ void main() {
                         m1 /= 9.0; m2 /= 9.0;
                         const vec3 dev = sqrt(max(m2 - m1 * m1, vec3(0.0)));
                         ha.rgb = clamp(ha.rgb, max(m1 - pc.clampK * dev, vec3(0.0)), m1 + pc.clampK * dev);
+                    }
+                    // (2026-11-07) AntiLag (as NVIDIA NRD ReBLUR's): a fast history (kFast frames) beside the long one. Where the long
+                    // history's luminance leaves the fast mean's window (k standard errors of that mean: the LONG history's per-sample
+                    // spread / sqrt(kFast), + 2 %), the light really changed there (a shadow moved, a lamp went on, something walked off):
+                    // the long history is pulled to the window's edge and restarts at kFast frames, so a trail lasts a few frames, not
+                    // PTDenoiseHistory. (Simulated 2026-11-07, 20000 pixels: a 0 -> 1 step reaches 0.70 after 6 frames, 0.17 without; a still
+                    // Bernoulli 0.3 pixel keeps mean 0.3000 and the same noise. The fast history's OWN spread was 3x slower: a step inflates it.
+                    // The old 3 x 3 clamp of the raw sample darkened the picture 5 %.)
+                    const float kFast = 4.0;
+                    const float fastLen = min(ha.a, kFast - 1.0) + 1.0;
+                    const float fastL = mix(hb.b, l, 1.0 / fastLen), fastL2 = mix(hb.a, l * l, 1.0 / fastLen);
+                    b.b = fastL; b.a = fastL2;
+                    if (pc.antiLag > 0.0) {
+                        const float hl = luma(ha.rgb);
+                        const float sigma = sqrt(max(hb.r - hl * hl, 0.0));
+                        const float window = pc.antiLag * sigma * inversesqrt(kFast) + 0.02 * fastL + 1.0e-4;
+                        if (abs(hl - fastL) > window) {
+                            const float target = clamp(hl, fastL - window, fastL + window);
+                            ha.rgb = hl > 1.0e-6 ? ha.rgb * (target / hl) : vec3(target);
+                            cap = min(cap, kFast);
+                        }
                     }
                     const float length = min(min(ha.a, cap) + 1.0, pc.params.x);
                     const float alpha = 1.0 / length;

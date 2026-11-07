@@ -49,7 +49,7 @@ vec3 rtHitAlbedo(uint instance, uint primitive, vec2 bary) {
 #ifndef RT_NO_REAL_TEXTURES
 	if (rtHitHasTexcoords(instance)) {	// (2026-11-07) the game's own texture, filtered, its mip by the footprint (rtConeWidth)
 		const uint id = rtSlotTextures(records[instance].flags).x;
-		if (id != 0u) return rtTexToLinear(rtTexSample(id, rtHitTexcoord(instance, primitive, bary), rtTexLod(id, instance, primitive)).rgb);
+		if (id != 0u) return rtTexToLinear(rtTexSampleHit(id, rtHitTexcoord(instance, primitive, bary), instance, primitive).rgb);
 	}
 #endif
 #ifdef RT_ALBEDO_ATLAS
@@ -77,7 +77,7 @@ vec3 rtHitGlow(uint instance, uint primitive, vec2 bary) {
 #ifndef RT_NO_REAL_TEXTURES
 	if (rtHitHasTexcoords(instance)) {	// (2026-11-07) the real glow map
 		const uint id = rtSlotTextures(records[instance].flags).z;
-		if (id != 0u) return rtTexToLinear(rtTexSample(id, rtHitTexcoord(instance, primitive, bary), rtTexLod(id, instance, primitive)).rgb);
+		if (id != 0u) return rtTexToLinear(rtTexSampleHit(id, rtHitTexcoord(instance, primitive, bary), instance, primitive).rgb);
 	}
 #endif
 #ifdef RT_GLOW_ATLAS
@@ -108,7 +108,7 @@ vec3 rtHitNormalMapped(uint instance, uint primitive, vec2 bary, vec3 n, mat3 to
 #ifndef RT_NO_REAL_TEXTURES
 	{	// (2026-11-07) the real normal map (as stored, not sRGB)
 		const uint id = rtSlotTextures(records[instance].flags).y;
-		if (id != 0u) m = rtTexSample(id, uv, rtTexLod(id, instance, primitive)).rgb;
+		if (id != 0u) m = rtTexSampleHit(id, uv, instance, primitive).rgb;
 	}
 #endif
 	if (dot(m, m) < 1.0e-4) return n;

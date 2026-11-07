@@ -32,6 +32,12 @@ namespace RtDenoise {
 										// TESR_CapturedNormalsBuffer alpha > 1.5) keep at most this many frames of history (0 = no cap). A talking
 										// face changes shape with no motion the reprojection knows of (lip-sync, expressions): 32 frames of the
 										// path tracer's light there left a second mouth and the hat's old shadow trailing (PTDenoisePeopleHistory)
+		IDirect3DBaseTexture9* Guide = nullptr;			// UNOFFICIAL 2026-11-07 (RGB mode): the game's lit frame (the scene as stored) and the
+		IDirect3DBaseTexture9* GuideAlbedo = nullptr;	// first surface's colour: the a-trous passes stop at the game's own shading edges
+		float	GuideSigma = 0.0f;						// (their ratio; this relative difference weighs a tap down by 1 / e; 0 = off)
+		float	AntiLag = 0.0f;			// UNOFFICIAL 2026-11-07 (RGB mode): a fast history (4 frames) beside the long one; where the long one's
+										// luminance leaves the fast mean's window (this many standard errors; 0 = off) it is clamped and restarts
+										// at 6 frames: trails clear in a few frames (NRD ReBLUR's anti-lag; PTDenoiseAntiLag)
 		int		MovingHistory = 0;		// UNOFFICIAL 2026-10-31 (RGB mode, with DenoiseBackbone and B1's object motion): pixels whose surface moves
 										// itself (> 0.25 units a frame) keep at most this many frames of history (0 = no cap; RT GI: GIMovingHistory)
 	};

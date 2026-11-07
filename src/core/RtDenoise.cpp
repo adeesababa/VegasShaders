@@ -244,7 +244,7 @@ namespace RtDenoise {
 			atrous = Make("RtDenoiseAtrous", 3, 48);
 			temporalRgb = Make("RtDenoiseTemporalRgb", 7, 192, 2);	// (2026-11-07: + the captured normals, PeopleHistory)
 			backbonePipe = Make("RtBackbone", 3, 160);
-			atrousRgb = Make("RtDenoiseAtrousRgb", 3, 48, 2);
+			atrousRgb = Make("RtDenoiseAtrousRgb", 5, 48, 2);	// (2026-11-07: + the guide frame and albedo)
 		}
 		const bool rgb = S.Channels == 3;
 		if (rgb && (!temporalRgb || !atrousRgb)) return false;
@@ -289,7 +289,7 @@ namespace RtDenoise {
 			UInt32 samplerIndex;
 			float clampK;		// (2026-11-06) RGB mode: HistoryClamp
 			float peopleCap;	// (2026-11-07) RGB mode: PeopleHistory (0 off)
-			UInt32 pad;
+			float antiLag;		// (2026-11-07) RGB mode: AntiLag (0 off)
 		} t = {};
 		t.rect[0] = scaleX; t.rect[1] = scaleY; t.rect[2] = rescaled ? scaleX : d->lastScale[0]; t.rect[3] = rescaled ? scaleY : d->lastScale[1];
 		d->lastScale[0] = scaleX; d->lastScale[1] = scaleY;
@@ -319,7 +319,7 @@ namespace RtDenoise {
 		t.backbone[3] = shared && scale == 2 ? 1.0f : 0.0f;	// 2026-10-31 (rt-ao-sky) half size: the mask over the pixel's 2 x 2 full-size ones
 		IUnknown* motionImage = motion ? (IUnknown*)ObjectMotion::Texture : (IUnknown*)depth;
 		IUnknown* sharedImage = shared ? (IUnknown*)shared : (IUnknown*)depth;
-		struct { float params[4], size[4]; UInt32 samplerIndex, pad[3]; } a = {};
+		struct { float params[4], size[4]; UInt32 samplerIndex; float guideSigma; UInt32 pad[2]; } a = {};	// (guideSigma: RGB mode only)
 		a.params[1] = S.DepthSigma; a.params[2] = S.NormalPower; a.params[3] = S.ValueSigma;
 		a.size[0] = 1.0f / w; a.size[1] = 1.0f / h; a.size[2] = S.Ids ? 1.0f : 0.0f; a.size[3] = S.Kernel == 3 ? 1.0f : 0.0f;
 		const int iterations = (std::max)(0, (std::min)(S.Iterations, 5));
@@ -348,6 +348,7 @@ namespace RtDenoise {
 			// (2026-11-07) PeopleHistory: the captured normals mark people's pixels (alpha > 1.5); without them (CapturedNormals off) no cap
 			IDirect3DBaseTexture9* captured = S.PeopleHistory > 0.0f ? Texture("TESR_CapturedNormalsBuffer") : nullptr;
 			t.peopleCap = captured ? S.PeopleHistory : 0.0f;
+			t.antiLag = (std::max)(S.AntiLag, 0.0f);
 			IUnknown* temporalImages[7] = { Noisy, d->history[last], depth, d->historyB[last], motionImage, sharedImage, captured ? (IUnknown*)captured : (IUnknown*)depth };
 			ok = nowA && nowB && Draw(temporalRgb, nowA, temporalImages, 7, &t, sizeof(t), nowB);
 			if (nowA) nowA->Release();
@@ -360,8 +361,11 @@ namespace RtDenoise {
 				IDirect3DSurface9* targetA = lastPass ? nullptr : Surface(d->chain[i & 1]);
 				IDirect3DSurface9* targetB = lastPass ? nullptr : Surface(d->chainB[i & 1]);
 				a.params[0] = iterations ? (float)(1 << i) : 0.0f;
-				IUnknown* images[3] = { sourceA, normals, sourceB };
-				ok = Draw(atrousRgb, lastPass ? Output : targetA, images, 3, &a, sizeof(a), lastPass ? scratch : targetB);
+				// (2026-11-07) the guide: the game's frame and the first surface's colour (stand-ins and sigma 0 when not given)
+				const bool guide = rgb && S.Guide && S.GuideAlbedo && S.GuideSigma > 0.0f;
+				a.guideSigma = guide ? S.GuideSigma : 0.0f;
+				IUnknown* images[5] = { sourceA, normals, sourceB, guide ? (IUnknown*)S.Guide : (IUnknown*)sourceA, guide ? (IUnknown*)S.GuideAlbedo : (IUnknown*)sourceA };
+				ok = Draw(atrousRgb, lastPass ? Output : targetA, images, 5, &a, sizeof(a), lastPass ? scratch : targetB);
 				if (targetA) targetA->Release();
 				if (targetB) targetB->Release();
 				sourceA = d->chain[i & 1];

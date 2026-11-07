@@ -240,6 +240,7 @@ void main() {
 		// (2026-11-07) the real textures' mip: a full-size pixel's footprint carried to the hit (eye -> surface -> hit), widened by the
 		// surface's roughness squared (the reflection lobe's GGX alpha), so a mirror shows the texture sharp and a rough floor its coarse mips (no speckle)
 		rtConeWidth = (length(surface - p.origin.xyz) + t) * (length(p.up.xyz) / max(p.size.y, 1.0)) + t * roughness * roughness * 0.5;	// (the lobe's width goes with GGX alpha = roughness^2: a 0.02 mirror is sharp)
+		rtConeDir = dir; rtConeToScene = mat3(rayQueryGetIntersectionObjectToWorldEXT(q, true));	// (2026-11-07) anisotropic filtering (RtTextures.glsl)
 #endif
 		albedo = rtHitAlbedo(hitInstance, uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, true)), rayQueryGetIntersectionBarycentricsEXT(q, true));
 		flags |= 2u;

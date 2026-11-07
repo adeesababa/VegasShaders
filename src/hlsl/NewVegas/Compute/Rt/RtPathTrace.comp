@@ -842,6 +842,14 @@ vec3 Path(vec3 dir) {
 		// (two calls, not variable flags / mask: one call with them cost the default path 5-8 % in helper replays)
 		const int alphaMode = int(p.rect.w + 0.5);   // PTBounceAlpha: 1 tested as the camera's rays, 0 cut-outs solid, 2 left out, 3 the nearest card's texel
 		const float rayLength = bounce > 0 && p.grid[2].z > 0.0 ? p.grid[2].z : p.misc.z;   // PTBounceDistance (0: misc.z)
+		// (2026-11-07, a tester's video: dotted grey squares round a tree against the sky, smearing as the camera turned) where the
+		// screen has no surface of its own (the sky: the G-buffer's depth at the far plane), the game's frame is the camera ray's answer:
+		// the traced scene holds things the game does not draw there (the tree's leaf cards, whose hashed cut-out test made each a
+		// dotted square; the player's own body in first person), and the screen is the truth for what the camera sees
+		if (bounce == 0 && GBuffer() && ScreenFrame() && view != 2 && view != 3 && view != 4 && view < 5) {
+			const float d0 = imageLoad(gDepth, gPixel).r;
+			if (!(d0 > 0.0 && d0 < 0.9999)) { radiance = pow(max(imageLoad(gFrame, gPixel).rgb, vec3(0.0)), vec3(2.2)); break; }
+		}
 		bool traced = false;
 		float qT = 0.0;
 		uint qInstance = 0u, qPrim = 0u;
@@ -931,6 +939,8 @@ vec3 Path(vec3 dir) {
 			// (2026-11-07) the ray's footprint for the real textures' mip: a pixel's width along the camera ray, then the bounces'
 			// lobes (diffuse-wide: half their length), so far and bounced hits read coarse mips (no speckle), near ones the full texture
 			rtConeWidth = bounce == 0 ? t * 2.0 * length(p.up.xyz) * p.size.w : ptFirstT * 2.0 * length(p.up.xyz) * p.size.w + (ptPath + t) * 0.5;
+			// (2026-11-07) anisotropic filtering along the ray's tilt (RtTextures.glsl rtTexSampleHit); flag 2097152 (the RT host's A/B): one mip
+			rtConeDir = (uint(p.accum.w) & 2097152u) != 0u ? vec3(0.0) : dir; rtConeToScene = mat3(toScene);
 #endif
 			surf = HitSurface(clamp(AlbedoAtlas() ? rtHitAlbedo(instance, prim, bary) : records[instance].albedo.rgb, 0.0, 1.0), instance);
 			if (screen) { n = sN; surf = sS; }   // the same surface: the screen's colour, normal and material, the traced point

@@ -9,13 +9,25 @@
 layout(set = 1, binding = 0) uniform texture2D t_a;
 layout(set = 1, binding = 1) uniform texture2D t_normals;
 layout(set = 1, binding = 2) uniform texture2D t_b;
+// (2026-11-07) Settings.Guide: the game's own lit frame (as stored in the scene: x^(1/2.2)) and the first surface's colour (linear); their
+// ratio is the game's shading (normal maps, cracks, creases), and a tap whose shading differs from this pixel's is weighed down, so the
+// smoothing stops at the edges the game's picture shows instead of only where the smooth normals or the depth change (stand-ins when off)
+layout(set = 1, binding = 3) uniform texture2D t_guideFrame;
+layout(set = 1, binding = 4) uniform texture2D t_guideAlbedo;
 
 layout(push_constant) uniform Push {
     vec4 params;   // x step, y depth sigma, z normal power, w value sigma
     vec4 size;     // x 1 / width, y 1 / height, w 1: the 3 x 3 kernel
     uint samplerIndex;
-    uint pad[3];
+    float guideSigma;   // (2026-11-07) Settings.GuideSigma: the relative shading difference that weighs a tap down by 1 / e (0 = no guide)
+    uint pad[2];
 } pc;
+
+float GuideShade(vec2 at) {
+    const vec3 f = pow(max(textureLod(sampler2D(t_guideFrame, NVR_SAMPLER(pc.samplerIndex)), at, 0.0).rgb, vec3(0.0)), vec3(2.2));
+    const vec4 a = textureLod(sampler2D(t_guideAlbedo, NVR_SAMPLER(pc.samplerIndex)), at, 0.0);
+    return a.a < 0.5 ? -1.0 : luma(f) / max(luma(a.rgb), 0.02);
+}
 
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 o_a;
@@ -34,6 +46,7 @@ void main() {
     const float variance = max(cb.r - l * l, 0.0);
     const float valueSigma = pc.params.w * sqrt(variance + (ca.a < 4.0 ? 0.05 : 0.0)) + 1.0e-3;
     const float zSlope = max(abs(dFdx(z)), abs(dFdy(z))) * pc.params.x + 1.0e-2 * z;
+    const float g0 = pc.guideSigma > 0.0 ? GuideShade(uv) : -1.0;
 
     vec3 sum = vec3(0.0);
     float moment = 0.0, weights = 0.0;
@@ -49,6 +62,10 @@ void main() {
             w *= exp(-abs(tb.g - z) / (pc.params.y * zSlope * length(vec2(x, y)) + 1.0e-3));
             w *= pow(max(dot(n, tn), 0.0), pc.params.z);
             w *= exp(-abs(luma(ta.rgb) - l) / valueSigma);
+            if (g0 >= 0.0 && (x != 0 || y != 0)) {
+                const float gt = GuideShade(tapUv);
+                if (gt >= 0.0) w *= exp(-abs(gt - g0) / (pc.guideSigma * 0.5 * (gt + g0) + 1.0e-4));
+            }
             sum += ta.rgb * w;
             moment += tb.r * w;
             weights += w;

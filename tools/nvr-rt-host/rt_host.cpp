@@ -1194,6 +1194,8 @@ static bool sceneCameraMove(Ctx& c) {
 #include "rt_host_pt.inl"	// (2026-11-07) the path tracer's quality scenes: ReSTIR DI (PTRestirDI)
 #include "rt_host_pthidden.inl"	// (2026-11-07) the path tracer's camera rays pass over the hidden first-person body
 #include "rt_host_denoisepeople.inl"	// (2026-11-07) RtDenoise RGB: PeopleHistory (the path tracer's dialogue ghosting)
+#include "rt_host_aniso.inl"	// (2026-11-07) anisotropic filtering at ray-traced hits (ray cones)
+#include "rt_host_ptdetail.inl"	// (2026-11-07) PTDetail + PTDenoiseGuide: the game's fine shading on the path-traced picture
 
 // ------------------------------------------------------------------------------------------------------------------------------
 int main(int argc, char** argv) {
@@ -1285,9 +1287,12 @@ int main(int argc, char** argv) {
 		{ "sigmasun", "RT shadow denoiser on the sun (10 deg disc + the real 0.53 deg) vs the exact soft shadow, still + moving (RtSunShadow + RtShadowDenoise)", [&] { return sceneSigmaSun(c); } },
 		{ "refldenoise", "RT reflection denoiser (FFX port / ours) vs the old Temporal + Blur and the exact glossy reflection, still + slide + turn (RtReflDenoise*)", [&] { return sceneReflDenoise(c); } },
 		{ "denoisepeople", "RtDenoise RGB temporal (the path tracer's): people's pixels keep PeopleHistory frames (dialogue ghosting)", [&] { return sceneDenoisePeople(c); } },
+		{ "denoiseantilag", "RtDenoise RGB temporal AntiLag: a step clears in a few frames, a still noisy pixel keeps its mean and noise", [&] { return sceneDenoiseAntiLag(c); } },
 		{ "lamplookup", "the lamp shaders' lookup PointShadowTraced (D3D9 ps_3_0)", [&] { return sceneLampLookup(c); } },
 		{ "scenepick", "RtCore's scene picking rules + record packing (RtScenePick.h)", [&] { return sceneScenePick(c); } },
 		{ "movingrest", "ManyLights histories under a walking person: MovingCasterHistory 0 vs 2 (RtLampTraceMany + RtLampTraceRestir)", [&] { return sceneMovingRest(c); } },
+		{ "ptaniso", "anisotropic filtering at ray-traced hits: a floor of real textures at a glancing angle, ray cones vs one mip (RtPathTrace + RtTextures)", [&] { return scenePtAniso(c); } },
+		{ "ptdetail", "the path-traced picture keeps the game's fine shading (PTDetail) and the a-trous stops at its edges (PTDenoiseGuide)", [&] { return scenePtDetail(c); } },
 		{ "pthidden", "path tracer camera rays vs the hidden first-person body round the eye (the head over the sky; RtPathTrace)", [&] { return scenePtHidden(c); } },
 		{ "sameframe", "SameFrame lamp shadows: camera rays + trace in one exchange, a walking caster, the hidden first-person body (RtLampPrimary + RtLampTrace + PointShadowTraced)", [&] { return sceneSameFrame(c); } },
 	};

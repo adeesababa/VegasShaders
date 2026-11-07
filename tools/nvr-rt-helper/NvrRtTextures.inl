@@ -80,7 +80,7 @@ namespace RealTex {
 		si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
 		si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;	// the game's texcoords tile
 		si.anisotropyEnable = h.vk.anisotropy > 1.0f ? VK_TRUE : VK_FALSE;
-		si.maxAnisotropy = std::min(h.vk.anisotropy, 8.0f);
+		si.maxAnisotropy = std::min(h.vk.anisotropy, 16.0f);	// (2026-11-07: 16, was 8: RtTextures.glsl rtTexGrads keeps the ray cone's ellipse within 16:1)
 		si.maxLod = VK_LOD_CLAMP_NONE;
 		VK_CHECK(vkCreateSampler(h.vk.device, &si, nullptr, &t.sampler), "vkCreateSampler (textures)");
 
