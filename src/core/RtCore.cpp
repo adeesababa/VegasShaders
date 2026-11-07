@@ -384,6 +384,27 @@ namespace {
 		IDirect3DTexture9* normalUpload = nullptr;
 		int			normalAtlasImage = -1;
 		UInt32		normalSlots = 0;
+		// UNOFFICIAL 2026-11-07 (protocol 7) real textures ([Main.Main.RayTracing] RealTextures, restart): every texture an atlas slot is made
+		// for also goes to the helper whole (its levels from RealTextureMaxSize down, BC as the game keeps it) through the "-tex" staging
+		// block; the helper samples it filtered with mips (RtTextures.glsl). The atlas stays: the fallback (and what older shaders read).
+		bool		realTextures = false;
+		HANDLE		texMapping = nullptr;
+		UInt8*		texStaging = nullptr;
+		UInt32		texRegion = 0;							// bytes a frame ring slot (= the most a frame sends)
+		UInt32		texMaxSize = 1024;						// RealTextureMaxSize: the biggest level sent (bigger textures start at a smaller mip)
+		UInt64		texBudget = 0, texAlive = 0;			// RealTextureBudgetMB in bytes; what was sent (BC bytes, all levels)
+		struct TexEntry { UInt32 id = 0; bool tried = false; };
+		std::unordered_map<IDirect3DBaseTexture9*, TexEntry> texIds;	// 0 = not sendable (format, pool, budget): the slot keeps the atlas
+		struct SlotWant { int slot; IDirect3DBaseTexture9* tex[3]; };	// diffuse, normal, glow
+		std::vector<SlotWant> slotQueue;
+		UInt32		nextTexId = 1;
+		UInt32		texSent = 0, texFailed = 0, texSlotsSent = 0;
+		double		texCpuMs = 0.0;							// time spent locking and copying (the scene log)
+		void		PumpTextures(NvrRtFrame& f, UInt64 n);
+		int			SendTexture(IDirect3DBaseTexture9* texture, NvrRtFrame& f, UInt64 n);
+		int			texImage = -1;							// the transfer image (RGBA8 kTexW x 2 kTexHalfH; a half a frame)
+		static const UInt32 kTexW = 4096, kTexHalfH = 1024;
+		UInt32		texPackX = 0, texPackY = 0, texShelfH = 0;	// this frame's shelf packing
 		PositionElement lastElement;						// Describe's: where the texcoords are
 		int			AlphaSlotOf(IDirect3DBaseTexture9* texture, IDirect3DBaseTexture9* glow = nullptr, IDirect3DBaseTexture9* normal = nullptr);		// land subtree: objects popped, APP_CULLED, nodes, faded fade nodes (alpha <= 0, walked anyway), switch nodes
 		UInt32		instances = 0, waiting = 0, released = 0;
@@ -587,12 +608,107 @@ namespace {
 					}	// (no map in the slot: it reads 0, the shaders keep the triangle's normal)
 				}
 				if (slot >= 0) { atlasUsed++; if (glow) glowSlots++; }
+				if (slot >= 0 && realTextures) slotQueue.push_back({ slot, { texture, normal, glow } });	// (2026-11-07, protocol 7)
 			}
 			target->Release();
 		}
 		if (target2) target2->Release();
 		alphaSlots.emplace(key, slot);
 		return slot;
+	}
+	// (2026-11-07, protocol 7) a texture's levels into this frame's half of the transfer image + a TEXTURE op (bytes 0: on the GPU). Returns
+	// its id, 0 = never (the slot keeps the atlas: not a 2D texture, a format left out, over the budget), -1 = no room this frame (the half
+	// is full or the op list: next frame). The game's textures are in D3D9's default pool (measured 2026-11-07: every one, DXT1 / DXT5), so
+	// there is no CPU copy to lock: the fork's CopyToShared blits each level's surface (decoding the BC blocks) into the RGBA8 transfer
+	// image; the helper copies the rectangles into its own texture before this frame's passes. Layout (NvrRtTextureOp::bytes): level 0 at
+	// (x, y), the smaller levels in a column right of it. The two halves of the image alternate by frame, so a half is only written again
+	// after the game's GPU waited for the helper's frame that read it.
+	int Core::SendTexture(IDirect3DBaseTexture9* base, NvrRtFrame& f, UInt64 n) {
+		static UInt32 told = 0;
+		auto no = [&](const char* why, UInt32 a, UInt32 b) {
+			if (told < 12) { told++; Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT real textures: a texture keeps the atlas: %s (%u, %u)", why, a, b); }
+			return 0;
+		};
+		if (!base || base->GetType() != D3DRTYPE_TEXTURE) return no("not a 2D texture", base ? (UInt32)base->GetType() : 0u, 0u);
+		IDirect3DTexture9* t = (IDirect3DTexture9*)base;
+		D3DSURFACE_DESC d = {};
+		if (FAILED(t->GetLevelDesc(0, &d))) return no("no level description", 0u, 0u);
+		if ((UInt32)d.Format == MAKEFOURCC('A', 'T', 'I', '2') || (UInt32)d.Format == MAKEFOURCC('A', 'T', 'I', '1')) return no("two-channel format", (UInt32)d.Format, d.Width);
+		const UInt32 count = t->GetLevelCount();
+		const UInt32 cap = (std::min)(texMaxSize, kTexHalfH);
+		UInt32 first = 0;
+		while (first + 1 < count && ((d.Width >> first) > cap || (d.Height >> first) > cap)) first++;
+		const UInt32 w0 = (std::max)(1u, d.Width >> first), h0 = (std::max)(1u, d.Height >> first);
+		UInt32 total = 0;
+		for (UInt32 l = first; l < count; l++) total += (std::max)(1u, d.Width >> l) * (std::max)(1u, d.Height >> l) * 4u;
+		if (texAlive + total > texBudget) return no("over RealTextureBudgetMB, bytes", total, (UInt32)(texAlive >> 20));
+		// shelf packing in this frame's half: footprint level 0 + the column of the smaller levels
+		const UInt32 fw = w0 + (std::max)((UInt32)1, w0 >> 1), fh = h0;
+		if (texPackX + fw > kTexW) { texPackX = 0; texPackY += texShelfH; texShelfH = 0; }
+		if (texPackY + fh > kTexHalfH || f.opCount >= NVR_RT_MAX_OPS || fw > kTexW) return -1;
+		const UInt32 x = texPackX, y = (UInt32)(n & 1) * kTexHalfH + texPackY;
+		UInt32 below = 0;
+		for (UInt32 l = first; l < count; l++) {
+			IDirect3DSurface9* level = nullptr;
+			if (FAILED(t->GetSurfaceLevel(l, &level)) || !level) return no("no surface for level", l, (UInt32)d.Format);
+			const UInt32 lx = l == first ? x : x + w0, ly = l == first ? y : y + below;
+			const HRESULT hr = share->CopyToShared(images[texImage], lx, ly, level, nullptr);
+			level->Release();
+			if (FAILED(hr)) return no("CopyToShared failed, format / level", (UInt32)d.Format, l);
+			if (l != first) below += (std::max)(1u, d.Height >> l);
+		}
+		texPackX += fw;
+		texShelfH = (std::max)(texShelfH, fh);
+		const UInt32 id = nextTexId;
+		if (id >= NVR_RT_MAX_TEXTURES) return 0;	// (ids are never reused in a session: the atlas, whose slots they follow, never frees one)
+		nextTexId++;
+		NvrRtTextureOp op = { NVR_RT_OP_TEXTURE, id, w0, h0, x | (y << 16), 37u /* VK_FORMAT_R8G8B8A8_UNORM */, 0u, count - first };
+		memcpy(&f.ops[f.opCount++], &op, sizeof(op));
+		texAlive += total;
+		texSent++;
+		return (int)id;
+	}
+
+	// (2026-11-07, protocol 7) the slots made so far: each one's textures sent (as many as fit this frame), then its SLOT_TEXTURES op
+	void Core::PumpTextures(NvrRtFrame& f, UInt64 n) {
+		if (texImage < 0 || slotQueue.empty()) return;
+		LARGE_INTEGER t0, t1, fq;
+		QueryPerformanceCounter(&t0);
+		texPackX = texPackY = texShelfH = 0;
+		size_t done = 0;
+		for (; done < slotQueue.size(); done++) {
+			SlotWant& want = slotQueue[done];
+			bool ready = true;
+			UInt32 ids[3] = {};
+			for (int k = 0; k < 3 && ready; k++) {
+				if (!want.tex[k]) continue;
+				TexEntry& e = texIds[want.tex[k]];
+				if (!e.tried) {
+					const int r = SendTexture(want.tex[k], f, n);
+					if (r < 0) { ready = false; break; }
+					e.tried = true;
+					e.id = (UInt32)r;
+					if (!r) texFailed++;
+				}
+				ids[k] = e.id;
+			}
+			if (!ready || f.opCount >= NVR_RT_MAX_OPS) break;
+			if (ids[0] || ids[1] || ids[2]) {
+				NvrRtTextureOp op = { NVR_RT_OP_SLOT_TEXTURES, (UInt32)want.slot, ids[0], ids[1], ids[2], 0, 0, 0 };
+				memcpy(&f.ops[f.opCount++], &op, sizeof(op));
+				texSlotsSent++;
+			}
+		}
+		slotQueue.erase(slotQueue.begin(), slotQueue.begin() + done);
+		QueryPerformanceCounter(&t1);
+		QueryPerformanceFrequency(&fq);
+		texCpuMs += double(t1.QuadPart - t0.QuadPart) * 1000.0 / double(fq.QuadPart);
+		static UInt32 lastLogged = 0;
+		if (texSent + texFailed >= lastLogged + 50 || (lastLogged == 0 && texSent + texFailed > 0)) {
+			lastLogged = texSent + texFailed;
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT real textures: %u sent (%llu MB), %u kept the atlas, %u slots pointed, %zu slots waiting, %.1f ms CPU so far",
+				texSent, (unsigned long long)(texAlive >> 20), texFailed, texSlotsSent, slotQueue.size(), texCpuMs);
+		}
 	}
 	UInt32 (*MaskHook)(NiGeometry*, bool) = nullptr;
 
@@ -694,6 +810,11 @@ namespace {
 		atlasUsed = 0;
 		glowSlots = 0;
 		alphaSlots.clear();
+		// (2026-11-07, protocol 7) real textures: read at each helper start (restart), with the atlases they follow
+		realTextures = (alphaOn || hitTextures) && TheSettingManager->GetSettingI("Main.Main.RayTracing", "RealTextures") != 0;
+		{ const int m = TheSettingManager->GetSettingI("Main.Main.RayTracing", "RealTextureMaxSize"); texMaxSize = m >= 4096 ? 4096u : m >= 2048 ? 2048u : m >= 1024 ? 1024u : m >= 512 ? 512u : 256u; }
+		texBudget = (UInt64)(std::max)(64, TheSettingManager->GetSettingI("Main.Main.RayTracing", "RealTextureBudgetMB")) << 20;
+		texIds.clear(); slotQueue.clear(); nextTexId = 1; texAlive = 0; texSent = texFailed = texSlotsSent = 0; texCpuMs = 0.0;
 		if (alphaOn || hitTextures) {	// the slots are shared: hit textures keep the alpha atlas too
 			atlasImage = (int)imageDescs.size();
 			imageNames.push_back("NVR RT alpha atlas");
@@ -733,6 +854,13 @@ namespace {
 		// path tracer's 20 asked for more than 48, so nothing traced)
 		leftOut.clear();
 		scratchMB = 0;
+		texImage = -1;
+		if (realTextures) {	// (2026-11-07, protocol 7) the real textures' transfer image (RGBA8, 4096 x 2048 = 32 MB)
+			texImage = (int)imageDescs.size();
+			imageNames.push_back("NVR RT texture transfer");
+			imageDescs.push_back({ kTexW, 2 * kTexHalfH, NVR_EXT_SHARED_RGBA8, nullptr });
+			imageSizes.push_back({ kTexW, 2 * kTexHalfH });
+		}
 		const size_t coreImages = imageDescs.size();
 		std::vector<const RtCore::User*> order;
 		for (const RtCore::User& user : users) order.push_back(&user);
@@ -788,6 +916,7 @@ namespace {
 		shared->size = sizeof(NvrRtShared);
 		shared->parentPid = GetCurrentProcessId();
 		shared->scratchMB = scratchMB;	// (2026-11-07, protocol 6)
+		shared->textureImage = texImage >= 0 ? (uint32_t)texImage + 1 : 0u;	// (2026-11-07, protocol 7) the real textures' transfer image
 		shared->vendorId = info.VendorId;
 		memcpy(shared->deviceLuid, info.DeviceLUID, 8);
 		shared->deviceLuidValid = info.DeviceLUIDValid ? 1u : 0u;
@@ -904,6 +1033,9 @@ namespace {
 		DxvkCompute::Drop(rtSeq);
 		DxvkCompute::Drop(share);
 		if (shared) { UnmapViewOfFile(shared); shared = nullptr; }
+		if (texStaging) { UnmapViewOfFile(texStaging); texStaging = nullptr; }	// (2026-11-07, protocol 7)
+		if (texMapping) { CloseHandle(texMapping); texMapping = nullptr; }
+		texIds.clear(); slotQueue.clear();
 		HANDLE* handles[] = { &mapping, &frameEvent, &statusEvent };
 		for (HANDLE* h : handles) if (*h) { CloseHandle(*h); *h = nullptr; }
 		geometries.clear();
@@ -2142,6 +2274,7 @@ namespace {
 		if (c.gatheredFrame != now) {
 			c.glows.clear();
 			c.Gather();
+			c.PumpTextures(f, n);	// (2026-11-07, protocol 7) the new slots' textures, before the ops list closes
 			c.frameGlows = c.glows;
 			// 2026-10-30: with fork 0034 the texel after this frame's geometry gets the frame's sequence number, written after the
 			// conversions; the helper checks it before building (a reordered copy = an earlier flush's data: built empty, logged once)

@@ -13,6 +13,8 @@ layout(set = 0, binding = 11, std430) readonly buffer RtGeometry { uint words[];
 #define RT_RECORDS_DECLARED
 #endif
 
+#include "RtTextures.glsl"	// (2026-11-07, protocol 7) the real textures (set 1), where the game sent them; else the atlases below
+
 #define RT_HIT_TEXCOORDS_FLAGS 0x60u   // alpha-tested (0x20) or textured (0x40): texcoords at floatBitsToUint(albedo.w)
 
 uvec3 rtHitTriangle(uint instance, uint primitive) {
@@ -44,6 +46,12 @@ vec2 rtHitTexcoord(uint instance, uint primitive, vec2 bary) {
 }
 
 vec3 rtHitAlbedo(uint instance, uint primitive, vec2 bary) {
+#ifndef RT_NO_REAL_TEXTURES
+	if (rtHitHasTexcoords(instance)) {	// (2026-11-07) the game's own texture, filtered, its mip by the footprint (rtConeWidth)
+		const uint id = rtSlotTextures(records[instance].flags).x;
+		if (id != 0u) return rtTexToLinear(rtTexSample(id, rtHitTexcoord(instance, primitive, bary), rtTexLod(id, instance, primitive)).rgb);
+	}
+#endif
 #ifdef RT_ALBEDO_ATLAS
 	if (rtHitHasTexcoords(instance)) {
 		const uint slot = (records[instance].flags >> 16) & 0x3FFu;	// (2026-11-06) bits 16-25 (26-31: the material rule)
@@ -66,6 +74,12 @@ vec3 rtHitAlbedo(uint instance, uint primitive, vec2 bary) {
 #define RT_HIT_GLOW_FLAG 0x04u
 vec3 rtHitGlow(uint instance, uint primitive, vec2 bary) {
 	if ((records[instance].flags & RT_HIT_GLOW_FLAG) == 0u) return vec3(0.0);
+#ifndef RT_NO_REAL_TEXTURES
+	if (rtHitHasTexcoords(instance)) {	// (2026-11-07) the real glow map
+		const uint id = rtSlotTextures(records[instance].flags).z;
+		if (id != 0u) return rtTexToLinear(rtTexSample(id, rtHitTexcoord(instance, primitive, bary), rtTexLod(id, instance, primitive)).rgb);
+	}
+#endif
 #ifdef RT_GLOW_ATLAS
 	if (rtHitHasTexcoords(instance)) {
 		const uint slot = (records[instance].flags >> 16) & 0x3FFu;	// (2026-11-06) bits 16-25 (26-31: the material rule)
@@ -90,7 +104,13 @@ vec3 rtHitNormalMapped(uint instance, uint primitive, vec2 bary, vec3 n, mat3 to
 	const uint slot = (records[instance].flags >> 16) & 0x3FFu;	// (2026-11-06) bits 16-25 (26-31: the material rule)
 	const ivec2 origin = ivec2(int(slot % 32u), int(slot / 32u)) * 64;
 	const vec2 uv = rtHitTexcoord(instance, primitive, bary);
-	const vec3 m = imageLoad(RT_NORMAL_ATLAS, origin + clamp(ivec2(fract(uv) * 64.0), ivec2(0), ivec2(63))).rgb;
+	vec3 m = imageLoad(RT_NORMAL_ATLAS, origin + clamp(ivec2(fract(uv) * 64.0), ivec2(0), ivec2(63))).rgb;
+#ifndef RT_NO_REAL_TEXTURES
+	{	// (2026-11-07) the real normal map (as stored, not sRGB)
+		const uint id = rtSlotTextures(records[instance].flags).y;
+		if (id != 0u) m = rtTexSample(id, uv, rtTexLod(id, instance, primitive)).rgb;
+	}
+#endif
 	if (dot(m, m) < 1.0e-4) return n;
 	vec3 t = m * 2.0 - 1.0;
 	const uvec3 i = rtHitTriangle(instance, primitive);

@@ -811,6 +811,7 @@ vec3 Path(vec3 dir) {
 	vec3 cvHit[kCacheVerts], cvN[kCacheVerts], cvT[kCacheVerts], cvR[kCacheVerts];
 	int cvCount = 0;
 #endif
+	float ptFirstT = 0.0, ptPath = 0.0;   // (2026-11-07) real textures' mip: the camera ray's length, the bounces' since
 	for (int bounce = 0; bounce <= bounces; bounce++) {
 		rayQueryEXT q;
 		// (2026-11-04 b) bounce rays: the alpha test is ~30 % of the pass outdoors (helper replays, section 25): PTBounceAlpha 0 / 2 skip it
@@ -879,6 +880,11 @@ vec3 Path(vec3 dir) {
 			mat4x3 toScene = rayQueryGetIntersectionObjectToWorldEXT(q, true);
 			n = HitNormal(instance, prim, toScene, dir);
 			hit = pos + dir * t;
+#ifndef RT_NO_REAL_TEXTURES
+			// (2026-11-07) the ray's footprint for the real textures' mip: a pixel's width along the camera ray, then the bounces'
+			// lobes (diffuse-wide: half their length), so far and bounced hits read coarse mips (no speckle), near ones the full texture
+			rtConeWidth = bounce == 0 ? t * 2.0 * length(p.up.xyz) * p.size.w : ptFirstT * 2.0 * length(p.up.xyz) * p.size.w + (ptPath + t) * 0.5;
+#endif
 			surf = HitSurface(clamp(AlbedoAtlas() ? rtHitAlbedo(instance, prim, bary) : records[instance].albedo.rgb, 0.0, 1.0), instance);
 			if (screen) { n = sN; surf = sS; }   // the same surface: the screen's colour, normal and material, the traced point
 			if (NormalAtlas()) {   // (2026-11-02 d) the normal map bends it (also the screen's smooth normal: that buffer has no maps)
@@ -909,6 +915,7 @@ vec3 Path(vec3 dir) {
 			}
 		}
 		if (bounce == 0) { gFirstAlbedo = surf.albedo; gFirstSurface = 1.0; }
+		if (bounce == 0) ptFirstT = t; else ptPath += t;
 #ifdef PT_RESTIR_GI
 		if (bounce == 1 && gGIFirst) { gGIT2 = t; gGIN2 = n; }   // the first bounce's hit (a miss leaves 0: the sky)
 #endif

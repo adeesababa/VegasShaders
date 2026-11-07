@@ -294,7 +294,11 @@ struct Host {
 		std::memset(shared, 0, sizeof(NvrRtShared));
 		shared->magic = NVR_RT_MAGIC; shared->version = NVR_RT_PROTOCOL_VERSION; shared->size = sizeof(NvrRtShared);
 		shared->parentPid = GetCurrentProcessId();
-		shared->scratchMB = 64;   // (2026-11-07, protocol 6) the scratch store: the path tracer's reservoirs + radiance cache at 128 x 128
+		shared->scratchMB = 64;
+		// (2026-11-07, protocol 7) real textures: the "-tex" staging block (a quarter a frame ring slot), as RtCore makes it
+		texMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, kTexStagingMB << 20, (std::wstring(base) + NVR_RT_EVENT_TEX_SUFFIX).c_str());
+		texStaging = texMapping ? (uint8_t*)MapViewOfFile(texMapping, FILE_MAP_ALL_ACCESS, 0, 0, (size_t)kTexStagingMB << 20) : nullptr;
+		if (texStaging) shared->textureStagingMB = kTexStagingMB;   // (2026-11-07, protocol 6) the scratch store: the path tracer's reservoirs + radiance cache at 128 x 128
 		shared->vendorId = si.VendorId;
 		std::memcpy(shared->deviceLuid, si.DeviceLUID, 8); shared->deviceLuidValid = si.DeviceLUIDValid;
 		std::memcpy(shared->deviceUuid, si.DeviceUUID, 16); std::memcpy(shared->driverUuid, si.DriverUUID, 16);
@@ -402,6 +406,30 @@ struct Host {
 	void Release(uint32_t id) {
 		NvrRtGeometryOp op = {}; op.op = NVR_RT_OP_RELEASE; op.id = id; ops.push_back(op);
 		live.erase(id);
+	}
+
+	// ---- (2026-11-07, protocol 7) real textures: a texture's packed levels into the next frame's staging region, an op; a slot's ids
+	static const uint32_t kTexStagingMB = 32;
+	HANDLE texMapping = nullptr;
+	uint8_t* texStaging = nullptr;
+	uint32_t texOffset = 0;
+	bool StageTexture(uint32_t id, uint32_t vkFormat, uint32_t w, uint32_t hgt, uint32_t levels, const std::vector<uint8_t>& bytes) {
+		const uint32_t region = (kTexStagingMB << 20) / NVR_RT_FRAME_RING;
+		const uint32_t at = (texOffset + 15u) & ~15u;
+		if (!texStaging || at + bytes.size() > region) { say("  error: texture staging full\n"); return false; }
+		std::memcpy(texStaging + (size_t)((frame + 1) % NVR_RT_FRAME_RING) * region + at, bytes.data(), bytes.size());
+		texOffset = at + uint32_t(bytes.size());
+		NvrRtTextureOp op = { NVR_RT_OP_TEXTURE, id, w, hgt, at, vkFormat, uint32_t(bytes.size()), levels };
+		NvrRtGeometryOp g; std::memcpy(&g, &op, sizeof(g)); ops.push_back(g);
+		return true;
+	}
+	void SlotTextures(uint32_t slot, uint32_t diffuse, uint32_t normal, uint32_t glow) {
+		NvrRtTextureOp op = { NVR_RT_OP_SLOT_TEXTURES, slot, diffuse, normal, glow, 0, 0, 0 };
+		NvrRtGeometryOp g; std::memcpy(&g, &op, sizeof(g)); ops.push_back(g);
+	}
+	void ReleaseTexture(uint32_t id) {
+		NvrRtTextureOp op = { NVR_RT_OP_TEXTURE_RELEASE, id, 0, 0, 0, 0, 0, 0 };
+		NvrRtGeometryOp g; std::memcpy(&g, &op, sizeof(g)); ops.push_back(g);
 	}
 
 	// ---- CopyIn: floats (channels of the format, row-major w x h) into a shared image through a D3D9 texture, as RtCore::CopyIn
@@ -527,7 +555,7 @@ struct Host {
 		SetEvent(frameEvent);
 		CHECKHR(share->SignalShared(inputsReady, n), "SignalShared");
 		CHECKHR(share->WaitShared(outputReady, n), "WaitShared");
-		ops.clear(); passes.clear(); arenaTexel = 0;
+		ops.clear(); passes.clear(); arenaTexel = 0; texOffset = 0;
 		return true;
 	}
 	// after the outputs were read: the uploads and staged buffers can go (the GPU is past them: Read waited)
@@ -1237,6 +1265,7 @@ int main(int argc, char** argv) {
 		{ "alphacard", "lamp behind an alpha-tested card (RtLampTrace + RtAlpha)", [&] { return sceneAlphaCard(c, false); } },
 		{ "material", "card record with material bits 26-31 (atlas slot mask)", [&] { return sceneAlphaCard(c, true); } },
 		{ "chainlink", "fine chain-link cut-out: lamp shadow vs the full-resolution texture (atlas fill / alpha read quality)", [&] { return sceneChainLink(c); } },
+		{ "realtex", "the chain-link cut-out with the REAL texture (protocol 7: full size, mips, set 1) vs the exact shadow", [&] { return sceneChainLink(c, true); } },
 		{ "manylamps", "48 lamps, slots past 32 (RtLampTrace)", [&] { return sceneManyLamps(c); } },
 		{ "mirror", "mirror floor + blocks (ReflectionsRT)", [&] { return sceneMirror(c); } },
 		{ "cameramove", "camera move with history (RtLampTraceMany)", [&] { return sceneCameraMove(c); } },

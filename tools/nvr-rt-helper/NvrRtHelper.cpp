@@ -161,7 +161,10 @@ namespace {
 		VkPhysicalDeviceAccelerationStructurePropertiesKHR asProperties = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR };
 		VkPhysicalDeviceMemoryProperties memory = {};
 		uint32_t			timestampBits = 0;
-		const char*			matchedBy = "";	// how the game's GPU was found: "adapter LUID" / "device UUID" / "first RT GPU (probe)"
+		const char*			matchedBy = "";
+		bool				bindless = false;		// (2026-11-07, protocol 7) descriptor indexing: real textures (NvrRtTextures.inl)
+		bool				partiallyBound = false;
+		float				anisotropy = 1.0f;		// samplerAnisotropy: the device's max, 1 = off	// how the game's GPU was found: "adapter LUID" / "device UUID" / "first RT GPU (probe)"
 		PFN_vkImportSemaphoreWin32HandleKHR			importSemaphoreWin32Handle = nullptr;
 		PFN_vkCreateAccelerationStructureKHR		createAs = nullptr;
 		PFN_vkDestroyAccelerationStructureKHR		destroyAs = nullptr;
@@ -285,11 +288,21 @@ namespace {
 		features12.bufferDeviceAddress = VK_TRUE;
 		features12.hostQueryReset = supported12.hostQueryReset;
 		features12.descriptorBindingPartiallyBound = supported12.descriptorBindingPartiallyBound;
+		// (2026-11-07, protocol 7) real textures: an array of the game's textures, written while earlier frames are in flight
+		features12.runtimeDescriptorArray = supported12.runtimeDescriptorArray;
+		features12.shaderSampledImageArrayNonUniformIndexing = supported12.shaderSampledImageArrayNonUniformIndexing;
+		features12.descriptorBindingSampledImageUpdateAfterBind = supported12.descriptorBindingSampledImageUpdateAfterBind;
+		features12.descriptorBindingUpdateUnusedWhilePending = supported12.descriptorBindingUpdateUnusedWhilePending;
+		vk.partiallyBound = supported12.descriptorBindingPartiallyBound == VK_TRUE;
+		vk.bindless = vk.partiallyBound && supported12.shaderSampledImageArrayNonUniformIndexing && supported12.descriptorBindingSampledImageUpdateAfterBind &&
+			supported12.descriptorBindingUpdateUnusedWhilePending;
 		VkPhysicalDeviceFeatures2 features = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &features12 };
 		features.features.shaderStorageImageExtendedFormats = supported.features.shaderStorageImageExtendedFormats;
 		features.features.shaderStorageImageWriteWithoutFormat = supported.features.shaderStorageImageWriteWithoutFormat;
 		features.features.shaderStorageImageReadWithoutFormat = supported.features.shaderStorageImageReadWithoutFormat;
 		features.features.shaderInt64 = supported.features.shaderInt64;
+		features.features.samplerAnisotropy = supported.features.samplerAnisotropy;
+		features.features.shaderSampledImageArrayDynamicIndexing = supported.features.shaderSampledImageArrayDynamicIndexing;
 
 		float priority = 1.0f;
 		VkDeviceQueueCreateInfo queueInfo = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
@@ -302,6 +315,7 @@ namespace {
 		deviceInfo.enabledExtensionCount = (uint32_t)(sizeof(enabled) / sizeof(enabled[0]));
 		deviceInfo.ppEnabledExtensionNames = enabled;
 		VK_CHECK(vkCreateDevice(vk.physical, &deviceInfo, nullptr, &vk.device), "vkCreateDevice");
+		if (supported.features.samplerAnisotropy) vk.anisotropy = vk.properties.limits.maxSamplerAnisotropy;
 		vkGetDeviceQueue(vk.device, vk.queueFamily, 0, &vk.queue);
 		vk.importSemaphoreWin32Handle = (PFN_vkImportSemaphoreWin32HandleKHR)vkGetDeviceProcAddr(vk.device, "vkImportSemaphoreWin32HandleKHR");
 		vk.createAs = (PFN_vkCreateAccelerationStructureKHR)vkGetDeviceProcAddr(vk.device, "vkCreateAccelerationStructureKHR");
@@ -636,6 +650,30 @@ namespace {
 
 	struct PendingFree { uint64_t frame; Geometry geometry; };
 
+	// (2026-11-07, protocol 7) real textures (NvrRtTextures.inl)
+	struct RealTexture { VkImage image = VK_NULL_HANDLE; VkDeviceMemory memory = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE; VkDeviceSize bytes = 0;
+		uint32_t width = 0, height = 0, levels = 0; };
+	struct PendingTextureFree { uint64_t frame; RealTexture texture; };
+	struct RealTextures {
+		VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+		VkDescriptorPool	pool = VK_NULL_HANDLE;
+		VkDescriptorSet		sets[kCmdRing] = {};	// set 1, one per command slot (its own table)
+		VkSampler			sampler = VK_NULL_HANDLE;
+		Buffer				tables[kCmdRing];		// host visible uvec4[NVR_RT_TEX_TABLE_SLOTS]: this slot's copy of `table`
+		Buffer				uploads[kCmdRing];		// host visible, a staging region's size: the frame's texture bytes
+		uint32_t			table[NVR_RT_TEX_TABLE_SLOTS][4] = {};
+		std::vector<RealTexture> textures;			// by id
+		std::vector<PendingTextureFree> frees;
+		const uint8_t*		staging = nullptr;		// the "<base>-tex" block (read only)
+		uint32_t			stagingRegion = 0;		// bytes a frame ring slot
+		std::vector<uint8_t> bytes;					// this frame's texture bytes, copied out before consumedFrame
+		std::vector<uint32_t> offsets;				// per op: where its bytes start in `bytes` (~0: none)
+		uint64_t			alive = 0, aliveBytes = 0, uploaded = 0, refused = 0;
+		bool				loggedFirst = false;
+		struct GpuCopy { VkImage src, dst; std::vector<VkImageCopy> regions; };
+		std::vector<GpuCopy> gpuCopies;				// this frame's copies out of the transfer image (bytes 0 ops)
+	};
+
 	struct Helper {
 		VulkanDevice	vk;
 		SharedImage		images[NVR_RT_MAX_IMAGES];
@@ -686,7 +724,10 @@ namespace {
 		bool			probeDone = false;
 		Capture			capture;			// UNOFFICIAL 2026-11-03 (claude/rt-replay): one frame's inputs to a file on request
 		NvrRtFrame		frame;				// this frame's record, copied out of the ring (2 MB: on the heap via Helper)
+		RealTextures	tex;				// (2026-11-07, protocol 7) set 1: the game's own textures
 	};
+
+#include "NvrRtTextures.inl"	// UNOFFICIAL 2026-11-07 (protocol 7) real textures: set 1
 
 	bool CreateTlas(Helper& h) {
 		VkAccelerationStructureGeometryKHR geometry = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
@@ -742,9 +783,11 @@ namespace {
 		setInfo.bindingCount = bindingCount;
 		setInfo.pBindings = bindings;
 		VK_CHECK(vkCreateDescriptorSetLayout(h.vk.device, &setInfo, nullptr, &h.setLayout), "vkCreateDescriptorSetLayout");
+		if (!RealTex::Create(h)) return false;	// (2026-11-07, protocol 7) set 1: real textures
+		const VkDescriptorSetLayout setLayouts[2] = { h.setLayout, h.tex.layout };
 		VkPipelineLayoutCreateInfo layoutInfo = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
-		layoutInfo.setLayoutCount = 1;
-		layoutInfo.pSetLayouts = &h.setLayout;
+		layoutInfo.setLayoutCount = 2;
+		layoutInfo.pSetLayouts = setLayouts;
 		VK_CHECK(vkCreatePipelineLayout(h.vk.device, &layoutInfo, nullptr, &h.pipelineLayout), "vkCreatePipelineLayout");
 		const uint32_t sets = kCmdRing * NVR_RT_MAX_PASSES;
 		VkDescriptorPoolSize sizes[4] = {
@@ -819,9 +862,10 @@ namespace {
 
 	// Frees geometries whose last possible user (a frame in flight) has finished.
 	void ReleaseFinished(Helper& h) {
-		if (h.pendingFrees.empty()) return;
+		if (h.pendingFrees.empty() && h.tex.frees.empty()) return;
 		uint64_t done = 0;
 		vkGetSemaphoreCounterValue(h.vk.device, h.outputReady, &done);
+		RealTex::ReleaseFinished(h, done);	// (2026-11-07, protocol 7)
 		auto it = std::remove_if(h.pendingFrees.begin(), h.pendingFrees.end(), [&](const PendingFree& p) {
 			if (p.frame > done) return false;
 			h.vk.destroyAs(h.vk.device, p.geometry.as, nullptr);
@@ -1221,6 +1265,7 @@ namespace {
 		s.measured[0] = s.measured[1] = s.measured[2] = false;
 		s.passesStamped = 0;
 		FullBarrier(cmd);	// the previous frame's builds / passes and the game's writes (the semaphore makes them visible)
+		RealTex::Record(h, slot, cmd, frameNumber);	// (2026-11-07, protocol 7) new textures copied in, the slot table for this frame
 
 		// 0. compaction (NVR_RT_OP_FLAG_COMPACT): the structures whose compacted size came back are copied into one of that size; the
 		//    old one is freed once this frame is done (its data words stay with the geometry). Rebuilt or released since: skipped.
@@ -1556,7 +1601,8 @@ namespace {
 			writes[4 + pass.imageCount] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, s.sets[p], NVR_RT_BINDING_SCRATCH, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &scratchInfo };
 			vkUpdateDescriptorSets(h.vk.device, 5 + pass.imageCount, writes, 0, nullptr);
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
-			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, h.pipelineLayout, 0, 1, &s.sets[p], 0, nullptr);
+			const VkDescriptorSet bound[2] = { s.sets[p], h.tex.sets[slot] };	// (protocol 7) set 1: real textures
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, h.pipelineLayout, 0, 2, bound, 0, nullptr);
 			vkCmdDispatch(cmd, std::max(1u, pass.groupsX), std::max(1u, pass.groupsY), std::max(1u, pass.groupsZ));
 			FullBarrier(cmd);	// the next pass may read this one's output; the game reads them after the signal
 			s.measured[2] = true;
@@ -1584,9 +1630,12 @@ namespace {
 			memcpy(h.frame.instances, ring.instances, sizeof(NvrRtInstance) * h.frame.instanceCount);
 			memcpy(h.frame.records, ring.records, sizeof(NvrRtInstanceRecord) * h.frame.instanceCount);
 			memcpy(h.frame.passes, ring.passes, sizeof(NvrRtPass) * h.frame.passCount);
+			RealTex::CopyOut(h, frameNumber);	// (2026-11-07, protocol 7) the texture bytes too, before the region is free again
 		} else {
 			// NVR waits before reusing a slot, so this means NVR skipped the frame: nothing to do but release its wait
 			memset(&h.frame, 0, offsetof(NvrRtFrame, ops));
+			h.tex.bytes.clear();
+			h.tex.offsets.clear();
 		}
 		MemoryBarrier();
 		g_shared->consumedFrame = (int64_t)frameNumber;
@@ -1700,6 +1749,9 @@ namespace {
 		if (frameNumber % 600 == 0 && (h.refits || h.fullBuilds))
 			Log("frame %llu: dynamic (actor) geometry: %llu refits in place, %llu full builds so far", (unsigned long long)frameNumber,
 				(unsigned long long)h.refits, (unsigned long long)h.fullBuilds);
+		if (frameNumber % 600 == 0 && (h.tex.uploaded || h.tex.refused))	// (2026-11-07, protocol 7)
+			Log("frame %llu: real textures: %llu alive (%llu MB), %llu uploaded, %llu refused so far", (unsigned long long)frameNumber,
+				(unsigned long long)h.tex.alive, (unsigned long long)(h.tex.aliveBytes >> 20), (unsigned long long)h.tex.uploaded, (unsigned long long)h.tex.refused);
 		if (frameNumber % 600 == 0 && h.duplicateBuilds)
 			Log("frame %llu: %llu duplicate builds skipped so far (the same geometry id twice in a frame: only the last is built)",
 				(unsigned long long)frameNumber, (unsigned long long)h.duplicateBuilds);
@@ -1813,6 +1865,7 @@ namespace {
 				return fail("Vulkan: the scratch store could not be made");
 			Log("scratch store: %u MB (binding %u)", mb, NVR_RT_BINDING_SCRATCH);
 		}
+		RealTex::Open(h, base, shared->textureStagingMB);	// (2026-11-07, protocol 7) the "-tex" block, when NVR made one
 		if (!CreateBuffer(h.vk, 3 * 4096, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, h.probe)) h.probe = Buffer();	// the probe is optional
 
 		// The shaders NVR registered at setup are compiled now (a first use mid-game would hold the game's GPU ~2 s on the iGPU)

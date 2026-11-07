@@ -25,9 +25,9 @@
 #include <stdint.h>
 
 #define NVR_RT_MAGIC            0x54525256u   // 'VRRT'
-#define NVR_RT_PROTOCOL_VERSION 6u            // 2 (2026-10-28): instance records + the geometry data (bindings 10, 11); 3 (2026-10-29): 32 shared images; 4 (2026-10-30): 32 shaders; 5 (2026-11-02): 48 shared images; 6 (2026-11-07): the scratch store (binding 20, NvrRtShared::scratchMB)
+#define NVR_RT_PROTOCOL_VERSION 7u            // 7 (2026-11-07): real textures (set 1, NVR_RT_OP_TEXTURE / _SLOT_TEXTURES, the -tex staging block); 2 (2026-10-28): instance records + the geometry data (bindings 10, 11); 3 (2026-10-29): 32 shared images; 4 (2026-10-30): 32 shaders; 5 (2026-11-02): 48 shared images; 6 (2026-11-07): the scratch store (binding 20, NvrRtShared::scratchMB)
 #define NVR_RT_FRAME_RING       4u            // frame records; NVR waits for consumedFrame before reusing one
-#define NVR_RT_MAX_IMAGES       48u           // shared images, registered at setup (index 0 is the geometry arena); 16 was too few with all four RT effects (~20), 32 with the reference path tracer (31: every user's Setup registers, on or off; 2026-11-02)
+#define NVR_RT_MAX_IMAGES       64u           // (protocol 7: 64, was 48: 46 in use with every RT effect, the path tracer was left out)           // shared images, registered at setup (index 0 is the geometry arena); 16 was too few with all four RT effects (~20), 32 with the reference path tracer (31: every user's Setup registers, on or off; 2026-11-02)
 #define NVR_RT_MAX_SHADERS      32u           // trace shaders (.spv paths), registered any time (16 until 2026-10-30: the four RT strands used 15)
 #define NVR_RT_MAX_OPS          2048u         // geometry operations per frame
 #define NVR_RT_MAX_INSTANCES    32768u        // scene instances per frame
@@ -48,6 +48,20 @@
 // ReSTIR DI reservoirs and radiance cache, RtPathTrace.comp). NvrRtShared::scratchMB megabytes (at least 1). Who uses which words is the
 // passes' business (today only RtPathTrace.comp: docs/next/RT-PATH-TRACING.md section 47 has the layout).
 #define NVR_RT_BINDING_SCRATCH  20u
+// UNOFFICIAL 2026-11-07 (protocol 7) real textures: the game's own textures (full size, every mip, BC-compressed as the game keeps them)
+// in the helper, sampled with filtering and a mip by the ray's footprint, instead of the atlases' 64-256 texel copies (blocky up close,
+// speckled far away). Descriptor SET 1, persistent (one per command slot): binding 0 a std430 buffer of uvec4 per atlas slot (x = the
+// diffuse texture's index, y = the normal map's, z = the glow map's; 0 = none: the shaders keep the atlas), binding 1 a sampler (linear,
+// mips, repeat, anisotropic), binding 2 texture2D[NVR_RT_MAX_TEXTURES] (partially bound). src/hlsl/NewVegas/Compute/Rt/RtTextures.glsl.
+// The bytes travel in a second shared block "<base>-tex" of NvrRtShared::textureStagingMB, a region per frame ring slot (frame % RING):
+// NVR writes a frame's texture ops' bytes there before latestFrame; the helper copies them out before consumedFrame (as the frame record).
+#define NVR_RT_TEXTURE_SET          1u
+#define NVR_RT_BINDING_TEX_TABLE    0u
+#define NVR_RT_BINDING_TEX_SAMPLER  1u
+#define NVR_RT_BINDING_TEXTURES     2u
+#define NVR_RT_MAX_TEXTURES         4096u     // indices 1 .. 4095 (0 = none)
+#define NVR_RT_TEX_TABLE_SLOTS      1024u     // = NVR_RT_ALPHA_ATLAS_SLOTS squared
+#define NVR_RT_EVENT_TEX_SUFFIX     L"-tex"
 
 // NvrRtInstanceRecord::flags (NVR sets them; bits 8.. are free for the effects)
 #define NVR_RT_RECORD_LAND          0x01u
@@ -99,6 +113,10 @@ enum NvrRtState : uint32_t {
 enum NvrRtOp : uint32_t {
 	NVR_RT_OP_BUILD   = 1,           // geometry `id` from the arena: 3 x vertexCount floats at arenaTexel, then 3 x triangleCount uints
 	NVR_RT_OP_RELEASE = 2,           // geometry `id` is gone (the helper frees it once no frame in flight uses it)
+	// (protocol 7) real textures, in NvrRtGeometryOp's fields: NvrRtTextureOp below
+	NVR_RT_OP_TEXTURE = 3,           // texture `id` (1 .. NVR_RT_MAX_TEXTURES - 1): its mips from the frame's staging region (replaces an older one)
+	NVR_RT_OP_TEXTURE_RELEASE = 4,   // texture `id` is gone (freed once no frame in flight uses it; no slot may name it any more)
+	NVR_RT_OP_SLOT_TEXTURES = 5,     // atlas slot `id`: its diffuse / normal / glow textures (0 = none: the atlas)
 };
 
 // What the fork's ID3D9NvrExtSharedImage::GetInfo reported, plus the NT handle duplicated into the helper's process.
@@ -138,6 +156,21 @@ struct NvrRtGeometryOp {             // 32 bytes
 	uint32_t	arenaTexel;          // first 32-bit texel in the arena (row-major)
 	uint32_t	flags;               // NVR_RT_OP_FLAG_*
 	uint32_t	pad[2];
+};
+
+// (protocol 7) NVR_RT_OP_TEXTURE / _SLOT_TEXTURES: the same 32 bytes as NvrRtGeometryOp, named
+struct NvrRtTextureOp {              // 32 bytes
+	uint32_t	op;                  // NVR_RT_OP_TEXTURE: id = texture; NVR_RT_OP_SLOT_TEXTURES: id = atlas slot
+	uint32_t	id;
+	uint32_t	width;               // TEXTURE: the first (biggest) level sent; SLOT_TEXTURES: the diffuse texture
+	uint32_t	height;              //                                           SLOT_TEXTURES: the normal map
+	uint32_t	offset;              // TEXTURE: byte offset in this frame's staging region; SLOT_TEXTURES: the glow map
+	uint32_t	vkFormat;            // TEXTURE: VK_FORMAT_BC1_RGBA_UNORM_BLOCK / BC2 / BC3 / B8G8R8A8_UNORM
+	uint32_t	bytes;               // TEXTURE: all its levels, packed (rows of blocks, no padding), biggest first; 0 = on the GPU: the levels
+	                                 // are in the shared image NvrRtShared::textureImage - 1 (R8G8B8A8), level 0 at offset (x = low 16 bits,
+	                                 // y = high), level l >= 1 at (x + width, y + the heights of levels 1 .. l-1) (the game's textures are in
+	                                 // D3D9's default pool: no CPU copy; the fork's CopyToShared blits each level into it)
+	uint32_t	levels;
 };
 
 struct NvrRtInstance {               // 64 bytes
@@ -207,7 +240,7 @@ struct NvrRtShared {
 	uint8_t		deviceUuid[16];
 	uint8_t		driverUuid[16];
 	uint32_t	imageCount;
-	uint32_t	pad0;
+	uint32_t	textureStagingMB;    // (protocol 7, was pad0) the "<base>-tex" block's size (0: no real textures), a quarter a frame ring slot
 	NvrRtImageDesc images[NVR_RT_MAX_IMAGES];
 	uint64_t	semInputsReady;      // HANDLE values valid in the helper's process (timeline semaphores, OPAQUE_WIN32)
 	uint64_t	semOutputReady;
@@ -216,7 +249,7 @@ struct NvrRtShared {
 
 	// ---- written by NVR any time (shaderCount last, with a release barrier); paths are full, ANSI
 	volatile uint32_t	shaderCount;
-	uint32_t			pad2;
+	uint32_t			textureImage;        // (protocol 7, was pad2) the real textures' transfer image + 1 (R8G8B8A8; 0 = none)
 	char				shaderPaths[NVR_RT_MAX_SHADERS][260];
 
 	// ---- per frame, written by NVR (latestFrame last, with a release barrier)
@@ -253,6 +286,7 @@ struct NvrRtShared {
 #ifdef __cplusplus
 static_assert(sizeof(NvrRtImageDesc) == 56, "NvrRtImageDesc layout");
 static_assert(sizeof(NvrRtGeometryOp) == 32, "NvrRtGeometryOp layout");
+static_assert(sizeof(NvrRtTextureOp) == 32, "NvrRtTextureOp layout");
 static_assert(sizeof(NvrRtInstance) == 64, "NvrRtInstance layout");
 static_assert(sizeof(NvrRtPass) == 580, "NvrRtPass layout");	// (protocol 5: + extraImages2)
 static_assert(sizeof(NvrRtInstanceRecord) == 32, "NvrRtInstanceRecord layout");

@@ -21,6 +21,8 @@ layout(set = 0, binding = 11, std430) readonly buffer RtGeometry { uint words[];
 #define RT_RECORDS_DECLARED
 #endif
 
+#include "RtTextures.glsl"	// (2026-11-07, protocol 7) the real textures (set 1): the full-size alpha where the game sent it
+
 #define RT_RECORD_ALPHA_TESTED 0x20u
 #define RT_ALPHA_SLOT_SIZE 64	// (the atlas' slot size is read off the image since 2026-11-06: AlphaDetail; this is the colour atlases' size)
 #define RT_ALPHA_SLOTS_A_ROW 32u
@@ -44,7 +46,18 @@ bool rtAlphaPass(uint instance, uint primitive, vec2 bary) {
 	const int slotSize = imageSize(RT_ALPHA_ATLAS).x / int(RT_ALPHA_SLOTS_A_ROW);
 	const ivec2 origin = ivec2(int(slot % RT_ALPHA_SLOTS_A_ROW), int(slot / RT_ALPHA_SLOTS_A_ROW)) * slotSize;
 	const ivec2 texel = origin + clamp(ivec2(fract(uv) * float(slotSize)), ivec2(0), ivec2(slotSize - 1));
-	const float alpha = imageLoad(RT_ALPHA_ATLAS, texel).r;
+	float alpha = imageLoad(RT_ALPHA_ATLAS, texel).r;
+#ifndef RT_NO_REAL_TEXTURES
+	{	// (2026-11-07) the real texture's alpha (full size: wires, leaves and hair edges as the game draws them)
+		const uint id = rtTexSlots[slot].x;
+		if (id != 0u) {
+			const float lod = rtTexLod(id, instance, primitive);
+			alpha = rtTexSample(id, uv, lod).a;
+			// at the full texture's own detail (the finest mips) the game's plain test is exact: no dither (that is for averaged alpha)
+			if (lod < 0.5) return alpha > float((flags >> 8) & 0xFFu) / 255.0;
+		}
+	}
+#endif
 	const float ref = float((flags >> 8) & 0xFFu) / 255.0;
 #ifndef RT_ALPHA_PLAIN
 	// (2026-11-06) hashed alpha test: the slot holds the texture's mip at 64 texels (RtAlphaToAtlas), the AVERAGE alpha of an 8 x 8 block
