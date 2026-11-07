@@ -299,6 +299,9 @@
     <ClInclude Include="..\src\core\DxvkCompute.h" />
     <ClInclude Include="..\src\core\RtCore.h" />
     <ClInclude Include="..\src\core\RtScenePick.h" />
+    <ClInclude Include="..\src\core\RtTexturePack.h" />
+    <ClInclude Include="..\src\core\RtVideoMemory.h" />
+    <ClInclude Include="..\src\core\RtFaceMorph.h" />
     <ClInclude Include="..\src\core\RtLightGrid.h" />
     <ClInclude Include="..\src\core\RtSunShadows.h" />
     <ClInclude Include="..\src\core\RtPathTrace.h" />

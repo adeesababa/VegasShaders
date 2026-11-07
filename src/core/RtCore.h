@@ -97,6 +97,12 @@ public:
 	// mask). A pass that tests them adds AlphaAtlasImage() to its images and includes Compute\Rt\RtAlpha.glsl (FORK-RT-CORE.md).
 	static bool			AlphaTested();
 	static int			AlphaAtlasImage();					// the alpha atlas' image index (-1: none)
+	// UNOFFICIAL 2026-11-07 (rtgap-decals) decals ([Main.Main.RayTracing] Decals, live, with AlphaTested): true while the scene may hold them
+	// (alpha-tested, mask 0x10, custom index NVR_RT_CUSTOM_DECAL). A pass whose rays treat the cut-outs as solid (gl_RayFlagsOpaqueEXT over
+	// mask 0x10) would see them as solid quads: such a pass must test candidates instead (RtAlpha.glsl rtIsDecal; RT AO's AOAlpha 3).
+	static bool			DecalsTraced();
+	// UNOFFICIAL 2026-11-07 the RT scene carries displaced copies of the land / parallax objects (Displacement; RT-DETAIL-GAPS.md 1c)
+	static void			DisplacedCopies(bool& Land, bool& Objects);
 	// UNOFFICIAL 2026-10-29 hit textures ([Main.Main.RayTracing] HitTextures): the albedo atlas' image index (RGBA8; -1: none). A pass
 	// that shades its hits adds it to its images and uses Compute\Rt\RtHit.glsl (rtHitAlbedo: the texture's colour, else the average).
 	static int			AlbedoAtlasImage();
@@ -105,6 +111,8 @@ public:
 	static int			GlowAtlasImage();
 	// UNOFFICIAL 2026-11-02 normal textures ([Main.Main.RayTracing] NormalTextures, with HitTextures): the normal atlas' image index
 	// (RGBA8, the same slots; record flag NVR_RT_RECORD_NORMAL; RtHit.glsl rtHitNormalMapped with RT_NORMAL_ATLAS). -1: none.
+	// (2026-11-07) [Main.Main.RayTracing] RealNormalMaps (default on with RealTextures) needs no image: the real normal maps go with the
+	// real textures (set 1) and set the record flag too; rtHitNormalMapped reads them in every pass that includes RtHit.glsl.
 	static int			NormalAtlasImage();
 	// UNOFFICIAL 2026-10-29 (rt-lamp-shadows): true while the scene holds the posed skinned actors ([Main.Main.RayTracing] Actors +
 	// fork patch 0033; instance mask NVR_RT_MASK_ACTOR = 0x20), so a pass can stop taking people's shadows from elsewhere

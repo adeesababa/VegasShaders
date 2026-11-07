@@ -145,6 +145,10 @@ layout(set = 0, binding = 11, std430) readonly buffer Geometry { uint words[]; }
 // Proceeds a ray query to its end, confirming alpha-tested candidates only where their alpha is solid. Opaque geometry commits by itself.
 // (A macro: a rayQueryEXT cannot be a function parameter.)
 #define Proceed(q)     while (rayQueryProceedEXT(q))         if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&             rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, false)),                         rayQueryGetIntersectionBarycentricsEXT(q, false)))             rayQueryConfirmIntersectionEXT(q)
+// (2026-11-07 rtgap-decals) the AO, sky and shadow rays: decals (NVR_RT_CUSTOM_DECAL) never occlude (RtAlpha.glsl rtAlphaPassShadow);
+// ProceedSolid: AOAlpha 1's cut-outs whole (no texture read) but decals passed (the game sends AOAlpha 3 for it while decals are traced)
+#define ProceedShadow(q) while (rayQueryProceedEXT(q)) if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT && rtAlphaPassShadow(rayQueryGetIntersectionInstanceCustomIndexEXT(q, false), rayQueryGetIntersectionInstanceIdEXT(q, false), uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, false)), rayQueryGetIntersectionBarycentricsEXT(q, false))) rayQueryConfirmIntersectionEXT(q)
+#define ProceedSolid(q) while (rayQueryProceedEXT(q)) if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT && !rtIsDecal(rayQueryGetIntersectionInstanceCustomIndexEXT(q, false))) rayQueryConfirmIntersectionEXT(q)
 
 // ---- AmbientLight.glsl's ----
 vec2 Unpack2(float p) { float high = floor(p / 4096.0); return vec2(high, p - high * 4096.0) / 4095.0; }
@@ -176,11 +180,14 @@ vec2 R2(float i) { return fract(i * vec2(0.7548777, 0.5698403)); }
 // scene is static geometry (land and objects, both faces; alpha-tested ones tested; no actors). anyHit: the first hit found, else the closest.
 // (2026-10-30) alpha: how alpha-tested meshes (mask 0x10) take part: 0 left out, 1 solid (no alpha test: leaf cards occlude whole),
 // 2 tested (rtAlphaPass per candidate; rt-gi-8: AO's 4 short rays 9.5 -> 28 ms at Lucky 38 with the test, so AO defaults to 1).
+// (2026-11-07 rtgap-decals) 3: as 1 while decals are in the scene (AmbientOcclusion.cpp sends it for 1): the cut-outs come to the loop as
+// candidates (no opaque flag: with it a decal would occlude as a solid quad) and are confirmed whole, decals passed. Decals never occlude.
 vec2 Trace(vec3 p, vec3 d, float tMin, float tMax, bool anyHit, int alpha) {
     rayQueryEXT q;
     uint flags = (anyHit ? gl_RayFlagsTerminateOnFirstHitEXT : 0u) | (alpha == 1 ? gl_RayFlagsOpaqueEXT : 0u);
     rayQueryInitializeEXT(q, scene, flags, alpha == 0 ? (RT_CULL & 0xEFu) : RT_CULL, p + cb.origin.xyz, tMin, d, tMax);
-    Proceed(q);
+    if (alpha == 3) { ProceedSolid(q); }
+    else { ProceedShadow(q); }
     if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionTriangleEXT) return vec2(-1.0, 0.0);
     return vec2(rayQueryGetIntersectionTEXT(q, true), rayQueryGetIntersectionFrontFaceEXT(q, true) ? 0.0 : 1.0);
 }
@@ -201,7 +208,7 @@ vec3 Vertex(uint base, uint i) {
 bool Visible(vec3 from, vec3 dir, float tMax) {
     rayQueryEXT s;
     rayQueryInitializeEXT(s, scene, gl_RayFlagsTerminateOnFirstHitEXT, RT_CULL, from + cb.origin.xyz, 0.0, dir, tMax);
-    Proceed(s);
+    ProceedShadow(s);
     return rayQueryGetIntersectionTypeEXT(s, true) != gl_RayQueryCommittedIntersectionTriangleEXT;
 }
 
@@ -243,6 +250,17 @@ vec3 HitNormal(uint instance, uint prim, mat4x3 toScene, vec3 d) {
     }
     if (dot(n, d) > 0.0) n = -n;
     return n;
+}
+
+// (2026-11-07, RT-DETAIL-GAPS.md section 2) the hit's SHADING normal: n bent by the surface's own normal map where its record has one
+// (flag 0x80: [Main.Main.RayTracing] RealNormalMaps, the real map from set 1; RtHit.glsl rtHitNormalMapped). Shade is diffuse, so the
+// bend counts however the ray meets the bump (it stays on the triangle's side). n itself stays for the lift off the surface.
+vec3 ShadingNormal(uint instance, uint prim, vec2 bary, vec3 n, mat4x3 toScene, vec3 d) {
+#ifdef RT_HIT_NORMAL_MAPS
+    return rtHitNormalMapped(instance, prim, bary, n, mat3(toScene));
+#else
+    return n;
+#endif
 }
 
 // ---- (2026-10-31) the radiance cache (docs/next/FORK-RT-GAPS.md section 4; core/RtAmbient.h): 32 x 32 x 16 cells round the camera,
@@ -319,10 +337,11 @@ vec3 CacheIrradiance(vec3 p, vec3 n) {
 // lamps, ReSTIR's direct-light step without the reuse; the first version lit every hit by all 8 lamps unshadowed, through walls and
 // ceilings: Lucky 38 +8/255 everywhere). xi: the pick's random number. (2026-10-31) + the radiance cache's irradiance there (what
 // reaches the hit after one or more bounces: the second bounce on, CacheStrength), already in these units.
-vec3 Shade(uint instance, uint prim, vec2 bary, vec3 hit, vec3 n, float t, float xi) {
+// (2026-11-07) ng: the triangle's normal (the lift off the surface); n: the shading normal (ShadingNormal: the normal map's bend)
+vec3 Shade(uint instance, uint prim, vec2 bary, vec3 hit, vec3 ng, vec3 n, float t, float xi) {
     Record r = records[instance];
     vec3 albedo = clamp(rtHitAlbedo(instance, prim, bary), 0.0, 1.0);
-    vec3 lift = hit + n * (1.0 + 0.002 * t);
+    vec3 lift = hit + ng * (1.0 + 0.002 * t);
     vec3 e = cb.ambient.rgb * (cb.gi.w * (0.5 + 0.5 * n.z));   // GIAmbient (default 0: the game's ambient is already the indirect light)
     float sunCos = dot(n, cb.sunDir.xyz);
     if (cb.sunDir.w > 0.5 && sunCos > 0.0 && Visible(lift, cb.sunDir.xyz, 30000.0)) e += cb.sunColor.rgb * sunCos;
@@ -420,7 +439,8 @@ vec4 Bounce(vec3 start, vec3 d, float tMin, float xi) {
     vec3 hit = start + d * t;
     vec4 seen = ScreenLight(hit);
     if (seen.a > 0.5 && CACHE_B.w < 16.0) return vec4(Clamped(seen.rgb), t / cb.gi.x);   // (DebugView 7: Shade everywhere)
-    return vec4(Shade(instance, prim, rayQueryGetIntersectionBarycentricsEXT(q, true), hit, n, t, xi), t / cb.gi.x);
+    const vec2 bary = rayQueryGetIntersectionBarycentricsEXT(q, true);
+    return vec4(Shade(instance, prim, bary, hit, n, ShadingNormal(instance, prim, bary, n, rayQueryGetIntersectionObjectToWorldEXT(q, true), d), t, xi), t / cb.gi.x);
 }
 #endif
 
@@ -595,6 +615,11 @@ void main() {
     vec3 n = OctDecode(Unpack2(input_.y));
     // The start lifted off the surface: the depth (24 bits, half resolution) and the scene's triangles disagree more far away.
     float bias = 0.75 + viewZ * 0.003;
+    // UNOFFICIAL 2026-11-07 (rtgap-tess, docs/next/RT-DETAIL-GAPS.md 1a) the tessellated bumps' Strength, faded out by view depth as they are
+    // (RtContact.glsl rtTessSlack; core/RtTessContact.h): a point in a hollow of the depth buffer lies under the flat RT surface. The
+    // constants are full: it rides in viewToWorld's 4th column (x Strength, y FadeStart, z FadeEnd; unused by the view's directions, w 0)
+    const vec4 slackIn = cb.viewToWorld[3];
+    const float slack = slackIn.x > 0.0 ? slackIn.x * (1.0 - smoothstep(slackIn.y, max(slackIn.z, slackIn.y + 1.0), viewZ)) : 0.0;
 
     // AO: closest hit; a hit counts in full to half the distance, nothing at the end (no hard edge). A back face right at the start is
     // a ray that began inside something (depth error, tessellated bumps the scene does not have): open, and counted for DebugView 3.
@@ -603,7 +628,7 @@ void main() {
     if (rays > 0) {
         float frame = cb.ao.z > 0.5 ? cb.origin.w : 0.0;
         vec2 noise = fract(vec2(Ign(vec2(texel)), Ign(vec2(texel) + 17.0)) + frame * vec2(0.618034, 0.754878));
-        vec3 start = p + n * bias;
+        vec3 start = p + n * (bias + slack);
         float reach = cb.ao.x, occlusion = 0.0, inside = 0.0, meanHit = 0.0;
         for (int i = 0; i < rays; i++) {
             vec3 d = CosineDirection(n, fract(noise + R2(float(i))));
@@ -623,7 +648,7 @@ void main() {
     float skyVisibility = 1.0, covered = 0.0;
     int skyRays = int(cb.sky.y + 0.5);
     if (skyRays > 0) {
-        vec3 start = p + n * (bias + 8.0);
+        vec3 start = p + n * (bias + max(8.0, slack));   // (2026-11-07: at least the bumps' slack)
         float reach = cb.sky.x;
         vec2 cell = vec2(texel & 3);
         float turn = (cell.x * 4.0 + cell.y) * (3.14159265 / 4.0 / 16.0);
@@ -767,7 +792,8 @@ void main() {
         if (!rayQueryGetIntersectionFrontFaceEXT(q, true)) { inside += 1.0; continue; }
         uint instance = rayQueryGetIntersectionInstanceIdEXT(q, true), prim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, true));
         vec3 n = HitNormal(instance, prim, rayQueryGetIntersectionObjectToWorldEXT(q, true), d);
-        vec3 light = Shade(instance, prim, rayQueryGetIntersectionBarycentricsEXT(q, true), centre + d * th, n, th,
+        const vec2 bary = rayQueryGetIntersectionBarycentricsEXT(q, true);
+        vec3 light = Shade(instance, prim, bary, centre + d * th, n, ShadingNormal(instance, prim, bary, n, rayQueryGetIntersectionObjectToWorldEXT(q, true), d), th,
                            fract(Ign(vec2(index & 255, index >> 8) + 97.0 + float(i)) + frame * 0.569840));
         r += light.r * vec4(1.0, d);
         g += light.g * vec4(1.0, d);

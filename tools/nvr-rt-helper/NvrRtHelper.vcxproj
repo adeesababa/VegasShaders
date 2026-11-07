@@ -66,6 +66,8 @@
     <ClInclude Include="NvrRtReplay.inl" />
     <ClInclude Include="NvrRtShadowDenoise.inl" />
     <ClInclude Include="NvrRtTextures.inl" />
+    <ClInclude Include="NvrRtDisplace.inl" />
+    <ClInclude Include="RtDisplace.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

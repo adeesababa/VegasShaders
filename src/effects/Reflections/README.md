@@ -12,6 +12,9 @@ in docs/next/FORK-RT-REFLECTIONS.md).
    (`[Shaders.Reflections.RT] Enabled`, the NVR DXVK fork, the RT core's helper): **RayGen** (`ReflectionsRayGen.frag`: the march,
    then Dir / Ray / March / MarchHit) -> the helper (`Compute/Rt/ReflectionsRT*.comp`) -> **Resolve** (`ReflectionsRTResolve.frag`:
    the hits shaded from the screen, the cube or the estimate; Spread = x the hit's distance share, y the hit distance).
+   (2026-11-07) The hit normal the estimate is shaded with (sun N.L, lamps, grid / cube) is bent by the hit's own normal map in the
+   textured variants (`ReflectionsRTTex*`) when the core's `[Main.Main.RayTracing] RealNormalMaps` is on (default, with RealTextures):
+   bricks and panels off screen keep their bumps in mirrors. The shadow rays still leave from the flat triangle normal.
 3. Smoothing, one of:
    - **the RT reflection denoiser** (`[Shaders.Reflections.RT] Denoiser`, default on with RT; core/RtReflDenoise.h,
      docs/next/RT-REFLECTION-DENOISER.md): 4 fork passes on frames the RT trace ran (native frames, not under DLSS RR), result copied
@@ -26,6 +29,11 @@ in docs/next/FORK-RT-REFLECTIONS.md).
 `[Shaders.Reflections.Main]` (the look and the SSR trace), `[Shaders.Reflections.RT]` (the RT trace, its fallbacks, and the denoiser:
 `Denoiser`, `DenoiserCore`, `DenoiserHistory`, `DenoiserMirrorHistory`, `DenoiserBlur`, `DenoiserAntiLag`, `DenoiserClip`,
 `DenoiserDebugView`; see defaults.toml for each).
+- (2026-11-07) The RT rays' reach is FarRadius when the core holds the far ring: FarObjectLOD, FarLandLOD, or PTRealtime (which turns
+  FarLandLOD on by itself, docs/next/RT-DETAIL-GAPS.md 7).
+- (2026-11-07) Decals (`[Main.Main.RayTracing] Decals`, with AlphaTested: the ReflectionsRTAlpha* variants): the reflection rays see
+  posters, cracks and blood (lifted 0.5 unit off their surface); the sun / key-lamp shadow ray at a hit passes them
+  (ReflectionsRTBody.glsl RtProceedShadow). RT host scene `decals`.
 
 ## What correct / wrong looks like (the denoiser)
 - At rest, a glossy floor's reflection settles within a second to a clean blur that is sharp where an object stands on the floor.
@@ -37,4 +45,5 @@ in docs/next/FORK-RT-REFLECTIONS.md).
 ## Tests
 - RT test host scene `refldenoise` (`tools/nvr-rt-host/run.ps1 -Scene refldenoise`): the denoiser vs the old chain vs the exact glossy
   reflection, still and moving (no game).
+- RT test host scene `normalmaps`: the RT trace's hit normal against the CPU's bend of a striped normal map (and flat with it off).
 - Bench lists `rrdn-still`, `rrdn-turn` (bench/foundations/lists; run script bench/deep-roadmap/rtrefldn/run_rdn.sh).

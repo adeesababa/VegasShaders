@@ -7,6 +7,7 @@
 // Plain C++ only: no Gamebryo, D3D or NVR headers (the host includes this file as is).
 
 #include <stdint.h>
+#include <math.h>
 #include "../../tools/nvr-rt-helper/NvrRtProtocol.h"
 
 namespace RtScenePick {
@@ -19,7 +20,7 @@ namespace RtScenePick {
 		Skinned,			// skinned, not walked as an actor
 		Leaves,				// a SpeedTree leaf with LeafCards on: AddLeaves takes it
 		NotLighting,		// no shader property, or not a lighting shader
-		DecalOrRefraction,
+		DecalOrRefraction,	// refraction / fire refraction always; a decal with [Main.Main.RayTracing] Decals or AlphaTested off
 		SpeedTreeLeaf,		// a SpeedTree leaf without LeafCards
 		BlendedOnly,		// alpha blended, no alpha test (glass, fx)
 		AlphaOff,			// alpha-tested with [Main.Main.RayTracing] AlphaTested off
@@ -38,7 +39,8 @@ namespace RtScenePick {
 		bool		hasShaderProperty = true;
 		bool		lightingProperty = true;	// BSShaderProperty::IsLightingProperty
 		bool		speedTreeLeaf = false;		// the shade property's type is kProp_SpeedTreeLeaf
-		bool		decalOrRefraction = false;	// BSSP_REFRACTION, BSSP_FIRE_REFRACTION, BSSP_DECAL or BSSP_DYNAMIC_DECAL
+		bool		refraction = false;			// BSSP_REFRACTION or BSSP_FIRE_REFRACTION (glass, heat haze): never traced
+		bool		decal = false;				// (2026-11-07) BSSP_DECAL or BSSP_DYNAMIC_DECAL (posters, cracks, the game's blood splats)
 		bool		hasAlphaProperty = false;
 		uint16_t	alphaFlags = 0;
 	};
@@ -46,6 +48,7 @@ namespace RtScenePick {
 		float		cullAngle = 0.0f;			// [Main.Main.RayTracing] CullAngle (0 off)
 		bool		alphaTested = false;		// [Main.Main.RayTracing] AlphaTested (and the fork stages texcoords)
 		bool		leafCards = false;			// LeafCards (leaf planes > 0)
+		bool		decals = false;				// (2026-11-07) [Main.Main.RayTracing] Decals (with AlphaTested)
 	};
 
 	// AddGeometry's tests before the geometry is described; alphaTested: it goes in as an alpha-tested caster
@@ -56,7 +59,15 @@ namespace RtScenePick {
 		if (g.skinned) return Skinned;
 		if (s.leafCards && !g.land && g.hasShaderProperty && g.speedTreeLeaf) return Leaves;
 		if (!g.hasShaderProperty || !g.lightingProperty) return NotLighting;
-		if (g.decalOrRefraction) return DecalOrRefraction;
+		if (g.refraction) return DecalOrRefraction;
+		// (2026-11-07, docs/next/RT-DETAIL-GAPS.md 5) decals go in as alpha-tested geometry (their diffuse alpha the cut-out: DecalAlphaRef,
+		// blended ones too), lifted off what they lie on (DecalLift) and tagged NVR_RT_CUSTOM_DECAL: shadow, AO and visibility rays pass
+		// them (RtAlpha.glsl rtAlphaPassShadow), reflections, GI and the path tracer's bounces see them
+		if (g.decal) {
+			if (!s.decals || !s.alphaTested) return DecalOrRefraction;
+			alphaTested = true;
+			return Taken;
+		}
 		if (g.speedTreeLeaf) return SpeedTreeLeaf;
 		// Far object LOD carries an alpha property for its distance fade (blend only): it goes in opaque. Far tree / billboard LOD is cut out
 		// (test on): the alpha-tested path like near geometry.
@@ -84,7 +95,48 @@ namespace RtScenePick {
 		bool		player = false;				// walked as the player's rigid parts
 		bool		farLod = false;				// walked as far object LOD
 		bool		compact = false;			// [Main.Main.RayTracing] Compact
+		bool		hidden = false;				// (2026-11-07) the player's body in first person: traced, not drawn (NVR_RT_CUSTOM_HIDDEN)
+		bool		decal = false;				// (2026-11-07) a decal (alpha-tested; NVR_RT_CUSTOM_DECAL)
 	};
+
+	// (2026-11-07) a decal's alpha reference for the traced test (D3DCMP_GREATER): its own with the alpha test on; blended only (most decals:
+	// posters, cracks, blood) 128, where its blend is half opaque; no alpha property 0 (an opaque decal: its whole quad, alpha > 0)
+	inline uint32_t DecalAlphaRef(bool hasAlphaProperty, uint16_t alphaFlags, uint32_t alphaTestRef) {
+		if (hasAlphaProperty && (alphaFlags & kAlphaTest)) return alphaTestRef & 0xFFu;
+		if (hasAlphaProperty && (alphaFlags & kAlphaBlend)) return 128u;
+		return 0u;
+	}
+
+	// (2026-11-07) how far a decal is lifted along its normal in the traced scene (game units): coplanar with what it lies on, the two would
+	// fight for every ray (their hits at the same distance)
+	constexpr float kDecalLift = 0.5f;
+
+	// The decal's average normal in its model space: the mean of its vertex normals (count x 3 floats); false: none, or they cancel out
+	inline bool AverageNormal(const float* normals, uint32_t count, float out[3]) {
+		double n[3] = { 0.0, 0.0, 0.0 };
+		for (uint32_t i = 0; normals && i < count; i++) for (int k = 0; k < 3; k++) n[k] += normals[3 * i + k];
+		const double len = sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+		if (!(len > 1e-3 * (count ? count : 1))) return false;
+		for (int k = 0; k < 3; k++) out[k] = (float)(n[k] / len);
+		return true;
+	}
+
+	// Moves an instance transform (3 x 4, rows = the scene's axes, column 3 the translation: RtCore's camera-relative transform) `lift` units
+	// along the model-space normal turned into scene space by its 3 x 3 (rotation x uniform scale: the normal keeps its direction). The
+	// geometry is shared by every copy (GeometryKey), so the lift goes in the instance. false: no usable normal (left in place).
+	inline bool DecalLift(float transform[3][4], const float modelNormal[3], float lift) {
+		float n[3];
+		for (int r = 0; r < 3; r++) n[r] = transform[r][0] * modelNormal[0] + transform[r][1] * modelNormal[1] + transform[r][2] * modelNormal[2];
+		const float len = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+		if (!(len > 1e-6f)) return false;
+		for (int r = 0; r < 3; r++) transform[r][3] += n[r] / len * lift;
+		return true;
+	}
+
+	// The instance's custom index (NvrRtProtocol.h NVR_RT_CUSTOM_*): land, hidden (the first-person body), decal
+	inline uint32_t CustomIndex(const Record& r) {
+		return (r.land ? NVR_RT_CUSTOM_LAND : 0u) | (r.hidden ? NVR_RT_CUSTOM_HIDDEN : 0u) | (r.decal ? NVR_RT_CUSTOM_DECAL : 0u);
+	}
 
 	inline uint32_t RecordFlags(const Record& r) {
 		uint32_t flags = (r.land ? NVR_RT_RECORD_LAND : 0u) | (r.albedoKnown ? NVR_RT_RECORD_ALBEDO_KNOWN : 0u) | (r.glowMap ? NVR_RT_RECORD_GLOW : 0u);

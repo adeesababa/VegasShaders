@@ -3,6 +3,7 @@
 
 #include "RtLightGrid.h"	// (2026-11-06) PTLightGrid's builder (shared with tools/nvr-rt-host)
 #include "RtRestirRow.h"	// (2026-11-07) PTRestirDI's frame row (shared with tools/nvr-rt-host)
+#include "RtTessContact.h"	// (2026-11-07 rtgap-tess) the bumps' slack + PTContactShadows in the frame row (shared with tools/nvr-rt-host)
 #include "RtPathTrace.h"
 #include "RtCore.h"
 #include "DxvkCompute.h"
@@ -56,6 +57,8 @@ namespace {
 		float	denoiseAntiLag = 3.0f;	// (2026-11-07) PTDenoiseAntiLag: the fast history's window in standard errors (0 off)
 		float	denoiseGuide = 0.35f;	// (2026-11-07) PTDenoiseGuide: the a-trous passes stop at the game's shading edges (0 off)
 		float	detail = 1.0f;			// (2026-11-07) PTDetail: the game's fine shading on the traced light (0 off, 1 all)
+		float	contact = 1.0f;			// (2026-11-07 rtgap-tess) PTContactShadows: the depth buffer's contact march at the first hit (strength, 0 off)
+		float	contactLength = 24.0f;	// PTContactLength: its length on screen (pixels)
 		float	detailRadius = 4.0f;	// (2026-11-07) PTDetailRadius: its local average's reach (pixels)	// (2026-11-07) PTDenoisePeopleHistory: people's pixels keep at most this many frames (0 off)
 		bool	restirGI = false;		// PTRestirGI (2026-11-04 d): ReSTIR GI on the first bounce (with PTDenoise; RtPathTraceGI.spv + RtRestirGI.spv)
 		float	restirMaxM = 20.0f, restirSpatial = 4.0f, restirRadius = 16.0f, restirDepth = 0.03f, restirNormal = 0.9f;	// its test keys
@@ -180,6 +183,8 @@ namespace {
 		S.denoiseGuide = f("PTDenoiseGuide", 0.0f, 4.0f);
 		S.detail = f("PTDetail", 0.0f, 1.0f);
 		S.detailRadius = f("PTDetailRadius", 1.0f, 16.0f);
+		S.contact = f("PTContactShadows", 0.0f, 1.0f);	// (2026-11-07 rtgap-tess; a missing key: 0, off)
+		S.contactLength = f("PTContactLength", 0.0f, 128.0f);
 		S.lastSky = i("PTLastSky", -1, 1);
 		S.lastBounce = i("PTLastBounce", -1, 1);
 		S.lampFalloff = i("PTLampFalloff", 0, 1);
@@ -594,7 +599,13 @@ namespace {
 		const bool restir = S.restirDI > 0 && (flags & 512u) && !S.restirGI;	// (2026-11-07) PTRestirDI needs the lamp image (its frame row)
 		const bool cache = S.radianceCache > 0 && shaderCache >= 0 && cacheLog2Setup > 0 && !S.restirGI;	// (2026-11-07) PTRadianceCache too
 		const bool energy = S.specular;	// (2026-11-07) PTSpecular's energy table rides in the frame row (section 49)
-		if (imageLamps >= 0 && (lampCount > 8 || glowCount > 0 || restir || cache || energy)) {
+		// (2026-11-07 rtgap-tess; RT-DETAIL-GAPS.md section 1, RT-PATH-TRACING.md section 56) the bumps' slack (1a) and PTContactShadows (1b)
+		// ride in the frame row's texels 16-21 (RtTessContact.h): they need the lamp image too
+		RtTessContact::Slack slack;
+		{ float v[3]; DxvkCompute::DisplaceRtSlack(v); slack.strength = v[0]; slack.fadeStart = v[1]; slack.fadeEnd = v[2]; }
+		const RtTessContact::Contact contact = RtTessContact::Make((flags & 8u) ? S.contact : 0.0f, S.contactLength);	// (the screen's G-buffer: flag 8)
+		const bool tess = slack.strength > 0.0f || contact.strength > 0.0f;
+		if (imageLamps >= 0 && (lampCount > 8 || glowCount > 0 || restir || cache || energy || tess)) {
 			if (!lampTexture) TheRenderManager->device->CreateTexture(kLightTexels, kLampRows, 1, D3DUSAGE_DYNAMIC, D3DFMT_G32R32F, D3DPOOL_DEFAULT, &lampTexture, nullptr);
 			D3DLOCKED_RECT r = {};
 			if (lampTexture && SUCCEEDED(lampTexture->LockRect(0, &r, nullptr, D3DLOCK_DISCARD))) {
@@ -622,6 +633,7 @@ namespace {
 				{	// (2026-11-07) the flashlight's cone (lamp 0) in the frame row's texel 15 (RtPathTrace.comp LampSpot; RtRestirRow fills 0-14)
 					float* row = (float*)((char*)r.pBits + (size_t)r.Pitch * kFrameRow);
 					row[30] = lampCount > 0 ? lampData[0].colour[3] : 0.0f; row[31] = 0.0f;
+					RtTessContact::PackRow(row, slack, contact);	// (2026-11-07 rtgap-tess) texels 16-21
 				}
 				lampTexture->UnlockRect(0);
 				if (RtCore::CopyIn(imageLamps, lampTexture)) { flags |= 1024u | (gridOn ? 4096u : 0u) | (restir ? 262144u : 0u) | (cache ? 524288u : 0u) | (restir || cache || energy ? 1048576u : 0u); c.misc[0] = (float)lampCount; c.rect[2] = (float)glowCount; }

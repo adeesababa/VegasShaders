@@ -787,7 +787,17 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 		c.viewToWorld._32 += a * c.viewToWorld._12 + b * c.viewToWorld._22;
 		c.viewToWorld._33 += a * c.viewToWorld._13 + b * c.viewToWorld._23;
 	}
-	c.gi3 = D3DXVECTOR4((float)rt.GIInterleave, (float)rt.AOAlpha, 0.0f, 0.0f);
+	// UNOFFICIAL 2026-11-07 (rtgap-tess; docs/next/RT-DETAIL-GAPS.md section 1a) the tessellated bumps' slack: the AO and sky rays start the
+	// Strength further off the surface while the bumps are drawn (a hollow of the depth buffer lies under the flat RT surface). The constants
+	// are full: it rides in viewToWorld's 4th row (the GLSL's 4th column, unused by the view's directions: they have w 0)
+	{
+		float slack[3]; DxvkCompute::DisplaceRtSlack(slack);
+		c.viewToWorld._41 = slack[0]; c.viewToWorld._42 = slack[1]; c.viewToWorld._43 = (std::max)(slack[2], slack[1] + 1.0f);
+	}
+	// (2026-11-07 rtgap-decals) AOAlpha 1 (cut-outs solid, traced opaque) becomes 3 while the core traces decals: solid cut-outs still, but
+	// tested one by one so the decals (NVR_RT_CUSTOM_DECAL) pass instead of occluding as solid quads (RtAOTrace.comp Trace)
+	const int aoAlpha = rt.AOAlpha == 1 && RtCore::DecalsTraced() ? 3 : rt.AOAlpha;
+	c.gi3 = D3DXVECTOR4((float)rt.GIInterleave, (float)aoAlpha, 0.0f, 0.0f);
 	// (2026-10-30) GIReuse: the bounce in its own pass with ReSTIR GI's temporal reuse (RtGITrace: the GI fields, last frame's view and the
 	// camera's move since, the reservoirs swapped every frame); the AO pass then traces no GI rays.
 	static D3DXMATRIX prevViewToWorld;

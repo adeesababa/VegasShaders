@@ -12,6 +12,8 @@
 //   texel 10    PTRestirDIMaxM, PTRestirDISpatial;  11  PTRestirDIRadius, PTRestirDINormal;  12  PTRestirDIPlane, the cache's first word / 4096
 //   texel 13    the cache's keys: PTCacheCell (the cell at 1000 units, world units), PTCacheMaxSamples (resolve cap)
 //   texel 14    PTCacheFrame (frames since the helper start, for the cache's age), PTCacheMinSamples (a lookup's minimum)
+//   texel 15    (RtPathTrace.cpp) the flashlight's cone;  texels 16-21 (2026-11-07 rtgap-tess) the bumps' slack + PTContactShadows
+//               (RtTessContact.h PackRow, written after Build)
 //   texels 32-287  PTSpecular's GGX energy table kGgxEnergy (512 values, two a texel; RtPathTrace.comp SpecE; with flag 1048576)
 // The remap: the lamp image's row 0 holds lamp k at floats 8k .. 8k + 7 (pos.xy, pos.z + reach, colour.rg, colour.b + this): float 8j + 7 =
 // 1 + this frame's number of last frame's lamp j (0: gone), matched by world position and reach (within 1 unit).

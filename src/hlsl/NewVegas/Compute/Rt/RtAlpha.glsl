@@ -75,3 +75,14 @@ bool rtAlphaPass(uint instance, uint primitive, vec2 bary) {
 	return alpha > ref;	// D3DCMP_GREATER, the game's alpha test (before 2026-11-06: a 64-texel mip loses thin cut-outs)
 #endif
 }
+
+// UNOFFICIAL 2026-11-07 (rtgap-decals, docs/next/RT-DETAIL-GAPS.md 5) decals ([Main.Main.RayTracing] Decals: posters, cracks, the game's
+// blood) are alpha-tested instances with the custom index bit NVR_RT_CUSTOM_DECAL, lifted 0.5 unit off what they lie on. Thin and flat on
+// a surface, they must not shadow or occlude it: shadow, AO and visibility rays test their candidates with this instead of rtAlphaPass
+// (customIndex = rayQueryGetIntersectionInstanceCustomIndexEXT(q, false)); reflections, GI and path tracer bounces keep rtAlphaPass and
+// see them. Such rays must not be traced with gl_RayFlagsOpaqueEXT over mask 0x10 (a decal would be a solid quad there).
+#define RT_CUSTOM_DECAL 4u
+bool rtIsDecal(uint customIndex) { return (customIndex & RT_CUSTOM_DECAL) != 0u; }
+bool rtAlphaPassShadow(uint customIndex, uint instance, uint primitive, vec2 bary) {
+	return !rtIsDecal(customIndex) && rtAlphaPass(instance, primitive, bary);
+}

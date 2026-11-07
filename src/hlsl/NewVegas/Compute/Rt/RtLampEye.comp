@@ -46,9 +46,10 @@ bool blocked(vec3 origin, vec3 segment, float tMin, float tMax, uint mask) {
 	const bool testAlpha = p.jitter.z > 0.5;
 	rayQueryInitializeEXT(q, scene, gl_RayFlagsTerminateOnFirstHitEXT | (testAlpha ? 0u : gl_RayFlagsOpaqueEXT),
 		testAlpha ? (mask | 0x10u) : mask, origin, tMin, segment, tMax);
+	// (2026-11-07 rtgap-decals) a shadow ray: decals (NVR_RT_CUSTOM_DECAL) never block it (RtAlpha.glsl rtAlphaPassShadow)
 	while (rayQueryProceedEXT(q))
 		if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
-			rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
+			rtAlphaPassShadow(rayQueryGetIntersectionInstanceCustomIndexEXT(q, false), rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
 				rayQueryGetIntersectionBarycentricsEXT(q, false)))
 			rayQueryConfirmIntersectionEXT(q);
 	return rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT;

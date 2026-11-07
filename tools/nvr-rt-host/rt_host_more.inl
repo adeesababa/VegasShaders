@@ -58,6 +58,7 @@ static float fract(float x) { return x - std::floor(x); }
 struct SunConstants {         // RtSunShadows.cpp PassConstants
 	float size[4], forward[4], right[4], up[4], origin[4], sun[4], bias[4], range[4], alpha[4], full[4];
 	float cloud[4], cloudCentre[4], cloudLight[4], camera[4];
+	float slack[4], contact[4], contactGate[4];   // (2026-11-07 rtgap-tess) RtTessContact.h
 };
 
 static bool sceneSun(Ctx& c) {
@@ -1057,7 +1058,18 @@ static bool sceneScenePick(Ctx&) {
 	{ RtScenePick::Geometry t = g; t.speedTreeLeaf = true; t.land = true; t.lightingProperty = false; expectFate("leaf as land", t, on, NotLighting, false); }
 	{ RtScenePick::Geometry t = g; t.hasShaderProperty = false; expectFate("no shader property", t, on, NotLighting, false); }
 	{ RtScenePick::Geometry t = g; t.lightingProperty = false; expectFate("not lighting", t, on, NotLighting, false); }
-	{ RtScenePick::Geometry t = g; t.decalOrRefraction = true; expectFate("decal", t, on, DecalOrRefraction, false); }
+	// (2026-11-07 rtgap-decals) refraction stays out; decals go in alpha-tested with Decals + AlphaTested on, whatever their alpha property
+	{ RtScenePick::Geometry t = g; t.refraction = true; expectFate("refraction", t, on, DecalOrRefraction, false); }
+	{ Switches d = on; d.decals = true;
+	  { RtScenePick::Geometry t = g; t.refraction = true; t.decal = true; expectFate("refraction + decal", t, d, DecalOrRefraction, false); }
+	  { RtScenePick::Geometry t = g; t.decal = true; expectFate("decal, Decals off", t, on, DecalOrRefraction, false); }
+	  { RtScenePick::Geometry t = g; t.decal = true; Switches o = off; o.decals = true; expectFate("decal, AlphaTested off", t, o, DecalOrRefraction, false); }
+	  { RtScenePick::Geometry t = g; t.decal = true; expectFate("decal (no alpha property)", t, d, Taken, true); }
+	  { RtScenePick::Geometry t = g; t.decal = true; t.hasAlphaProperty = true; t.alphaFlags = kAlphaBlend; expectFate("decal, blended only", t, d, Taken, true); }
+	  { RtScenePick::Geometry t = g; t.decal = true; t.hasAlphaProperty = true; t.alphaFlags = kAlphaTest; expectFate("decal, alpha-tested", t, d, Taken, true); }
+	  { RtScenePick::Geometry t = g; t.decal = true; t.lightingProperty = false; expectFate("decal, not lighting", t, d, NotLighting, false); }
+	  { RtScenePick::Geometry t = g; t.decal = true; t.skinned = true; expectFate("decal, skinned", t, d, Skinned, false); }
+	  { RtScenePick::Geometry t = g; t.hasAlphaProperty = true; t.alphaFlags = kAlphaBlend; expectFate("blended glass, Decals on", t, d, BlendedOnly, false); } }
 	{ RtScenePick::Geometry t = g; t.hasAlphaProperty = true; t.alphaFlags = kAlphaBlend; expectFate("blended glass", t, on, BlendedOnly, false); }
 	{ RtScenePick::Geometry t = g; t.hasAlphaProperty = true; t.alphaFlags = kAlphaTest; expectFate("cut-out, AlphaTested on", t, on, Taken, true); }
 	{ RtScenePick::Geometry t = g; t.hasAlphaProperty = true; t.alphaFlags = kAlphaTest | kAlphaBlend; expectFate("cut-out + blend", t, on, Taken, true); }
@@ -1077,6 +1089,33 @@ static bool sceneScenePick(Ctx&) {
 	  expectU("compact alpha op", OpFlags(r), NVR_RT_OP_FLAG_TEXCOORDS | NVR_RT_OP_FLAG_ALPHA | NVR_RT_OP_FLAG_COMPACT); }
 	{ Record r; r.albedoKnown = true; r.glowMap = true; r.land = true; expectU("plain record", RecordFlags(r), NVR_RT_RECORD_LAND | NVR_RT_RECORD_ALBEDO_KNOWN | NVR_RT_RECORD_GLOW);
 	  r.materialRule = true; r.rough = 1; r.metal = 1; r.normalMap = true; expectU("rule + normal ignored without texcoords", RecordFlags(r), NVR_RT_RECORD_LAND | NVR_RT_RECORD_ALBEDO_KNOWN | NVR_RT_RECORD_GLOW); }
+	// (2026-11-07 rtgap-decals) a decal's record, mask, custom index, alpha reference, normal and lift
+	{ Record r; r.decal = true; r.alphaTested = true; r.slot = 7; r.alphaRef = 128; r.hookMask = 0x0C;
+	  expectU("decal mask (alpha, over the hook)", InstanceMask(r), NVR_RT_MASK_ALPHA);
+	  expectU("decal custom index", CustomIndex(r), NVR_RT_CUSTOM_DECAL);
+	  expectU("decal record (alpha-tested, ref 128, slot 7)", RecordFlags(r), NVR_RT_RECORD_ALPHA_TESTED | (128u << 8) | (7u << 16));
+	  expectU("decal op", OpFlags(r), NVR_RT_OP_FLAG_TEXCOORDS | NVR_RT_OP_FLAG_ALPHA);
+	  Record l; l.land = true; l.hidden = true; expectU("land + hidden custom index", CustomIndex(l), NVR_RT_CUSTOM_LAND | NVR_RT_CUSTOM_HIDDEN);
+	  expectU("custom index bits distinct", NVR_RT_CUSTOM_DECAL & (NVR_RT_CUSTOM_LAND | NVR_RT_CUSTOM_HIDDEN), 0u);
+	  expectU("decal ref: alpha test", DecalAlphaRef(true, kAlphaTest | kAlphaBlend, 0x1A0), 0xA0);
+	  expectU("decal ref: blended only", DecalAlphaRef(true, kAlphaBlend, 77), 128);
+	  expectU("decal ref: alpha property, neither bit", DecalAlphaRef(true, 0x00EC, 77), 0);
+	  expectU("decal ref: no alpha property", DecalAlphaRef(false, 0, 77), 0); }
+	{ const float up[12] = { 0, 0, 1, 0, 0.2f, 0.98f, 0, -0.2f, 0.98f, 0, 0, 1 };
+	  float n[3] = {};
+	  cases++; if (!AverageNormal(up, 4, n) || std::fabs(n[2] - 1.0f) > 1e-3f || std::fabs(n[0]) > 1e-6f || std::fabs(n[1]) > 1e-6f) { bad++; say("    average normal: %f %f %f\n", n[0], n[1], n[2]); }
+	  const float cancel[6] = { 0, 0, 1, 0, 0, -1 };
+	  cases++; if (AverageNormal(cancel, 2, n)) { bad++; say("    average normal of a cancelling pair: should be none\n"); }
+	  cases++; if (AverageNormal(nullptr, 0, n)) { bad++; say("    average normal of nothing: should be none\n"); }
+	  // a decal model lying in its own xy plane (normal +z), turned 90 degrees about x (+z -> -y) and scaled 3, at (10, 20, 30): lifted 0.5
+	  // along -y exactly (the scale does not lengthen the lift)
+	  float t[3][4] = { { 3, 0, 0, 10 }, { 0, 0, -3, 20 }, { 0, 3, 0, 30 } };
+	  const float mz[3] = { 0, 0, 1 };
+	  cases++;
+	  if (!DecalLift(t, mz, kDecalLift) || std::fabs(t[0][3] - 10.0f) > 1e-5f || std::fabs(t[1][3] - 19.5f) > 1e-5f || std::fabs(t[2][3] - 30.0f) > 1e-5f ||
+	      t[0][0] != 3 || t[1][2] != -3 || t[2][1] != 3) { bad++; say("    decal lift: translation %f %f %f\n", t[0][3], t[1][3], t[2][3]); }
+	  float z[3][4] = {}; const float zn[3] = { 0, 0, 1 };
+	  cases++; if (DecalLift(z, zn, kDecalLift)) { bad++; say("    decal lift with a zero transform: should refuse\n"); } }
 	// every slot x refs x rules: each field reads back as the shaders read it, nothing spills
 	int packBad = 0, packed = 0;
 	for (int slot = 0; slot < 1024; slot++) for (int kind = 0; kind < 2; kind++) for (int ref = 0; ref < 256; ref += kind ? 255 : 51) for (int rule = 0; rule < 9; rule++) {

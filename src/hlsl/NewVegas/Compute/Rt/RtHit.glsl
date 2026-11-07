@@ -97,18 +97,34 @@ vec3 rtHitGlow(uint instance, uint primitive, vec2 bary) {
 // tangent frame is the triangle's own (from its positions and texcoords; no vertex tangents in the arena), made orthogonal to n; the
 // map's texel (64 x 64 a texture, as stored: rgb x 2 - 1) bends n. A slot without the map (0) or a degenerate triangle: n unchanged.
 // #define RT_NORMAL_ATLAS <the normal atlas: layout(rgba8) readonly image2D> before including, with RtCore::NormalAtlasImage() bound.
+// (2026-11-07, RT-DETAIL-GAPS.md section 2) with the real textures (protocol 7, set 1) the slot's real normal map (its id .y) is read
+// first, filtered with the hit's footprint (rtConeWidth / rtConeDir, as the diffuse), and the function exists WITHOUT the atlas too
+// (RT_HIT_NORMAL_MAPS is defined where it does): RtCore sets the record's 0x80 flag where a slot has a normal map sent
+// ([Main.Main.RayTracing] RealNormalMaps, default on with RealTextures), so the flag alone decides; the atlas is the fallback only
+// where it is defined AND rtHitNormalAtlasOn (the path tracer binds a stand-in image there when NormalTextures is off: flag 64 off).
+// The tangent frame's v follows the texcoord's v (the grass shader's and NormalTextures' convention).
 #define RT_HIT_NORMAL_FLAG 0x80u
+#if defined(RT_NORMAL_ATLAS) || !defined(RT_NO_REAL_TEXTURES)
+#define RT_HIT_NORMAL_MAPS
 #ifdef RT_NORMAL_ATLAS
+bool rtHitNormalAtlasOn = true;	// false: the image at RT_NORMAL_ATLAS is a stand-in (not read)
+#endif
 vec3 rtHitNormalMapped(uint instance, uint primitive, vec2 bary, vec3 n, mat3 toScene) {
 	if ((records[instance].flags & RT_HIT_NORMAL_FLAG) == 0u || !rtHitHasTexcoords(instance) || records[instance].vertexOffset == 0xFFFFFFFFu) return n;
-	const uint slot = (records[instance].flags >> 16) & 0x3FFu;	// (2026-11-06) bits 16-25 (26-31: the material rule)
-	const ivec2 origin = ivec2(int(slot % 32u), int(slot / 32u)) * 64;
 	const vec2 uv = rtHitTexcoord(instance, primitive, bary);
-	vec3 m = imageLoad(RT_NORMAL_ATLAS, origin + clamp(ivec2(fract(uv) * 64.0), ivec2(0), ivec2(63))).rgb;
+	vec3 m = vec3(0.0);
+	bool found = false;
 #ifndef RT_NO_REAL_TEXTURES
 	{	// (2026-11-07) the real normal map (as stored, not sRGB)
 		const uint id = rtSlotTextures(records[instance].flags).y;
-		if (id != 0u) m = rtTexSampleHit(id, uv, instance, primitive).rgb;
+		if (id != 0u) { m = rtTexSampleHit(id, uv, instance, primitive).rgb; found = true; }
+	}
+#endif
+#ifdef RT_NORMAL_ATLAS
+	if (!found && rtHitNormalAtlasOn) {
+		const uint slot = (records[instance].flags >> 16) & 0x3FFu;	// (2026-11-06) bits 16-25 (26-31: the material rule)
+		const ivec2 origin = ivec2(int(slot % 32u), int(slot / 32u)) * 64;
+		m = imageLoad(RT_NORMAL_ATLAS, origin + clamp(ivec2(fract(uv) * 64.0), ivec2(0), ivec2(63))).rgb;
 	}
 #endif
 	if (dot(m, m) < 1.0e-4) return n;

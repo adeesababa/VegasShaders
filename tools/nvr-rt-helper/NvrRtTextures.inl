@@ -16,6 +16,13 @@
 // Set 1 is bound to every pass next to set 0. A shader that does not declare it is unaffected; a slot whose table entry is 0 keeps the
 // atlas. Ids are never reused by NVR while frames in flight may still read them (it waits 16 exchanges), so a descriptor is only ever
 // written where no pending frame reads it (UPDATE_UNUSED_WHILE_PENDING).
+//
+// The game's route (what RtCore really does, 2026-11-07): the game's textures are in D3D9's DEFAULT pool (no CPU copy to lock), so ops
+// come with bytes 0: the fork's CopyToShared has put the levels into a transfer image this exchange, and Record copies them image to
+// image. Protocol 8 (rtgap-textures): one transfer image per route (NvrRtShared::textureImage's bytes): RGBA8 (decoded by the fork's
+// blit) and, with fork 1.8-rt-bc, BC1 / BC3 / BC5 (the game's blocks as they are: the helper's copy is then BC too, a quarter to an
+// eighth of RGBA8's memory). The "-tex" CPU route above stays (the RT test host feeds it); NVR releases textures it no longer uses
+// (TEXTURE_RELEASE, least recently used first, when RealTextureBudgetMB is full) and gives their ids out again 16+ exchanges later.
 
 namespace RealTex {
 
@@ -103,7 +110,12 @@ namespace RealTex {
 	bool Open(Helper& h, const wchar_t* base, uint32_t mb) {
 		RealTextures& t = h.tex;
 		if (!h.vk.bindless) return true;
-		if (g_shared->textureImage) Log("real textures: transfer image %u (the game's textures blitted there by the fork)", g_shared->textureImage - 1);
+		for (uint32_t k = 0; k < NVR_RT_TEX_TRANSFERS; k++) {	// (protocol 8) one transfer image a route
+			const uint32_t b = (g_shared->textureImage >> (8u * k)) & 0xFFu;
+			if (b && b - 1 < h.imageCount)
+				Log("real textures: transfer image %u (%ux%u, format %u: %s)", b - 1, h.images[b - 1].width, h.images[b - 1].height, (unsigned)h.images[b - 1].format,
+					BlockBytes(h.images[b - 1].format) ? "the game's BC blocks copied as they are by the fork" : "the game's textures decoded by the fork's blit");
+		}
 		if (!mb) return true;
 		std::wstring name = std::wstring(base) + NVR_RT_EVENT_TEX_SUFFIX;
 		HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, name.c_str());
@@ -163,12 +175,25 @@ namespace RealTex {
 		x = RealTexture();
 	}
 
+	// (protocol 8) the op's level count and view swizzle
+	uint32_t LevelsOf(const NvrRtTextureOp& op) { return op.levels & NVR_RT_TEX_LEVELS_MASK; }
+
+	// (protocol 8) the transfer image a GPU-route op reads: the one of NvrRtShared::textureImage's bytes whose format is the op's (~0u: none)
+	uint32_t TransferFor(const Helper& h, uint32_t vkFormat) {
+		for (uint32_t k = 0; k < NVR_RT_TEX_TRANSFERS; k++) {
+			const uint32_t b = (g_shared->textureImage >> (8u * k)) & 0xFFu;
+			if (b && b - 1 < h.imageCount && h.images[b - 1].image && (uint32_t)h.images[b - 1].format == vkFormat) return b - 1;
+		}
+		return ~0u;
+	}
+
 	bool Make(Helper& h, const NvrRtTextureOp& op, RealTexture& x) {
+		const uint32_t levels = LevelsOf(op);
 		VkImageCreateInfo ii = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
 		ii.imageType = VK_IMAGE_TYPE_2D;
 		ii.format = (VkFormat)op.vkFormat;
 		ii.extent = { op.width, op.height, 1 };
-		ii.mipLevels = op.levels;
+		ii.mipLevels = levels;
 		ii.arrayLayers = 1;
 		ii.samples = VK_SAMPLE_COUNT_1_BIT;
 		ii.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -188,10 +213,12 @@ namespace RealTex {
 		vi.image = x.image;
 		vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
 		vi.format = ii.format;
-		vi.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, op.levels, 0, 1 };
+		vi.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1 };
+		if (op.levels & NVR_RT_TEX_SWIZZLE_GR)	// (protocol 8) ATI2 as BC5: what DXVK's view of ATI2 gives the game's shaders
+			vi.components = { VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_ONE, VK_COMPONENT_SWIZZLE_ONE };
 		if (vkCreateImageView(h.vk.device, &vi, nullptr, &x.view) != VK_SUCCESS) { x.view = VK_NULL_HANDLE; Free(h, x); return false; }
 		x.bytes = req.size;
-		x.width = op.width; x.height = op.height; x.levels = op.levels;
+		x.width = op.width; x.height = op.height; x.levels = levels;
 		return true;
 	}
 
@@ -224,21 +251,30 @@ namespace RealTex {
 				continue;
 			}
 			if (op.op != NVR_RT_OP_TEXTURE) continue;
-			// bytes 0: the levels are in the shared transfer image (the game's default-pool textures, blitted there by the fork)
-			const uint32_t xfer = g_shared->textureImage ? g_shared->textureImage - 1 : ~0u;
+			// bytes 0: the levels are in the transfer image of the op's format (the game's default-pool textures, copied there by the fork:
+			// BC blocks as they are, protocol 8, or decoded to RGBA8)
+			const uint32_t levels = LevelsOf(op);
 			const bool onGpu = op.bytes == 0;
-			const bool gpuOk = onGpu && op.vkFormat == VK_FORMAT_R8G8B8A8_UNORM && xfer < h.imageCount && h.images[xfer].image &&
-				(op.offset & 0xFFFFu) + op.width + std::max(1u, op.width >> 1) <= h.images[xfer].width && (op.offset >> 16) + op.height <= h.images[xfer].height;
+			const uint32_t xfer = onGpu ? TransferFor(h, op.vkFormat) : ~0u;
+			bool gpuOk = onGpu && xfer != ~0u && levels >= 1;
+			if (gpuOk) {
+				const uint32_t x0 = op.offset & 0xFFFFu, y0 = op.offset >> 16, fw = op.width + (levels > 1 ? std::max(1u, op.width >> 1) : 0u);
+				gpuOk = x0 + fw <= h.images[xfer].width && y0 + op.height <= h.images[xfer].height;
+				if (BlockBytes(op.vkFormat)) {	// a block copy: whole blocks only (the rectangles in the transfer image and every level)
+					gpuOk = gpuOk && !(x0 & 3u) && !(y0 & 3u);
+					for (uint32_t l = 0; l < levels && gpuOk; l++) gpuOk = !(std::max(1u, op.width >> l) & 3u) && !(std::max(1u, op.height >> l) & 3u);
+				}
+			}
 			const bool sane = op.id && op.id < NVR_RT_MAX_TEXTURES && Supported(op.vkFormat) && op.width && op.height && op.width <= 16384 &&
-				op.height <= 16384 && op.levels >= 1 && op.levels <= 15 && (onGpu ? gpuOk :
-				i < t.offsets.size() && t.offsets[i] != ~0u && AllBytes(op.vkFormat, op.width, op.height, op.levels) == op.bytes);
+				op.height <= 16384 && levels >= 1 && levels <= 15 && !(op.levels & ~(NVR_RT_TEX_LEVELS_MASK | NVR_RT_TEX_SWIZZLE_GR)) && (onGpu ? gpuOk :
+				i < t.offsets.size() && t.offsets[i] != ~0u && AllBytes(op.vkFormat, op.width, op.height, levels) == op.bytes);
 			if (!sane) { t.refused++; continue; }
 			Retire(h, op.id, frameNumber);	// (NVR does not resend a live id; a resend replaces it)
 			RealTexture x;
 			if (!Make(h, op, x)) { t.refused++; continue; }
 			VkImageMemoryBarrier b = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
 			b.image = x.image;
-			b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, op.levels, 0, 1 };
+			b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1 };
 			b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 			b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 			b.srcAccessMask = 0; b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -251,7 +287,7 @@ namespace RealTex {
 				const uint32_t x0 = op.offset & 0xFFFFu, y0 = op.offset >> 16;
 				uint32_t below = 0;
 				std::vector<VkImageCopy> rc;
-				for (uint32_t l = 0; l < op.levels; l++) {
+				for (uint32_t l = 0; l < levels; l++) {
 					const uint32_t w = std::max(1u, op.width >> l), hh = std::max(1u, op.height >> l);
 					VkImageCopy r = {};
 					r.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
@@ -264,7 +300,7 @@ namespace RealTex {
 				t.gpuCopies.push_back({ h.images[xfer].image, x.image, std::move(rc) });
 			}
 			VkDeviceSize at = onGpu ? 0 : t.offsets[i];
-			for (uint32_t l = 0; l < op.levels && !onGpu; l++) {
+			for (uint32_t l = 0; l < levels && !onGpu; l++) {
 				const uint32_t w = std::max(1u, op.width >> l), hh = std::max(1u, op.height >> l);
 				VkBufferImageCopy r = {};
 				r.bufferOffset = at;

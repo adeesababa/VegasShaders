@@ -25,7 +25,7 @@
 #include <stdint.h>
 
 #define NVR_RT_MAGIC            0x54525256u   // 'VRRT'
-#define NVR_RT_PROTOCOL_VERSION 7u            // 7 (2026-11-07): real textures (set 1, NVR_RT_OP_TEXTURE / _SLOT_TEXTURES, the -tex staging block); 2 (2026-10-28): instance records + the geometry data (bindings 10, 11); 3 (2026-10-29): 32 shared images; 4 (2026-10-30): 32 shaders; 5 (2026-11-02): 48 shared images; 6 (2026-11-07): the scratch store (binding 20, NvrRtShared::scratchMB)
+#define NVR_RT_PROTOCOL_VERSION 8u            // 8 (2026-11-07, one bump for two teams): rtgap-tessblas: displaced geometry (NVR_RT_OP_DISPLACE_PARAMS / _SOURCE / _DATA, instance flag bits 8-31: NvrRtDisplace below); rtgap-textures: real textures block-compressed on the GPU route (NvrRtShared::textureImage = up to 4 transfer images, a byte each, picked by the op's VkFormat; NVR_RT_TEX_SWIZZLE_GR in NvrRtTextureOp::levels); 7 (2026-11-07): real textures (set 1, NVR_RT_OP_TEXTURE / _SLOT_TEXTURES, the -tex staging block); 2 (2026-10-28): instance records + the geometry data (bindings 10, 11); 3 (2026-10-29): 32 shared images; 4 (2026-10-30): 32 shaders; 5 (2026-11-02): 48 shared images; 6 (2026-11-07): the scratch store (binding 20, NvrRtShared::scratchMB)
 #define NVR_RT_FRAME_RING       4u            // frame records; NVR waits for consumedFrame before reusing one
 #define NVR_RT_MAX_IMAGES       64u           // (protocol 7: 64, was 48: 46 in use with every RT effect, the path tracer was left out)           // shared images, registered at setup (index 0 is the geometry arena); 16 was too few with all four RT effects (~20), 32 with the reference path tracer (31: every user's Setup registers, on or off; 2026-11-02)
 #define NVR_RT_MAX_SHADERS      32u           // trace shaders (.spv paths), registered any time (16 until 2026-10-30: the four RT strands used 15)
@@ -62,6 +62,14 @@
 #define NVR_RT_MAX_TEXTURES         4096u     // indices 1 .. 4095 (0 = none)
 #define NVR_RT_TEX_TABLE_SLOTS      1024u     // = NVR_RT_ALPHA_ATLAS_SLOTS squared
 #define NVR_RT_EVENT_TEX_SUFFIX     L"-tex"
+// (protocol 8) NvrRtTextureOp::levels: the low byte is the level count; NVR_RT_TEX_SWIZZLE_GR = the helper's view of the texture is
+// (G, R, 1, 1) (the game's ATI2 normal maps as BC5: DXVK samples ATI2 through that swizzle, so the RT copy reads what the game reads)
+#define NVR_RT_TEX_LEVELS_MASK      0xFFu
+#define NVR_RT_TEX_SWIZZLE_GR       0x100u
+// (protocol 8) NvrRtShared::textureImage: up to NVR_RT_TEX_TRANSFERS transfer images, byte i = shared image index + 1 (0 = none); a GPU
+// route op (bytes 0) reads the one whose VkFormat equals its own (RGBA8 = the fork's decoding blit; BC1 / BC3 / BC5 = the game's blocks
+// copied as they are, fork 1.8-rt-bc). Byte 0 is the RGBA8 one, as protocol 7's single value.
+#define NVR_RT_TEX_TRANSFERS        4u
 
 // NvrRtInstanceRecord::flags (NVR sets them; bits 8.. are free for the effects)
 #define NVR_RT_RECORD_LAND          0x01u
@@ -80,6 +88,8 @@
 #define NVR_RT_RECORD_TEXTURED      0x40u
 // UNOFFICIAL 2026-11-02 normal textures ([Main.Main.RayTracing] NormalTextures, with HitTextures): the draw's normal map (tangent space,
 // as stored) is in the normal atlas at the same slot (RGBA8; a slot filled before the map was known reads 0: no map). RtHit.glsl rtHitNormalMapped.
+// (2026-11-07) also with [Main.Main.RayTracing] RealNormalMaps (RealTextures, no atlas): the map is the slot's real normal texture
+// (SLOT_TEXTURES id .y, protocol 7 unchanged); id 0 and no atlas = flat.
 #define NVR_RT_RECORD_NORMAL        0x80u
 // UNOFFICIAL 2026-11-03 the material rule (VegasShaders.materials.txt, the object shaders' table) in bits 26..31 of a textured /
 // alpha-tested record: bits 26-28 roughness (0 unknown, k = 1..7: k / 7), bits 29-31 metal (0 unknown, k = 1..7: (k - 1) / 6)
@@ -96,6 +106,10 @@
 // (RtLampPrimary.comp, SameFrame lamp shadows)
 #define NVR_RT_CUSTOM_LAND          0x1u
 #define NVR_RT_CUSTOM_HIDDEN        0x2u
+// (2026-11-07, rtgap-decals) bit 2 = decal ([Main.Main.RayTracing] Decals: posters, cracks, blood; always alpha-tested, mask 0x10, lifted
+// 0.5 unit off what they lie on): shadow, AO and visibility rays pass them (RtAlpha.glsl rtAlphaPassShadow), every other ray sees them.
+// A value in the instances only: the protocol's layout is unchanged (an older helper passes the custom index through as it is).
+#define NVR_RT_CUSTOM_DECAL         0x4u
 #define NVR_RT_ALPHA_SLOT_SIZE      64u
 #define NVR_RT_ALPHA_ATLAS_SLOTS    32u       // a row (and rows): 2048 x 2048 texels, 1024 slots
 
@@ -117,6 +131,13 @@ enum NvrRtOp : uint32_t {
 	NVR_RT_OP_TEXTURE = 3,           // texture `id` (1 .. NVR_RT_MAX_TEXTURES - 1): its mips from the frame's staging region (replaces an older one)
 	NVR_RT_OP_TEXTURE_RELEASE = 4,   // texture `id` is gone (freed once no frame in flight uses it; no slot may name it any more)
 	NVR_RT_OP_SLOT_TEXTURES = 5,     // atlas slot `id`: its diffuse / normal / glow textures (0 = none: the atlas)
+	// (protocol 8) displaced geometry (NvrRtDisplace* below; docs/next/RT-DETAIL-GAPS.md 1c)
+	NVR_RT_OP_DISPLACE_PARAMS = 6,   // NvrRtDisplaceParamsOp: one block of the displacement's settings (kept by the helper until sent again)
+	NVR_RT_OP_DISPLACE_SOURCE = 7,   // NvrRtDisplaceSourceOp: how geometry `id` is displaced (its height textures, layer weights, normals)
+	NVR_RT_OP_DATA = 8,              // vertex attributes only, as NvrRtGeometryOp: the 3 x vertexCount floats at arenaTexel (+ with
+	                                 // NVR_RT_OP_FLAG_TEXCOORDS the 2 x vertexCount after the triangle list, which is skipped) kept under
+	                                 // `id` (no structure built); NVR_RT_OP_RELEASE frees it. NVR stages some other element of the vertex
+	                                 // (the land's layer weights, the normals) as the "position" to send it.
 };
 
 // What the fork's ID3D9NvrExtSharedImage::GetInfo reported, plus the NT handle duplicated into the helper's process.
@@ -165,20 +186,76 @@ struct NvrRtTextureOp {              // 32 bytes
 	uint32_t	width;               // TEXTURE: the first (biggest) level sent; SLOT_TEXTURES: the diffuse texture
 	uint32_t	height;              //                                           SLOT_TEXTURES: the normal map
 	uint32_t	offset;              // TEXTURE: byte offset in this frame's staging region; SLOT_TEXTURES: the glow map
-	uint32_t	vkFormat;            // TEXTURE: VK_FORMAT_BC1_RGBA_UNORM_BLOCK / BC2 / BC3 / B8G8R8A8_UNORM
+	uint32_t	vkFormat;            // TEXTURE: VK_FORMAT_BC1_RGBA_UNORM_BLOCK / BC2 / BC3 / BC5 / B8G8R8A8_UNORM / R8G8B8A8_UNORM
 	uint32_t	bytes;               // TEXTURE: all its levels, packed (rows of blocks, no padding), biggest first; 0 = on the GPU: the levels
-	                                 // are in the shared image NvrRtShared::textureImage - 1 (R8G8B8A8), level 0 at offset (x = low 16 bits,
-	                                 // y = high), level l >= 1 at (x + width, y + the heights of levels 1 .. l-1) (the game's textures are in
-	                                 // D3D9's default pool: no CPU copy; the fork's CopyToShared blits each level into it)
-	uint32_t	levels;
+	                                 // are in the transfer image of the op's format (NvrRtShared::textureImage's bytes, protocol 8), level 0
+	                                 // at offset (x = low 16 bits, y = high), level l >= 1 at (x + width, y + the heights of levels 1 .. l-1)
+	                                 // (the game's textures are in D3D9's default pool: no CPU copy; the fork's CopyToShared copies each
+	                                 // level there: BC blocks as they are, other formats decoded to RGBA8; BC offsets / sizes whole blocks)
+	uint32_t	levels;              // low byte: levels (NVR_RT_TEX_LEVELS_MASK); NVR_RT_TEX_SWIZZLE_GR (protocol 8)
 };
+
+// ---- (protocol 8, 2026-11-07, rtgap-tessblas) displaced geometry: the land's and the parallax objects' tessellation bumps in the RT scene
+// ([Shaders.Terrain.Displacement] / [Shaders.POM.Displacement] with [Main.Main.RayTracing] Displacement; docs/next/RT-DETAIL-GAPS.md 1c,
+// tools/nvr-rt-helper/NvrRtDisplace.inl). An instance with NVR_RT_INSTANCE_DISPLACE in NvrRtInstance::flags is traced through a copy of
+// its geometry the helper splits (every triangle into N x N) and moves along the normal by the same height maps and formula as the game's
+// tessellation (Compute/Tess/TerrainDisplace.tese, ObjectDisplace.tese), with the instance's own distance fade: one copy per instance
+// (NVR_RT_INSTANCE_KEY: a stable 22-bit key, the geometry's address hashed), redone as the camera moves. The copy's triangles, texcoords
+// and positions are what the record's vertexOffset / indexOffset / texcoord offset point at. Without a copy yet: the flat geometry.
+#define NVR_RT_INSTANCE_DISPLACE    0x100u    // NvrRtInstance::flags bit 8 (bits 0-7 stay VkGeometryInstanceFlags)
+#define NVR_RT_INSTANCE_KEY_SHIFT   10u       // bits 10-31: the instance's key
+inline uint32_t NvrRtInstanceKey(uint32_t flags) { return flags >> NVR_RT_INSTANCE_KEY_SHIFT; }
+
+// NVR_RT_OP_DISPLACE_PARAMS: id = the block; v[] its values. Kept by the helper until the block comes again (NVR sends all five every
+// frame it gathers the scene while either kind is on, and the reach blocks with enable 0 once when both go off).
+enum NvrRtDisplaceBlock : uint32_t {
+	NVR_RT_DISPLACE_LAND_SHAPE = 0,   // Strength, Center, Contrast, BumpSize, LodBias, BorderGrid      ([Shaders.Terrain.Displacement])
+	NVR_RT_DISPLACE_LAND_REACH = 1,   // FadeStart, FadeEnd, spacing, max split, refresh distance, enable (1 / 0)
+	NVR_RT_DISPLACE_OBJ_SHAPE  = 2,   // Strength, Center, Contrast, EdgeFade, LodBias, 0               ([Shaders.POM.Displacement])
+	NVR_RT_DISPLACE_OBJ_REACH  = 3,   // FadeStart, FadeEnd, spacing, max split, refresh distance, enable
+	NVR_RT_DISPLACE_CAMERA     = 4,   // the camera's forward (scene space) xyz, triangles a frame (budget), triangles a copy (cap), 0
+	NVR_RT_DISPLACE_BLOCKS     = 5,
+};
+struct NvrRtDisplaceParamsOp {       // 32 bytes, in NvrRtFrame::ops
+	uint32_t	op;                  // NVR_RT_OP_DISPLACE_PARAMS
+	uint32_t	id;                  // NvrRtDisplaceBlock
+	float		v[6];
+};
+// NVR_RT_OP_DISPLACE_SOURCE: geometry `id` (a BUILD with texcoords) is displaced like this. weightsA / weightsB / normals: NVR_RT_OP_DATA
+// ids (0 = none): A = the land's layer weights 0-2 as xyz (+ texcoords = weights 2-3: .y is layer 3), B = layers 4-6 as xyz; normals = the
+// object-space vertex normals as xyz (none: the helper makes smooth ones from the triangles). packed: 96 bits, little endian over
+// packed[0..2]: bits 12 i .. 12 i + 11 the texture id of layer i (0-6; real textures, NVR_RT_OP_TEXTURE), 84-86 the layer count (1-7),
+// 87-93 the layers that have a height (bit per layer: the land shader's LandHeight > 0), 94 the kind (0 land: height in alpha, 1 a
+// parallax object: height in red, layer 0 only).
+struct NvrRtDisplaceSourceOp {       // 32 bytes
+	uint32_t	op;                  // NVR_RT_OP_DISPLACE_SOURCE
+	uint32_t	id;
+	uint32_t	weightsA, weightsB, normals;
+	uint32_t	packed[3];
+};
+inline void NvrRtDisplacePack(uint32_t packed[3], const uint32_t textures[7], uint32_t layers, uint32_t heightBits, uint32_t kind) {
+	packed[0] = packed[1] = packed[2] = 0;
+	auto put = [&](uint32_t bit, uint32_t width, uint32_t value) {
+		for (uint32_t b = 0; b < width; b++) if ((value >> b) & 1u) packed[(bit + b) >> 5] |= 1u << ((bit + b) & 31u);
+	};
+	for (uint32_t i = 0; i < 7; i++) put(12 * i, 12, textures[i] & 0xFFFu);
+	put(84, 3, layers & 7u); put(87, 7, heightBits & 0x7Fu); put(94, 1, kind & 1u);
+}
+inline uint32_t NvrRtDisplaceField(const uint32_t packed[3], uint32_t bit, uint32_t width) {
+	uint32_t v = 0;
+	for (uint32_t b = 0; b < width; b++) if ((packed[(bit + b) >> 5] >> ((bit + b) & 31u)) & 1u) v |= 1u << b;
+	return v;
+}
+#define NVR_RT_DISPLACE_KIND_LAND   0u
+#define NVR_RT_DISPLACE_KIND_OBJECT 1u
 
 struct NvrRtInstance {               // 64 bytes
 	float		transform[3][4];     // object -> scene (camera-relative world space): row-major 3x4, as VkTransformMatrixKHR
 	uint32_t	geometryId;          // a built geometry (0 or unknown: skipped)
 	uint32_t	customIndex;         // low 24 bits: rayQueryGetIntersectionInstanceCustomIndexEXT
 	uint32_t	mask;                // low 8 bits: ANDed with the ray's cull mask
-	uint32_t	flags;               // VkGeometryInstanceFlagBitsKHR (1 = cull disable, 2 = flip facing, 4 = force opaque)
+	uint32_t	flags;               // VkGeometryInstanceFlagBitsKHR (1 = cull disable, 2 = flip facing, 4 = force opaque) in bits 0-7;
+	                                 // (protocol 8) NVR_RT_INSTANCE_DISPLACE, NVR_RT_INSTANCE_KEY
 };
 
 // One per instance, in the instance list's order (the helper keeps the pairs together when it skips an instance). In the shader:
@@ -249,7 +326,8 @@ struct NvrRtShared {
 
 	// ---- written by NVR any time (shaderCount last, with a release barrier); paths are full, ANSI
 	volatile uint32_t	shaderCount;
-	uint32_t			textureImage;        // (protocol 7, was pad2) the real textures' transfer image + 1 (R8G8B8A8; 0 = none)
+	uint32_t			textureImage;        // (protocol 7, was pad2) the real textures' transfer images: byte i = image index + 1 (0 = none), the
+	                                         // helper takes the one whose format is the op's (protocol 8; protocol 7: one RGBA8 image + 1)
 	char				shaderPaths[NVR_RT_MAX_SHADERS][260];
 
 	// ---- per frame, written by NVR (latestFrame last, with a release barrier)
@@ -287,6 +365,7 @@ struct NvrRtShared {
 static_assert(sizeof(NvrRtImageDesc) == 56, "NvrRtImageDesc layout");
 static_assert(sizeof(NvrRtGeometryOp) == 32, "NvrRtGeometryOp layout");
 static_assert(sizeof(NvrRtTextureOp) == 32, "NvrRtTextureOp layout");
+static_assert(sizeof(NvrRtDisplaceParamsOp) == 32 && sizeof(NvrRtDisplaceSourceOp) == 32, "displacement ops layout");
 static_assert(sizeof(NvrRtInstance) == 64, "NvrRtInstance layout");
 static_assert(sizeof(NvrRtPass) == 580, "NvrRtPass layout");	// (protocol 5: + extraImages2)
 static_assert(sizeof(NvrRtInstanceRecord) == 32, "NvrRtInstanceRecord layout");

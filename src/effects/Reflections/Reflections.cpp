@@ -278,8 +278,10 @@ bool ReflectionsEffect::RtTrace(IDirect3DDevice9* Device, IDirect3DSurface9* tar
 		const D3DXMATRIX& proj = TheRenderManager->projMatrix;
 		const D3DXVECTOR4& sun = TheShaderManager->ShaderConst.SunDir;
 		// (2026-10-31: with the core's FarObjectLOD the rays reach the far ring's edge: the skyline past SceneRadius)
+		// (2026-11-07, RT-DETAIL-GAPS.md 7: PTRealtime turns the core's FarLandLOD on by itself, RtCore.cpp Gather)
 		const float reach = TheSettingManager->GetSettingI("Main.Main.RayTracing", "FarObjectLOD") != 0 ||
-			TheSettingManager->GetSettingI("Main.Main.RayTracing", "FarLandLOD") != 0 ?
+			TheSettingManager->GetSettingI("Main.Main.RayTracing", "FarLandLOD") != 0 ||
+			TheSettingManager->GetSettingI("Main.Main.RayTracing", "PTRealtime") != 0 ?
 			(std::max)(Settings.RtDistance, TheSettingManager->GetSettingF("Main.Main.RayTracing", "FarRadius")) : Settings.RtDistance;
 		// UNOFFICIAL 2026-11-03 RenderScale < 1: in a rect frame the helper traces the top-left rect of the half-size images (RenderRect::
 		// Width / Height of them, the part the D3D9 passes' ApplyViewport draws); RayGen wrote "no ray" past it.

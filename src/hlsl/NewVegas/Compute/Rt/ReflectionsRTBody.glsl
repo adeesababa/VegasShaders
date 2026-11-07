@@ -6,7 +6,7 @@
 // Outputs (ReflectionsRTResolve.frag reads them):
 //   hit:   x hit distance (-1 no ray asked, 0 nothing within Distance), y flags (1 land, 2 albedo known, 4 normal known, 8 glow map;
 //          + 16 x (1 + the key lamp's index) when a lamp shadow ray was traced), zw the hit's normal (world axes, octahedral, facing the
-//          ray; -dir when unknown)
+//          ray; -dir when unknown; 2026-11-07: in the RT_TEX variants bent by the hit's normal map, RealNormalMaps)
 //   shade: rgb the draw's albedo (linear; 0.4 grey when unknown), a the sun visible at the hit (0..1) outdoors by day, else the key
 //          lamp visible from the hit (2026-10-29: the lamp that lights the hit most of the nearest 12, one shadow ray)
 // Compile: glslangValidator -V --target-env vulkan1.2 -o ReflectionsRT.spv ReflectionsRT.comp (tools/nvr-dxvk/compile-compute.sh)
@@ -87,8 +87,16 @@ const uint RecordLand = 0x01u, RecordGlow = 0x04u, RecordAlbedoKnown = 0x10u;
 // passes; opaque geometry commits by itself.
 #ifdef RT_ALPHA
 #define RtProceed(q) while (rayQueryProceedEXT(q)) { 		if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT && 			rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false), 				rayQueryGetIntersectionBarycentricsEXT(q, false)) || p.size.w > 1.5) 			rayQueryConfirmIntersectionEXT(q); }
+// (2026-11-07 rtgap-decals) the shadow rays at the hit: decals (NVR_RT_CUSTOM_DECAL) never block them (RtAlpha.glsl rtAlphaPassShadow),
+// AlphaSolid's whole cards included
+#define RtProceedShadow(q) while (rayQueryProceedEXT(q)) { \
+		if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT && !rtIsDecal(rayQueryGetIntersectionInstanceCustomIndexEXT(q, false)) && \
+			(p.size.w > 1.5 || rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false), \
+				rayQueryGetIntersectionBarycentricsEXT(q, false)))) \
+			rayQueryConfirmIntersectionEXT(q); }
 #else
 #define RtProceed(q) while (rayQueryProceedEXT(q)) { }
+#define RtProceedShadow(q) while (rayQueryProceedEXT(q)) { }
 #endif
 
 vec3 OctDecode(vec2 e) {
@@ -204,7 +212,7 @@ void main() {
 		if (dot(normal, p.sun.xyz) > 0.0) {
 			rayQueryEXT s;
 			rayQueryInitializeEXT(s, scene, RT_SHADOW_FLAGS, RtMask, off, 0.5, p.sun.xyz, 30000.0);
-			RtProceed(s);
+			RtProceedShadow(s);
 			sun = rayQueryGetIntersectionTypeEXT(s, true) == gl_RayQueryCommittedIntersectionNoneEXT ? 1.0 : 0.0;
 		}
 	}
@@ -227,7 +235,7 @@ void main() {
 			// Stop short of the lamp itself (its bulb, shade or glass mesh is in the scene).
 			rayQueryEXT s;
 			rayQueryInitializeEXT(s, scene, RT_SHADOW_FLAGS, RtMask, off, 0.5, toLamp / max(d, 1.0e-3), max(d - 24.0, 0.6));
-			RtProceed(s);
+			RtProceedShadow(s);
 			sun = rayQueryGetIntersectionTypeEXT(s, true) == gl_RayQueryCommittedIntersectionNoneEXT ? 1.0 : 0.0;
 			flags += 16u * uint(key + 1);
 		}
@@ -244,6 +252,15 @@ void main() {
 #endif
 		albedo = rtHitAlbedo(hitInstance, uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, true)), rayQueryGetIntersectionBarycentricsEXT(q, true));
 		flags |= 2u;
+#ifdef RT_HIT_NORMAL_MAPS
+		// (2026-11-07, RT-DETAIL-GAPS.md section 2) RealNormalMaps: the hit's own normal map (record flag 0x80, the real map at the same
+		// footprint as its colour) bends the normal Resolve shades the hit with (sun N.L, the lamps); the shadow rays above left from the
+		// flat triangle normal. Resolve's shading is diffuse (RtShadeHit: N.L, the grid / cube along N), so the bend counts however the
+		// ray sees the bump (one facing the light is lit even where the ray meets it edge-on); it stays on the triangle's side.
+		if ((flags & 4u) != 0u)
+			normal = rtHitNormalMapped(hitInstance, uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, true)), rayQueryGetIntersectionBarycentricsEXT(q, true),
+				normal, mat3(rayQueryGetIntersectionObjectToWorldEXT(q, true)));
+#endif
 	}
 #endif
 #ifdef RT_GLOW

@@ -1261,7 +1261,8 @@ static const ConflictRule kConflictRules[] = {
 		"Ambient light does ambient occlusion and bounce light itself: the separate Ambient occlusion and Bounce light effects switch off while it runs." },
 	{ "Main.Main.RayTracing", "PTRealtime", "true", nullptr,
 		"Path tracing lights the whole picture itself: Ambient light, ambient occlusion and specular highlights switch off, and the path "
-		"tracer's own settings are overridden. Very heavy: for top graphics cards." },
+		"tracer's own settings are overridden. It also turns on Grass (near you, up to 1000 units, with See-through meshes on) and "
+		"Distant land in the traced scene. Very heavy: for top graphics cards." },
 	{ "Main.Main.RayTracing", "PTReplace", "true", nullptr,
 		"The path-traced picture replaces the game's: Ambient light, ambient occlusion and specular highlights switch off while it runs." },
 	{ "Shaders.ShadowsExteriors.RT", "Mode", "1", nullptr,
@@ -1407,7 +1408,8 @@ static const SimpleRow kSimpleRows[] = {
 	// Scene and path tracing
 	{ "Main.Main.RayTracing", "Actors", "People in the traced scene", nullptr, "People and creatures cast traced shadows and show up in traced reflections. Costs some frame rate in crowds." },
 	{ "Main.Main.RayTracing", "AlphaTested", "See-through meshes (fences, leaves, grates)", nullptr, "Fences, leaves and grates cast traced shadows with their holes, not as solid blocks." },
-	{ "Main.Main.RayTracing", "Grass", "Grass", nullptr, "Grass casts traced shadows and shows in reflections. Needs See-through meshes on." },
+	{ "Main.Main.RayTracing", "Grass", "Grass", nullptr, "Grass casts traced shadows and shows in reflections. Needs See-through meshes on. Path tracing turns it on by itself." },
+	{ "Main.Main.RayTracing", "Decals", "Decals and blood", nullptr, "Posters, cracks and blood splats show in traced reflections and bounce light. They cast no shadows. Needs See-through meshes on." },
 	{ "Main.Main.RayTracing", "HitTextures", "Real textures in reflections and bounce light", nullptr, "Reflections and bounce light use the real colours of what they hit instead of flat ones. Uses more video memory." },
 	{ "Main.Main.RayTracing", "FarObjectLOD", "Distant buildings and objects", nullptr, "Distant buildings and objects are in the traced scene, so far shadows and reflections are complete." },
 	{ "Main.Main.RayTracing", "FarLandLOD", "Distant land", nullptr, "Distant hills are in the traced scene, so far shadows and reflections include them." },
@@ -3577,11 +3579,11 @@ static const MenuGroup kMenuGroups[] = {
 		FogType::None, false, "Less work redrawing the lamp shadows indoors.", nullptr },
 
 	// Main.Main.RayTracing
-	{ "Main.Main.RayTracing", "People", "Actors, ActorUpdateInterval, ActorRadius, ActorStillSkip, ActorStillThreshold, ActorRebuildInterval",
+	{ "Main.Main.RayTracing", "People", "Actors, ActorUpdateInterval, ActorRadius, ActorStillSkip, ActorStillThreshold, ActorRebuildInterval, FaceMorphs, FaceMorphRadius",
 		FogType::None, true, "NPCs, creatures and your own body in the ray traced scene, and how often they are updated.", nullptr },
 	{ "Main.Main.RayTracing", "Plants and grass", "LeafCards, LeafCardsOpaque, PlantSway, Grass, GrassRadius, GrassMaxTufts",
 		FogType::None, false, "Tree leaves, bushes and the grass near you in the ray traced scene.", nullptr },
-	{ "Main.Main.RayTracing", "Textures and see-through meshes", "AlphaTested, HitTextures, GlowTextures",
+	{ "Main.Main.RayTracing", "Textures and see-through meshes", "AlphaTested, HitTextures, GlowTextures, Decals",
 		FogType::None, false, "Fences and foliage cards with their holes, and each mesh's texture and glow where a ray hits it.", nullptr },
 	{ "Main.Main.RayTracing", "Far distance", "FarObjectLOD, FarLandLOD, FarRadius",
 		FogType::None, false, "Distant objects and terrain in the ray traced scene (for RT reflections).", nullptr },

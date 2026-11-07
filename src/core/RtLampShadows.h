@@ -25,6 +25,7 @@
 #include "RenderRect.h"	// UNOFFICIAL 2026-11-03 RenderScale < 1 (docs/next/RT-RENDERSCALE.md)
 #include "RtDenoise.h"
 #include "RtShadowDenoise.h"	// UNOFFICIAL 2026-11-07 ShadowDenoiser (docs/next/RT-DENOISER.md)
+#include "RtTessContact.h"	// UNOFFICIAL 2026-11-07 (rtgap-tess) the bumps' slack + ContactShadows (docs/next/RT-DETAIL-GAPS.md section 1)
 
 namespace RtLampShadows {
 
@@ -76,6 +77,9 @@ namespace RtLampShadows {
 		// is uv x this (not x size, the rect's); the history is only used at the same scale, so that rect is this frame's (size.xy).
 		// (2026-11-07) z MovingCasterHistory (frames of history where people's shadow is or was), w the people's mask (0x60)
 		float rect[4];
+		// UNOFFICIAL 2026-11-07 (rtgap-tess; RtTessContact.h, RtContact.glsl) every variant: slack (the bumps' Strength, FadeStart, FadeEnd: the
+		// rays start that much further off the surface); RtLampTrace's variants only: ContactShadows' march and its gate
+		float slack[4], contact[4], contactGate[4];
 	};
 	static_assert(sizeof(PassConstants) <= 512, "RtCore: 512 bytes of constants a pass");
 	static_assert(offsetof(PassConstants, many) == 9 * 16 && offsetof(PassConstants, jitter) == 15 * 16 && offsetof(PassConstants, rect) == 16 * 16,
@@ -773,6 +777,18 @@ namespace RtLampShadows {
 		const int interleave = interleaveSetting >= 4 ? 4 : interleaveSetting >= 2 ? 2 : 1;
 		c.flags[2] = (float)interleave;
 		c.flags[3] = (float)(frame % (UInt32)interleave);
+		// UNOFFICIAL 2026-11-07 (rtgap-tess; docs/next/RT-DETAIL-GAPS.md section 1) (1a) the bumps' slack; (1b) ContactShadows (RtLampTrace's
+		// variants): the depth buffer's march toward each traced lamp, multiplied into its visibility. Off while the raster lamp contact
+		// shadows ([Shaders.ShadowsInteriors.Main] ContactShadows) draw: one contact shadow, not two
+		{
+			float v[3]; DxvkCompute::DisplaceRtSlack(v);
+			RtTessContact::Slack slack; slack.strength = v[0]; slack.fadeStart = v[1]; slack.fadeEnd = v[2];
+			RtTessContact::SlackVec(slack, c.slack);
+			const bool rasterContact = TheSettingManager->GetSettingF("Shaders.ShadowsInteriors.Main", "ContactShadows") > 0.0f;
+			const RtTessContact::Contact contact = RtTessContact::Make(rasterContact ? 0.0f : (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "ContactShadows"), 0.0f), 1.0f),
+				TheSettingManager->GetSettingF(kSection, "ContactLength"));
+			RtTessContact::ContactVecs(contact, c.contact, c.contactGate);
+		}
 		const float radius = (std::max)(TheSettingManager->GetSettingF(kSection, "LampRadius"), 0.0f);
 		const float invisible = TheSettingManager->GetSettingF(kSection, "InvisibleLightRadius");
 		// UNOFFICIAL 2026-11-07 ShadowDenoiser: this frame's denoised lamps (the plain path only: not the outdoor mask, not ManyLights)

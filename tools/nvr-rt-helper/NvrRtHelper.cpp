@@ -44,6 +44,7 @@
 #include "NvrRtProtocol.h"
 #include "NvrRtCapture.h"	// UNOFFICIAL 2026-11-03 frame capture / replay (claude/rt-replay)
 #include "RtArenaGuard.h"	// kRtArenaGuardSpv (RtArenaGuard.comp)
+#include "RtDisplace.h"		// kRtDisplaceSpv (RtDisplace.comp; UNOFFICIAL 2026-11-07, protocol 8: NvrRtDisplace.inl)
 
 namespace {
 
@@ -868,15 +869,20 @@ namespace {
 		RealTex::ReleaseFinished(h, done);	// (2026-11-07, protocol 7)
 		auto it = std::remove_if(h.pendingFrees.begin(), h.pendingFrees.end(), [&](const PendingFree& p) {
 			if (p.frame > done) return false;
-			h.vk.destroyAs(h.vk.device, p.geometry.as, nullptr);
-			h.structures.Free(h.vk, p.geometry.block, p.geometry.offset, p.geometry.size);
+			if (p.geometry.as) {	// (2026-11-07, protocol 8: a DATA id's words have no structure)
+				h.vk.destroyAs(h.vk.device, p.geometry.as, nullptr);
+				h.structures.Free(h.vk, p.geometry.block, p.geometry.offset, p.geometry.size);
+			}
 			h.dataWords.Free(p.geometry.vertexOffset, p.geometry.dataWords);
 			return true;
 		});
 		h.pendingFrees.erase(it, h.pendingFrees.end());
 	}
 
+	namespace Displace { void DropCopiesOf(Helper& h, uint32_t id, uint64_t frame); }	// NvrRtDisplace.inl (2026-11-07, protocol 8)
+
 	void ReleaseGeometry(Helper& h, uint32_t id, uint64_t frame) {
+		Displace::DropCopiesOf(h, id, frame);	// its displaced copies (built from the old data) go with it
 		auto it = h.geometries.find(id);
 		if (it == h.geometries.end()) return;
 		h.triangles -= it->second.triangles;
@@ -1256,6 +1262,7 @@ namespace {
 	}
 
 #include "NvrRtShadowDenoise.inl"	// UNOFFICIAL 2026-11-07 the RT shadow denoiser module (docs/next/RT-DENOISER.md)
+#include "NvrRtDisplace.inl"	// UNOFFICIAL 2026-11-07 (protocol 8, rtgap-tessblas) displaced copies of the land / parallax objects
 
 	// Records this frame's work into s.cmd (open). False: something could not be recorded (logged); the caller still submits.
 	bool RecordFrame(Helper& h, Slot& s, uint64_t frameNumber) {
@@ -1312,10 +1319,11 @@ namespace {
 		std::vector<uint32_t> builtIds;
 		const SharedImage& arena = h.images[NVR_RT_ARENA_IMAGE];
 		uint32_t builds = 0;
-		for (uint32_t i = 0; i < f.opCount; i++) if (f.ops[i].op == NVR_RT_OP_BUILD) builds++;
+		uint32_t dataOps = 0;	// (2026-11-07, protocol 8) DATA ops read the arena too
+		for (uint32_t i = 0; i < f.opCount; i++) { if (f.ops[i].op == NVR_RT_OP_BUILD) builds++; else if (f.ops[i].op == NVR_RT_OP_DATA) dataOps++; }
 		const bool sequence = (f.arenaTexels & NVR_RT_ARENA_SEQUENCE) != 0;
 		const uint32_t arenaTexels = f.arenaTexels & ~NVR_RT_ARENA_SEQUENCE;
-		if (builds && arenaTexels) {
+		if ((builds || dataOps) && arenaTexels) {
 			const uint64_t capacity = (uint64_t)arena.width * arena.height;
 			const uint32_t rows = (uint32_t)std::min<uint64_t>((arenaTexels + (sequence ? 1u : 0u) + arena.width - 1) / arena.width, arena.height);
 			VkBufferImageCopy copy = {};
@@ -1494,9 +1502,22 @@ namespace {
 				}
 				s.measured[0] = true;
 			}
+			// (2026-11-07, protocol 8) DATA ops: vertex attributes kept for the displacement (NvrRtDisplace.inl), no structure
+			if (dataOps) {
+				std::vector<VkBufferCopy> dataOnly;
+				for (uint32_t i = 0; i < f.opCount; i++)
+					if (f.ops[i].op == NVR_RT_OP_DATA) Displace::StageData(h, f.ops[i], capacity, arenaTexels, dataOnly);
+				if (!dataOnly.empty()) {
+					vkCmdCopyBuffer(cmd, h.staging.buffer, h.geometryData.buffer, (uint32_t)dataOnly.size(), dataOnly.data());
+					FullBarrier(cmd);
+					s.measured[0] = true;
+				}
+			}
 		}
 		for (uint32_t i = 0; i < f.opCount; i++)
-			if (f.ops[i].op == NVR_RT_OP_RELEASE) ReleaseGeometry(h, f.ops[i].id, frameNumber);
+			if (f.ops[i].op == NVR_RT_OP_RELEASE) { ReleaseGeometry(h, f.ops[i].id, frameNumber); Displace::Release(h, f.ops[i].id, frameNumber); }
+		// (2026-11-07, protocol 8) the displaced copies: new ones built, stale ones redone and refit (before the scene, which uses them)
+		Displace::Run(h, slot, cmd, frameNumber);
 		if (h.queries) vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, h.queries, slot * kQueriesPerSlot + 1);
 
 		// 2. the scene from this frame's instances
@@ -1507,18 +1528,21 @@ namespace {
 			const NvrRtInstance& in = f.instances[i];
 			auto it = h.geometries.find(in.geometryId);
 			if (it == h.geometries.end()) continue;
+			// (2026-11-07, protocol 8) a displaced instance is traced through its copy (positions, triangles, texcoords and structure)
+			const Geometry* displaced = Displace::CopyFor(in);
+			const Geometry& geo = displaced ? *displaced : it->second;
 			NvrRtInstanceRecord& r = records[count];
 			r = f.records[i];
 			r.geometryId = in.geometryId;
-			r.vertexOffset = it->second.vertexOffset;
-			r.indexOffset = it->second.indexOffset;
+			r.vertexOffset = geo.vertexOffset;
+			r.indexOffset = geo.indexOffset;
 			if (r.flags & NVR_RT_RECORD_ALPHA_TESTED) {
-				if (it->second.uvOffset == NVR_RT_NO_DATA) continue;	// no texcoords (no room in the data): it would block as a solid quad
-				memcpy(&r.albedo[3], &it->second.uvOffset, 4);
+				if (geo.uvOffset == NVR_RT_NO_DATA) continue;	// no texcoords (no room in the data): it would block as a solid quad
+				memcpy(&r.albedo[3], &geo.uvOffset, 4);
 			}
 			else if (r.flags & NVR_RT_RECORD_TEXTURED) {	// hit textures: the texcoords' offset, or no texture when there was no room
-				if (it->second.uvOffset == NVR_RT_NO_DATA) r.flags &= ~NVR_RT_RECORD_TEXTURED;
-				else memcpy(&r.albedo[3], &it->second.uvOffset, 4);
+				if (geo.uvOffset == NVR_RT_NO_DATA) r.flags &= ~NVR_RT_RECORD_TEXTURED;
+				else memcpy(&r.albedo[3], &geo.uvOffset, 4);
 			}
 			VkAccelerationStructureInstanceKHR& o = out[count++];
 			memcpy(&o.transform, in.transform, sizeof(o.transform));
@@ -1526,7 +1550,7 @@ namespace {
 			o.mask = in.mask & 0xFF;
 			o.instanceShaderBindingTableRecordOffset = 0;
 			o.flags = in.flags & 0xFF;
-			o.accelerationStructureReference = it->second.address;
+			o.accelerationStructureReference = geo.address;
 		}
 		g_shared->lastInstances = count;
 		if (h.probeSlot == (int)slot)
@@ -1856,7 +1880,7 @@ namespace {
 		if (!CreateBuffer(h.vk, (VkDeviceSize)arena.width * arena.height * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT |
 				VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false, h.staging) ||
 			!CreateBuffer(h.vk, (VkDeviceSize)kDataWords * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-				VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false, h.geometryData) ||	// (TRANSFER_SRC: the capture copies it out, 2026-11-03)
+				VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, false, h.geometryData) ||	// (build input: the displaced copies, 2026-11-07)	// (TRANSFER_SRC: the capture copies it out, 2026-11-03)
 			!CreateTlas(h) || !EnsureScratch(h, h.tlasScratch) || !CreatePipelineLayout(h))
 			return fail(nullptr);
 		{	// (2026-11-07, protocol 6) the scratch store (binding 20): as big as NVR asked, at least 1 MB, cleared before the first pass

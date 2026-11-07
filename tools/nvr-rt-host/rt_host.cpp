@@ -16,6 +16,7 @@
 #include <d3d9.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdarg>
 #include <cstddef>
@@ -32,7 +33,9 @@
 #include "NvrRtProtocol.h"
 #include "RtScenePick.h"     // the game's record / mask packing (src/core)
 #include "RtLightGrid.h"     // the game's PTLightGrid builder (src/core)
+#include "RtTessContact.h"    // (2026-11-07 rtgap-tess) the bumps' slack + the contact march's constants (src/core)
 #include "RtReflDenoise.h"   // (2026-11-07) the RT reflection denoiser (src/core), run by the refldenoise scene
+#include "RtFaceMorph.h"     // (2026-11-07) faces and lip-sync: a head's change detection and feed (src/core), run by the facemorph scene
 #include <d3dcompiler.h>
 
 #pragma comment(lib, "d3d9.lib")
@@ -113,19 +116,24 @@ struct Object {               // one instance of one mesh
 	bool albedoKnown = true;
 	bool glow = false;
 	bool textured = false;    // with alphaSlot as its atlas slot
+	bool normalMap = false;   // (2026-11-07) record flag 0x80: the slot's normal map bends its hits (RealNormalMaps / NormalTextures)
 	float rough = -1.0f, metal = -1.0f;   // a material rule (>= 0: bits 26-31)
 	int hookMask = -1;
 	V3 albedo = { 0.5f, 0.5f, 0.5f };
 	bool alphaTested = false;
 	bool hidden = false;      // (2026-11-07) custom index NVR_RT_CUSTOM_HIDDEN: the first-person body (camera rays pass over it)
+	bool decal = false;       // (2026-11-07) custom index NVR_RT_CUSTOM_DECAL (alpha-tested too): shadow / AO / visibility rays pass it
 	int alphaSlot = -1;       // atlas slot (bits 16-25)
 	uint32_t alphaRef = 128;  // bits 8-15 (D3DCMP_GREATER)
 	int id = 0;               // the host's own object id (CPU reference)
+	float scale = 1.0f;       // (2026-11-07 tessblas) uniform scale of the transform
+	uint32_t instFlags = 0;   // (2026-11-07 tessblas, protocol 8) NvrRtInstance::flags bits 8-31 (NVR_RT_INSTANCE_DISPLACE + key)
 	RtScenePick::Record record() const {
 		RtScenePick::Record r;
 		r.land = land; r.albedoKnown = albedoKnown; r.glowMap = glow; r.alphaTested = alphaTested; r.alphaRef = alphaRef;
 		r.textured = textured && !alphaTested; r.slot = alphaSlot; r.materialRule = rough >= 0.0f || metal >= 0.0f; r.rough = rough; r.metal = metal;
-		r.hookMask = hookMask;
+		r.hookMask = hookMask; r.hidden = hidden; r.decal = decal;
+		r.normalMap = normalMap;
 		return r;
 	}
 	uint32_t mask() const { return RtScenePick::InstanceMask(record()); }
@@ -149,16 +157,19 @@ struct World {
 
 struct Hit { bool hit = false; float t = 0; int object = -1; V3 n; float u = 0, v = 0; };
 
-// Closest hit along o + d t, t in (tMin, tMax), honouring alpha tests (as the shaders: alpha > ref / 255 is solid) and the ray mask
-static Hit trace(const World& w, V3 o, V3 d, float tMin, float tMax, uint32_t mask, bool testAlpha) {
+// Closest hit along o + d t, t in (tMin, tMax), honouring alpha tests (as the shaders: alpha > ref / 255 is solid) and the ray mask.
+// (2026-11-07) skipDecals: a shadow / AO / visibility ray (RtAlpha.glsl rtAlphaPassShadow: decals never block it); alphaSolid: cut-outs
+// whole, no alpha test (RT AO's AOAlpha 1 / 3)
+static Hit trace(const World& w, V3 o, V3 d, float tMin, float tMax, uint32_t mask, bool testAlpha, bool skipDecals = false, bool alphaSolid = false) {
 	Hit best; best.t = tMax;
 	for (size_t oi = 0; oi < w.objects.size(); oi++) {
 		const Object& ob = w.objects[oi];
 		if (!(ob.mask() & mask)) continue;
-		if (ob.alphaTested && !testAlpha) continue;   // (rays that do not test alpha leave 0x10 out: the callers' masks do that too)
+		if (ob.decal && skipDecals) continue;
+		if (ob.alphaTested && !testAlpha && !alphaSolid) continue;   // (rays that do not test alpha leave 0x10 out: the callers' masks do that too)
 		const Mesh& m = w.meshes[ob.mesh];
 		for (size_t k = 0; k + 2 < m.idx.size(); k += 3) {
-			const V3 a = m.pos[m.idx[k]] + ob.offset, b = m.pos[m.idx[k + 1]] + ob.offset, c = m.pos[m.idx[k + 2]] + ob.offset;
+			const V3 a = m.pos[m.idx[k]] * ob.scale + ob.offset, b = m.pos[m.idx[k + 1]] * ob.scale + ob.offset, c = m.pos[m.idx[k + 2]] * ob.scale + ob.offset;
 			const V3 e1 = b - a, e2 = c - a, pv = cross(d, e2);
 			const float det = dot(e1, pv);
 			if (std::fabs(det) < 1e-12f) continue;
@@ -177,7 +188,7 @@ static Hit trace(const World& w, V3 o, V3 d, float tMin, float tMax, uint32_t ma
 				u = ua[0] * (1 - bu - bv) + ub[0] * bu + uc[0] * bv;
 				v = ua[1] * (1 - bu - bv) + ub[1] * bu + uc[1] * bv;
 			}
-			if (ob.alphaTested && !(w.alphaAt(ob, u, v) > float(ob.alphaRef) / 255.0f)) continue;
+			if (ob.alphaTested && !alphaSolid && !(w.alphaAt(ob, u, v) > float(ob.alphaRef) / 255.0f)) continue;
 			best.hit = true; best.t = t; best.object = int(oi); best.u = u; best.v = v;
 			V3 n = normalize(cross(e1, e2));
 			best.n = dot(n, d) > 0 ? -n : n;
@@ -532,12 +543,12 @@ struct Host {
 		for (size_t i = 0; i < w.objects.size(); i++) {
 			const Object& o = w.objects[i];
 			NvrRtInstance in = {};
-			in.transform[0][0] = in.transform[1][1] = in.transform[2][2] = 1.0f;
+			in.transform[0][0] = in.transform[1][1] = in.transform[2][2] = o.scale;
 			in.transform[0][3] = o.offset.x - eye.x; in.transform[1][3] = o.offset.y - eye.y; in.transform[2][3] = o.offset.z - eye.z;
 			in.geometryId = geometryOf[o.mesh];
-			in.customIndex = (o.land ? NVR_RT_CUSTOM_LAND : 0u) | (o.hidden ? NVR_RT_CUSTOM_HIDDEN : 0u);
+			in.customIndex = RtScenePick::CustomIndex(o.record());   // land, hidden, decal (2026-11-07: as RtCore)
 			in.mask = o.mask();
-			in.flags = 0x1u;   // both faces (RtCore)
+			in.flags = 0x1u | o.instFlags;   // both faces (RtCore); (protocol 8) the displacement flag + key
 			NvrRtInstanceRecord r = {};
 			r.albedo[0] = o.albedo.x; r.albedo[1] = o.albedo.y; r.albedo[2] = o.albedo.z; r.albedo[3] = 1.0f;
 			r.flags = RtScenePick::RecordFlags(o.record());
@@ -590,6 +601,7 @@ struct LampConstants {        // RtLampShadows.h PassConstants (RtLampTrace / Sp
 	float many2[4];
 	float jitter[4];
 	float rect[4];
+	float slack[4], contact[4], contactGate[4];   // (2026-11-07 rtgap-tess) RtTessContact.h
 };
 static_assert(offsetof(LampConstants, many) == 9 * 16 && offsetof(LampConstants, jitter) == 15 * 16 && offsetof(LampConstants, rect) == 16 * 16, "as RtLampShadows.h");
 struct PathConstants {        // RtPathTrace.cpp PassConstants
@@ -784,7 +796,7 @@ static bool lampLitCpu(const World& w, V3 origin, const Lamp& l, float offset) {
 	const float dist = length(to), stop = l.stop;
 	if (!(dist > stop + offset)) return true;
 	const float invLen = 1.0f / dist, tEnd = std::min(std::max(1.0f - stop * invLen, 0.0f), 1.0f), tMin = std::min(offset * invLen, tEnd);
-	const Hit hh = trace(w, origin, to, tMin, tEnd, 0x13, true);
+	const Hit hh = trace(w, origin, to, tMin, tEnd, 0x13, true, true);   // (2026-11-07: decals never block a shadow ray)
 	return !hh.hit;
 }
 
@@ -1186,6 +1198,7 @@ static bool sceneCameraMove(Ctx& c) {
 #include "rt_host_more.inl"
 #include "rt_host_alpha.inl"
 #include "rt_host_sameframe.inl"	// (2026-11-07) SameFrame lamp shadows
+#include "rt_host_facemorph.inl"	// (2026-11-07) FaceMorphs: a morphing skinned head re-posed by its hash (RtFaceMorph.h)
 #include "rt_host_movingrest.inl"	// (2026-11-07) MovingCasterHistory
 #include "rt_host_sigma.inl"	// (2026-11-07) the RT shadow denoiser vs the exact soft shadow (docs/next/RT-DENOISER.md)
 #include "rt_host_sigma_sun.inl"
@@ -1195,7 +1208,12 @@ static bool sceneCameraMove(Ctx& c) {
 #include "rt_host_pthidden.inl"	// (2026-11-07) the path tracer's camera rays pass over the hidden first-person body
 #include "rt_host_denoisepeople.inl"	// (2026-11-07) RtDenoise RGB: PeopleHistory (the path tracer's dialogue ghosting)
 #include "rt_host_aniso.inl"	// (2026-11-07) anisotropic filtering at ray-traced hits (ray cones)
+#include "rt_host_tess.inl"	// (2026-11-07 rtgap-tess) the tessellation gaps: start slack + contact shadows (docs/next/RT-DETAIL-GAPS.md section 1)
 #include "rt_host_ptdetail.inl"	// (2026-11-07) PTDetail + PTDenoiseGuide: the game's fine shading on the path-traced picture
+#include "rt_host_decals.inl"	// (2026-11-07 rtgap-decals) decals: shadow / AO rays pass them, reflections and camera rays see them
+#include "rt_host_normals.inl"	// (2026-11-07) RealNormalMaps: the real normal maps at traced hits (PT, RT reflections, RT GI)
+#include "rt_host_tessblas.inl"	// (2026-11-07, rtgap-tessblas, protocol 8) displaced geometry in the RT scene vs the CPU's truth
+#include "rt_host_textures.inl"	// (2026-11-07, protocol 8) real textures' routes: BC blocks, the GPU route through the fork, auto caps, release
 
 // ------------------------------------------------------------------------------------------------------------------------------
 int main(int argc, char** argv) {
@@ -1213,7 +1231,7 @@ int main(int argc, char** argv) {
 		else if (a == "--scene" && i + 1 < argc) only.push_back(argv[++i]);
 		else if (a == "--keep-going") keepGoing = true;
 		else { std::printf("usage: NvrRtHost.exe --helper <NvrRtHelper.exe> --spv <folder> [--out <folder>] [--device <name part>] [--scene <name>]...\n"
-			"scenes: furnace alphacard material chainlink manylamps mirror cameramove sun ao pathtex falloff restirlamps restirgi denoise lamplookup scenepick sameframe movingrest\n"); return 2; }
+			"scenes: furnace alphacard material chainlink manylamps mirror cameramove sun ao pathtex falloff restirlamps restirgi denoise lamplookup scenepick decals sameframe movingrest facemorph\n"); return 2; }
 	}
 	if (helperExe.empty() || spv.empty()) { std::printf("--helper and --spv are required\n"); return 2; }
 	{ char full[MAX_PATH]; GetFullPathNameA(spv.c_str(), MAX_PATH, full, nullptr); spv = full; }
@@ -1252,8 +1270,11 @@ int main(int argc, char** argv) {
 	c.shMany = host.AddShader(spv + "\\RtLampTraceMany.spv");
 	c.shRefl = host.AddShader(spv + "\\ReflectionsRT.spv");
 	if (!registerMore(host, spv, compute, includes) || !registerSameFrame(host, spv)) { say("RESULT: FAIL (shared images)\n"); return 1; }
-	if (!registerSigma(host, spv)) { say("RESULT: FAIL (shared images)\n"); return 1; }
+	if (!registerSigma(host, spv) || !registerTess(host)) { say("RESULT: FAIL (shared images)\n"); return 1; }
+	if (!registerDecals(host, spv)) { say("RESULT: FAIL (shaders)\n"); return 1; }
+	if (!registerNormals(host, spv)) { say("RESULT: FAIL (shaders)\n"); return 1; }
 	gCacheShader = host.AddShader(spv + "\\RtPathTraceCache.spv");   // (2026-11-07) PTRadianceCache's resolve pass
+	if (!registerTextureRoutes(host)) { say("RESULT: FAIL (texture transfer images)\n"); return 1; }   // (2026-11-07, protocol 8)
 	for (auto& s : host.shaders) if (GetFileAttributesA(s.c_str()) == INVALID_FILE_ATTRIBUTES) { say("RESULT: FAIL (no %s)\n", s.c_str()); return 1; }
 	if (!host.Start(helperExe.c_str())) { host.Stop(); say("RESULT: FAIL (helper did not get ready)\n"); return 1; }
 	// clear the atlas once (an empty slot reads alpha 0) and the history pair
@@ -1290,11 +1311,21 @@ int main(int argc, char** argv) {
 		{ "denoiseantilag", "RtDenoise RGB temporal AntiLag: a step clears in a few frames, a still noisy pixel keeps its mean and noise", [&] { return sceneDenoiseAntiLag(c); } },
 		{ "lamplookup", "the lamp shaders' lookup PointShadowTraced (D3D9 ps_3_0)", [&] { return sceneLampLookup(c); } },
 		{ "scenepick", "RtCore's scene picking rules + record packing (RtScenePick.h)", [&] { return sceneScenePick(c); } },
+		{ "decals", "decals (lifted cut-outs, NVR_RT_CUSTOM_DECAL): lamp / AO / sun rays pass them, reflections and camera rays see them (RtLampTrace, ReflectionsRTAlpha, RtAOTrace)", [&] { return sceneDecals(c); } },
 		{ "movingrest", "ManyLights histories under a walking person: MovingCasterHistory 0 vs 2 (RtLampTraceMany + RtLampTraceRestir)", [&] { return sceneMovingRest(c); } },
 		{ "ptaniso", "anisotropic filtering at ray-traced hits: a floor of real textures at a glancing angle, ray cones vs one mip (RtPathTrace + RtTextures)", [&] { return scenePtAniso(c); } },
 		{ "ptdetail", "the path-traced picture keeps the game's fine shading (PTDetail) and the a-trous stops at its edges (PTDenoiseGuide)", [&] { return scenePtDetail(c); } },
+		{ "normalmaps", "real normal maps at traced hits (RealNormalMaps): path tracer camera + bounce hits, RT GI's bounce, RT reflections' hit normal vs the CPU's bend; off / no map = flat", [&] { return sceneNormalMaps(c); } },
 		{ "pthidden", "path tracer camera rays vs the hidden first-person body round the eye (the head over the sky; RtPathTrace)", [&] { return scenePtHidden(c); } },
+		{ "tessslack", "tessellated bumps vs the flat RT floor: rays start under it (speckles) without the slack, none with it (RtPathTrace, RtSunShadow, RtLampTrace, RtAOTrace)", [&] { return sceneTessSlack(c); } },
+		{ "contact", "screen-space contact shadows from a step the RT scene lacks: on / off, false positives, a flat floor never darkened (RtSunShadow, RtLampTrace, RtPathTrace)", [&] { return sceneContact(c); } },
+		{ "tessblas", "displaced land (2 layers, weights, border, fade) + a pinned scaled rock in the RT scene vs the CPU's truth of the tessellation formula: hit distances + sun shadows, moved camera (refit), off (ReflectionsRT + NvrRtDisplace)", [&] { return sceneTessBlas(c); } },
 		{ "sameframe", "SameFrame lamp shadows: camera rays + trace in one exchange, a walking caster, the hidden first-person body (RtLampPrimary + RtLampTrace + PointShadowTraced)", [&] { return sceneSameFrame(c); } },
+		{ "texpack", "real textures' rules (RtTexturePack.h): auto caps by video memory (+ this PC's adapters), routes, levels, packing, release, id reuse", [&] { return sceneTexPack(c); } },
+		{ "realtexbc", "real textures as BC3 / BC1 blocks in the helper (CPU route) vs the exact chain-link shadow", [&] { return sceneRealTexBc(c); } },
+		{ "realtexgpu", "real textures on the game's GPU route through the fork (RGBA8 decode; BC1 / BC3 / BC5 blocks with fork 1.8-rt-bc): chain-link shadow + path-traced colour vs references", [&] { return sceneRealTexGpu(c); } },
+		{ "texrelease", "TEXTURE_RELEASE: a slot's real texture released -> the atlas at once; the id reused for another texture", [&] { return sceneTexRelease(c); } },
+		{ "facemorph", "FaceMorphs: a skinned head whose vertices change with still bones is re-posed by its hash, an unchanged one is not; the CPU-vertex copy (RtFaceMorph.h + StageSkinnedGeometry + RtLampPrimary)", [&] { return sceneFaceMorph(c); } },
 	};
 	int failed = 0, ran = 0;
 	std::string summary;

@@ -38,6 +38,7 @@ MIRRORS = [
     (("tools/nvr-rt-host/rt_host_sameframe.inl", "PrimaryConstantsHost"), ("src/core/RtLampShadows.h", "PrimaryConstants")),
     (("tools/nvr-rt-host/rt_host.cpp", "PathConstants"), ("src/core/RtPathTrace.cpp", "PassConstants")),
     (("tools/nvr-rt-host/rt_host.cpp", "ReflConstants"), ("src/effects/Reflections/Reflections.cpp", "RtPassConstants")),
+    (("tools/nvr-rt-host/rt_host_more.inl", "SunConstants"), ("src/core/RtSunShadows.cpp", "PassConstants")),   # 2026-11-07 rtgap-tess
 ]
 
 
