@@ -565,7 +565,9 @@ namespace {
 		desc.SamplerHeapBinding = 0;
 		desc.ColorTargetCount = 1;
 		desc.Blend = NVR_EXT_BLEND_NONE;
-		desc.ColorWriteMask = 0xFu;
+		// (2026-11-06) colour only: under PTReplace the scene's alpha carries the materials MaterialAware reflections read (roughness, metal;
+		// ReflectionsMaterial.frag); writing 1 there wiped them, so with PTRealtime the test room's mirrors reflected as rough grey stone
+		desc.ColorWriteMask = 0x7u;
 		desc.pDebugName = "RtPathTraceShow";
 		if (FAILED(ext->CreateGraphicsPipeline(&desc, &showPipeline))) {
 			showPipeline = nullptr;

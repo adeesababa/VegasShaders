@@ -120,8 +120,13 @@ namespace {
 		const void*	vb;
 		const void*	ib;
 		UInt32		vertCount, triCount, baseVertex;
+		// (2026-11-06) skinned partitions: the actor's skin instance. Actors cloned from one body / armour mesh SHARE the partition data
+		// (BuffData, VB, IB), so two NPCs in the same outfit got one id: both posed into one structure in the same frame (two builds of
+		// one destination in one call: the NVIDIA device-lost crashes, found by the validation layer) and both drawn in the last pose
+		const void*	owner = nullptr;
 		bool operator==(const GeometryKey& o) const {
-			return buffData == o.buffData && vb == o.vb && ib == o.ib && vertCount == o.vertCount && triCount == o.triCount && baseVertex == o.baseVertex;
+			return buffData == o.buffData && vb == o.vb && ib == o.ib && vertCount == o.vertCount && triCount == o.triCount && baseVertex == o.baseVertex &&
+				owner == o.owner;
 		}
 	};
 	struct GeometryKeyHash {
@@ -130,6 +135,7 @@ namespace {
 			h ^= (size_t)k.vb + 0x9e3779b9 + (h << 6) + (h >> 2);
 			h ^= (size_t)k.ib + 0x9e3779b9 + (h << 6) + (h >> 2);
 			h ^= (size_t)(k.vertCount * 31u + k.triCount * 17u + k.baseVertex) + 0x9e3779b9 + (h << 6) + (h >> 2);
+			h ^= (size_t)k.owner + 0x9e3779b9 + (h << 6) + (h >> 2);
 			return h;
 		}
 	};
@@ -1079,6 +1085,7 @@ namespace {
 			NVR_EXT_RT_GEOMETRY_DESC desc;
 			GeometryKey key;
 			if (!DescribeData(part.BuffData, geo->m_pcName, desc, ranges, key)) { skip[kDescribe]++; partitionFate[2]++; continue; }
+			key.owner = skin;	// (2026-11-06) one entry per actor (clones share the partition data)
 			const PositionElement& e = lastElement;
 			if (e.weightStream != e.stream || e.indexStream != e.stream || e.format == NVR_EXT_RT_POSITION_HALF4) { skip[kDescribe]++; partitionFate[3]++; continue; }
 			// the palette: partition bone k = the skin's bone part.pBones[k]
