@@ -378,7 +378,8 @@ void AmbientOcclusionEffect::RtTemporalSetup(const D3DSURFACE_DESC& AoDesc) {
 	EffectStatus::History(StatusSlot, Name, continuous ? "kept (RT AO)" : !rectSame && RtHistoryValid ? "reset (RT AO: RenderScale rect changed)" :
 		"reset (RT AO: no history, size, gap, cut or shared rule)");	// UNOFFICIAL 2026-11-01
 	if (continuous) BounceLightReprojection(TheRenderManager->viewMatrix, TheRenderManager->InvViewMatrix, RtLastView, RtLastInvView, RtLastProj, &RtReproject);
-	RtTemporal = D3DXVECTOR4(continuous ? 0.9f : 0.0f, 4.0f,
+	// (2026-11-07 perf-history) 0.9 of last frame kept at 60 fps: the same decay a second at this frame rate (RtHistoryTime.h; 0.73 at 20 fps)
+	RtTemporal = D3DXVECTOR4(continuous ? RtHistoryTime::Keep(0.9f, RtDenoise::HistoryClock()) : 0.0f, 4.0f,
 		(float)(TemporalBackbone::Shared() ? TemporalBackbone::EffectIndex(TemporalBackbone::OffsetRtAmbient) : RtFrame % 1024), 0.0f);	// (SharedNoise: shared index, own offset)
 }
 
@@ -914,8 +915,10 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 		// giCap back to 1) the cells may lean on 2 frames only, growing back to CacheFrames by one every CacheSpread frames (a cell's turn).
 		cacheReset = !RtCacheValid || RtCacheCellSize != rt.CacheCellSize;
 		const UINT div = cacheReset ? 1u : (UINT)cacheSpread;
-		RtCacheCap = cacheReset || giCap <= 1.0f ? 2.0f : (std::min)(RtCacheCap + 1.0f / (float)div, (float)rt.CacheFrames);
-		cc.cacheC = D3DXVECTOR4((float)cacheRays, cacheReset ? -RtCacheCap : (std::min)(RtCacheCap, (float)rt.CacheFrames),
+		// (2026-11-07 perf-history) CacheFrames is frames at 60 fps: the same seconds at this frame rate (RtHistoryTime.h)
+		const float cacheFrames = RtHistoryTime::Frames((float)rt.CacheFrames, RtDenoise::HistoryClock());
+		RtCacheCap = cacheReset || giCap <= 1.0f ? 2.0f : (std::min)(RtCacheCap + 1.0f / (float)div, cacheFrames);
+		cc.cacheC = D3DXVECTOR4((float)cacheRays, cacheReset ? -RtCacheCap : (std::min)(RtCacheCap, cacheFrames),
 			(float)(TheFrameRateManager->FrameNumber % div), (float)div);
 		cc.cacheD = D3DXVECTOR4((float)((TheFrameRateManager->FrameNumber / div) % 4096u), (float)RtAmbient::CacheLazyPeriod, 2.5f, 0.0f);
 	}

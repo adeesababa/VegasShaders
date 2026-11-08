@@ -58,11 +58,11 @@ static bool drawN(Host& h, const FragPass& p, IDirect3DSurface9* const* targets,
 }
 static void freeTex(std::initializer_list<Tex*> list) { for (Tex* t : list) { if (t->sys) t->sys->Release(); if (t->s) t->s->Release(); if (t->t) t->t->Release(); *t = Tex(); } }
 
-// RtDenoise.cpp's push blocks (the RGB temporal 196 bytes, the specular one 212, the a-trous 48, the firefly spread 32)
-struct DnTemporalPush { float prevViewProj[16], forward[4], right[4], up[4], move[4], params[4], backbone[4], rect[4]; uint32_t samplerIndex; float clampK, peopleCap, antiLag, fireflyK; };
-static_assert(sizeof(DnTemporalPush) == 196, "RtDenoise.cpp's temporal push block");
-struct DnSpecPush { float prevViewProj[16], forward[4], right[4], up[4], move[4], params[4], backbone[4], rect[4], spec[4]; uint32_t samplerIndex; float clampK, peopleCap, antiLag, fireflyK; };
-static_assert(sizeof(DnSpecPush) == 212, "RtDenoise.cpp's specular temporal push block");
+// RtDenoise.cpp's push blocks (the RGB temporal 200 bytes, the specular one 216, the a-trous 48, the firefly spread 32)
+struct DnTemporalPush { float prevViewProj[16], forward[4], right[4], up[4], move[4], params[4], backbone[4], rect[4]; uint32_t samplerIndex; float clampK, peopleCap, antiLag, fireflyK, fastFrames; };
+static_assert(sizeof(DnTemporalPush) == 200, "RtDenoise.cpp's temporal push block");
+struct DnSpecPush { float prevViewProj[16], forward[4], right[4], up[4], move[4], params[4], backbone[4], rect[4], spec[4]; uint32_t samplerIndex; float clampK, peopleCap, antiLag, fireflyK, fastFrames; };
+static_assert(sizeof(DnSpecPush) == 216, "RtDenoise.cpp's specular temporal push block");
 struct DnAtrousPush { float params[4], size[4]; uint32_t samplerIndex; float guideSigma; uint32_t specular; float historyFix; };
 static_assert(sizeof(DnAtrousPush) == 48, "RtDenoise.cpp's a-trous push block");
 
@@ -274,7 +274,7 @@ static bool scenePtSplit(Ctx& c) {
 static bool scenePtSpecMove(Ctx& c) {
 	Host& h = *c.host;
 	FragPass fp;
-	if (!loadFragN(h, "RtDenoiseTemporalSpec", 9, 212, 4, fp, 192)) return false;
+	if (!loadFragN(h, "RtDenoiseTemporalSpec", 9, 216, 4, fp, 192)) return false;
 	const float wallY = 1400.0f, wallTop = 1600.0f;
 	auto reflection = [&](const Camera& cam, UINT i, UINT j, float& value, float& hit, float& viewZ) -> bool {
 		const V3 ray = cam.ray((i + 0.5f) / S, (j + 0.5f) / S);   // a point at view z s: eye + ray s
@@ -363,7 +363,7 @@ static bool scenePtSpecMove(Ctx& c) {
 static bool scenePtObjMotion(Ctx& c) {
 	Host& h = *c.host;
 	FragPass fp;
-	if (!loadFragN(h, "RtDenoiseTemporalRgb", 7, 196, 3, fp, 176)) return false;
+	if (!loadFragN(h, "RtDenoiseTemporalRgb", 7, 200, 3, fp, 176)) return false;
 	const Camera cam = Camera::lookDir({ 0, 0, 3000 }, { 0, 0, -1 }, { 0, 1, 0 }, 1.5f, 1.5f);
 	Tex noisy, depth, motion, captured, hA, hB, oA, oB, oD;
 	const D3DFORMAT F = D3DFMT_A32B32G32R32F;
@@ -446,7 +446,7 @@ struct DnChain {
 		};
 		for (Tex* t : { &oA, &out }) if (!makeTex(h, w, hh, F, true, *t)) return false;
 		for (Tex* t : { &oB, &oC, &oD, &tA, &tB, &cA[0], &cA[1], &cB[0], &cB[1], &scratch, &hA, &hB, &hC }) if (!target(*t)) return false;
-		return loadFragN(h, "RtDenoiseTemporalRgb", 7, 196, 3, temporalRgb, 176) && loadFragN(h, "RtDenoiseTemporalSpec", 9, 212, 4, temporalSpec, 192) && loadFragN(h, "RtDenoiseFirefly", 3, 32, 2, firefly) &&
+		return loadFragN(h, "RtDenoiseTemporalRgb", 7, 200, 3, temporalRgb, 176) && loadFragN(h, "RtDenoiseTemporalSpec", 9, 216, 4, temporalSpec, 192) && loadFragN(h, "RtDenoiseFirefly", 3, 32, 2, firefly) &&
 			loadFragN(h, "RtDenoiseAtrousRgb", 5, 48, 2, atrous);
 	}
 	void free() { freeTex({ &hA, &hB, &hC, &oA, &oB, &oC, &oD, &tA, &tB, &cA[0], &cA[1], &cB[0], &cB[1], &scratch, &out }); }

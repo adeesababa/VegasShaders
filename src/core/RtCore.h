@@ -141,6 +141,9 @@ public:
 	// the alpha atlas) and every tuft within GrassRadius of the camera this frame is an instance of it (the tuft's world position and
 	// size step; no sway). GrassWanted: worth reading the pass's tufts (the helper runs, Grass and AlphaTested on).
 	static bool			GrassWanted();
+	// UNOFFICIAL 2026-11-07 (perf-ptcost) how many instances of the exchange being recorded are the hidden first-person body
+	// (NVR_RT_CUSTOM_HIDDEN): 0 lets the path tracer's camera ray be one query (RtPtCost.h). Valid inside a user's Record.
+	static UInt32		HiddenInstances();
 	static void			NoteGrass(NiGeometry* Geometry, IDirect3DBaseTexture9* Texture, const float* Instances, UINT Count, UINT VertsPerTuft,
 							const float* ScaleMask, UInt32 AlphaRef);
 };

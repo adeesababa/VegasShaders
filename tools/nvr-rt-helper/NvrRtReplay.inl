@@ -571,6 +571,8 @@
 				else o.accelerationStructureReference = it->second;
 			}
 			memcpy(s.records.mapped, c.records, (size_t)instanceCount * sizeof(NvrRtInstanceRecord));
+			// (2026-11-07 perf-reflfix) the capture holds no smooth normals (the words before the positions are not captured): flat here
+			for (uint32_t i = 0; i < instanceCount; i++) ((NvrRtInstanceRecord*)s.records.mapped)[i].geometryId &= ~NVR_RT_RECORD_GEO_NORMALS;
 		}
 		if (missing) Log("replay: %u instances name a geometry the capture does not hold (masked out)", missing);
 

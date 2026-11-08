@@ -48,7 +48,7 @@ namespace RtRestirRow {
 	};
 
 	struct Keys {
-		float maxM = 20.0f, spatial = 4.0f, radius = 16.0f, normal = 0.9f, plane = 0.05f;
+		float maxM = 20.0f, spatial = 2.0f, radius = 16.0f, normal = 0.9f, plane = 0.05f;	// (2026-11-07 perf-ptcost: spatial 2, was 4; RT-PATH-TRACING.md "perf-ptcost")
 		float cacheLog2 = 0.0f, cacheBase4096 = 0.0f, cacheCell = 0.0f, cacheMaxSamples = 0.0f, cacheMinSamples = 0.0f;
 		float frame = 0.0f;
 	};

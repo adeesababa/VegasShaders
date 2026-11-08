@@ -34,6 +34,41 @@ vec3 rtHitObjectNormal(uint instance, uint primitive) {
 	return cross(b - a, c - a);
 }
 
+// UNOFFICIAL 2026-11-07 (perf-reflfix) the hit's SMOOTH normal: the geometry's vertex normals (the helper's, RtNormals.comp: one packed word
+// a vertex just before its positions, record geometryId bit 31 = NVR_RT_RECORD_GEO_NORMALS) interpolated with the barycentrics, in scene
+// space. n = the triangle's normal facing the ray (HitNormal / the cross product, normalized), d = the ray's direction. The answer stays on
+// n's side (the stored normal may point either way of a two-sided card) and, at a silhouette where the interpolated normal turns away from
+// the ray, is tilted back until it just faces it (no black rim). Keep n itself for the ray offsets and back-face decisions. Without the
+// normals (an older helper, no room in the data, a displaced copy): n. A sphere in a mirror was faceted with the flat n (test 9).
+#define RT_RECORD_GEO_NORMALS 0x80000000u
+vec3 rtUnpackNormal(uint w) {
+	const vec2 e = vec2(float(w & 0xFFFFu), float(w >> 16)) * (2.0 / 65535.0) - 1.0;
+	vec3 v = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+	if (v.z < 0.0) v.xy = (1.0 - abs(v.yx)) * vec2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);
+	return normalize(v);
+}
+bool rtHitHasSmoothNormals(uint instance) {
+	return (records[instance].geometryId & RT_RECORD_GEO_NORMALS) != 0u && records[instance].vertexOffset != 0xFFFFFFFFu &&
+		records[instance].indexOffset > records[instance].vertexOffset;
+}
+vec3 rtHitSmoothNormal(uint instance, uint primitive, vec2 bary, vec3 n, mat3 toScene, vec3 d) {
+	if (!rtHitHasSmoothNormals(instance)) return n;
+	const uint vo = records[instance].vertexOffset;
+	const uint base = vo - (records[instance].indexOffset - vo) / 3u;
+	const uvec3 i = rtHitTriangle(instance, primitive);
+	const uint w0 = words[base + i.x], w1 = words[base + i.y], w2 = words[base + i.z];
+	const vec3 b = vec3(1.0 - bary.x - bary.y, bary.x, bary.y);
+	vec3 s = (w0 != 0u ? rtUnpackNormal(w0) * b.x : vec3(0.0)) + (w1 != 0u ? rtUnpackNormal(w1) * b.y : vec3(0.0)) +
+		(w2 != 0u ? rtUnpackNormal(w2) * b.z : vec3(0.0));
+	s = toScene * s;
+	if (!(dot(s, s) > 1.0e-10)) return n;
+	s = normalize(s);
+	if (dot(s, n) < 0.0) s = -s;
+	const float facing = dot(s, -d);
+	if (facing < 0.02) s = normalize(s - d * (0.02 - facing));
+	return s;
+}
+
 bool rtHitHasTexcoords(uint instance) { return (records[instance].flags & RT_HIT_TEXCOORDS_FLAGS) != 0u; }
 
 vec2 rtHitTexcoord(uint instance, uint primitive, vec2 bary) {
@@ -49,15 +84,20 @@ vec2 rtHitTexcoord(uint instance, uint primitive, vec2 bary) {
 // fallback, or the albedo itself), as two passes of one loop with ONE real-texture sample and one atlas read each, not two copies of the
 // sampling code: the trace shaders' drivers inline every call, and the emissive lights' lookups call this many times (RtPathTrace.spv's
 // pipeline failed to build on the AMD iGPU with the copies). The answers are the old rtHitAlbedo / rtHitGlow's, step for step.
+// (2026-11-07 perf-mirrorfix) a TINTED record: alpha-tested AND textured (never both otherwise; RtScenePick.h ActorRecordFlags): the game's
+// hair, drawn grey and tinted by its shader (albedo x 2 x HairTint in the stored curve). Its albedo rgb is the tint's linear colour: the
+// diffuse texture's colour is multiplied by it x 2^2.2 (the x 2 in linear light); with no texture the albedo alone is the hair's colour.
+#define RT_HIT_TINTED_FLAGS 0x60u
 vec3 rtHitMap(uint instance, uint primitive, vec2 bary, bool glow) {
 	const bool hasUv = rtHitHasTexcoords(instance);
 	const vec2 uv = hasUv ? rtHitTexcoord(instance, primitive, bary) : vec2(0.0);   // (once for every read below)
+	const vec3 tint = (records[instance].flags & RT_HIT_TINTED_FLAGS) == RT_HIT_TINTED_FLAGS ? records[instance].albedo.rgb * 4.5947934 : vec3(1.0);
 	for (int pass = glow ? 0 : 1; pass < 2; pass++) {	// 0 the glow map, 1 the diffuse
 #ifndef RT_NO_REAL_TEXTURES
 		if (hasUv) {	// (2026-11-07) the game's own texture, filtered, its mip by the footprint (rtConeWidth)
 			const uvec3 ids = rtSlotTextures(records[instance].flags);
 			const uint id = pass == 0 ? ids.z : ids.x;
-			if (id != 0u) return rtTexToLinear(rtTexSampleHit(id, uv, instance, primitive).rgb);
+			if (id != 0u) return rtTexToLinear(rtTexSampleHit(id, uv, instance, primitive).rgb) * (pass == 1 ? tint : vec3(1.0));
 		}
 #endif
 		if (hasUv) {
@@ -79,7 +119,7 @@ vec3 rtHitMap(uint instance, uint primitive, vec2 bary, bool glow) {
 #endif
 			}
 			// as the map stores it (sRGB-encoded)
-			if (c.r >= 0.0) return mix(pow((c + 0.055) / 1.055, vec3(2.4)), c / 12.92, lessThanEqual(c, vec3(0.04045)));
+			if (c.r >= 0.0) return mix(pow((c + 0.055) / 1.055, vec3(2.4)), c / 12.92, lessThanEqual(c, vec3(0.04045))) * (pass == 1 ? tint : vec3(1.0));
 		}
 	}
 	return records[instance].albedo.rgb;

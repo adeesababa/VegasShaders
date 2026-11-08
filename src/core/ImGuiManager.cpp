@@ -665,6 +665,11 @@ static const RestartSetting kRestartSettings[] = {
 	{ "Shaders.VolumetricClouds.Main",        "HalfResolution",     RestartRule::Changed },
 	{ "Shaders.VolumetricClouds.Main",        "ShadowResolution",   RestartRule::Changed },
 	{ "Shaders.Skin.Main",                    "OverrideVanillaPlusSkin", RestartRule::Changed },	// picks the SKIN shader files at start (with Vanilla Plus Skin installed)
+	// UNOFFICIAL 2026-11-07 (perf-ptcost) the path tracer's images made at the RT helper's start (RtPathTrace.cpp Setup): turned on later they
+	// wait for the next helper start (a game restart, or reloadshaders); RtPathTrace keeps its other features running meanwhile
+	{ "Main.Main.RayTracing",                 "PTRestirGI",         RestartRule::TurnOn },
+	{ "Main.Main.RayTracing",                 "PTDenoiseSplit",     RestartRule::TurnOn },
+	{ "Main.Main.RayTracing",                 "PTCacheEntriesLog2", RestartRule::Changed },
 };
 
 static std::unordered_map<std::string, float> s_startupValues;	// "Section.Key" -> its value when the game started

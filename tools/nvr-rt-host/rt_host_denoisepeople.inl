@@ -20,11 +20,11 @@ static bool sceneDenoisePeople(Ctx& c) {
 		bindings[7] = { 0, 0, NVR_EXT_BIND_SAMPLER, 0, NVR_EXT_VIEW_2D, FALSE, 176 };
 		NVR_EXT_GRAPHICS_PIPELINE_DESC desc = {};
 		desc.pFragmentSpirv = spirv.data(); desc.FragmentSpirvSize = UINT(spirv.size());
-		desc.BindingCount = 8; desc.pBindings = bindings; desc.PushConstantSize = 196;	// (ptaaa-denoiser: + fireflyK)
+		desc.BindingCount = 8; desc.pBindings = bindings; desc.PushConstantSize = 200;	// (ptaaa-denoiser: + fireflyK; perf-history: + fastFrames)
 		desc.UsesSamplerHeap = TRUE; desc.SamplerHeapSet = 0; desc.SamplerHeapBinding = 0;
 		desc.ColorTargetCount = 2; desc.Blend = NVR_EXT_BLEND_NONE; desc.ColorWriteMask = 0xF; desc.pDebugName = "RtDenoiseTemporalRgb";
 		CHECKHR(h.ext->CreateGraphicsPipeline(&desc, &pass.pipe), "CreateGraphicsPipeline");
-		pass.images = 7; pass.push = 196;
+		pass.images = 7; pass.push = 200;
 		if (!gPointClamp) { NVR_EXT_SAMPLER_DESC sd = { NVR_EXT_FILTER_NEAREST, NVR_EXT_ADDRESS_CLAMP }; CHECKHR(h.ext->CreateSampler(&sd, &gPointClamp), "CreateSampler"); }
 	}
 	World w;
@@ -46,8 +46,8 @@ static bool sceneDenoisePeople(Ctx& c) {
 		cap[i * 4 + 3] = (i % S) < S / 2 ? 2.0f : 1.0f;      // the left half: a person's pixel (alpha 2); the right: a lit surface (1)
 	}
 	if (!fillTex(noisy, white, 4) || !fillTex(depth, dep, 1) || !fillTex(histA, black32, 4) || !fillTex(histB, hb, 4) || !fillTex(captured, cap, 4)) return false;
-	struct Push { float prevViewProj[16], forward[4], right[4], up[4], move[4], params[4], backbone[4], rect[4]; uint32_t samplerIndex; float clampK, peopleCap, antiLag, fireflyK; };
-	static_assert(sizeof(Push) == 196, "RtDenoise.cpp's push block");
+	struct Push { float prevViewProj[16], forward[4], right[4], up[4], move[4], params[4], backbone[4], rect[4]; uint32_t samplerIndex; float clampK, peopleCap, antiLag, fireflyK, fastFrames; };
+	static_assert(sizeof(Push) == 200, "RtDenoise.cpp's push block");
 	bool ok = true;
 	for (float people : { 4.0f, 0.0f }) {
 		Push t = {};
@@ -64,7 +64,7 @@ static bool sceneDenoisePeople(Ctx& c) {
 		b[7].Slot = 0; b[7].Type = NVR_EXT_BIND_SAMPLER; b[7].pResource = gPointClamp;
 		NVR_EXT_DRAW_DESC d = {};
 		d.pPipeline = pass.pipe; d.TargetCount = 2; d.Targets[0].pResource = outA.s; d.Targets[1].pResource = outB.s;
-		d.BindingCount = 8; d.pBindings = b; d.pPushData = &t; d.PushDataSize = 196;
+		d.BindingCount = 8; d.pBindings = b; d.pPushData = &t; d.PushDataSize = 200;
 		CHECKHR(h.ext->Draw(&d), "Draw");
 		std::vector<float> out;
 		if (!readTex(h, outA, out, 4)) return false;
@@ -108,7 +108,7 @@ static bool sceneDenoisePeople(Ctx& c) {
 			b[7].Slot = 0; b[7].Type = NVR_EXT_BIND_SAMPLER; b[7].pResource = gPointClamp;
 			NVR_EXT_DRAW_DESC d = {};
 			d.pPipeline = pass.pipe; d.TargetCount = 2; d.Targets[0].pResource = outA.s; d.Targets[1].pResource = outB.s;
-			d.BindingCount = 8; d.pBindings = b; d.pPushData = &t; d.PushDataSize = 192;
+			d.BindingCount = 8; d.pBindings = b; d.pPushData = &t; d.PushDataSize = 200;
 			CHECKHR(h.ext->Draw(&d), "Draw");
 			std::vector<float> out;
 			if (!readTex(h, outA, out, 4)) return false;
@@ -149,11 +149,11 @@ static bool sceneDenoiseAntiLag(Ctx& c) {
 		bindings[7] = { 0, 0, NVR_EXT_BIND_SAMPLER, 0, NVR_EXT_VIEW_2D, FALSE, 176 };
 		NVR_EXT_GRAPHICS_PIPELINE_DESC desc = {};
 		desc.pFragmentSpirv = spirv.data(); desc.FragmentSpirvSize = UINT(spirv.size());
-		desc.BindingCount = 8; desc.pBindings = bindings; desc.PushConstantSize = 196;	// (ptaaa-denoiser: + fireflyK)
+		desc.BindingCount = 8; desc.pBindings = bindings; desc.PushConstantSize = 200;	// (ptaaa-denoiser: + fireflyK; perf-history: + fastFrames)
 		desc.UsesSamplerHeap = TRUE; desc.SamplerHeapSet = 0; desc.SamplerHeapBinding = 0;
 		desc.ColorTargetCount = 2; desc.Blend = NVR_EXT_BLEND_NONE; desc.ColorWriteMask = 0xF; desc.pDebugName = "RtDenoiseTemporalRgb";
 		CHECKHR(h.ext->CreateGraphicsPipeline(&desc, &pass.pipe), "CreateGraphicsPipeline");
-		pass.images = 7; pass.push = 196;
+		pass.images = 7; pass.push = 200;
 		if (!gPointClamp) { NVR_EXT_SAMPLER_DESC sd = { NVR_EXT_FILTER_NEAREST, NVR_EXT_ADDRESS_CLAMP }; CHECKHR(h.ext->CreateSampler(&sd, &gPointClamp), "CreateSampler"); }
 	}
 	World w;
@@ -170,8 +170,8 @@ static bool sceneDenoiseAntiLag(Ctx& c) {
 		!makeTex(h, S, S, D3DFMT_A32B32G32R32F, true, outA) || !makeTex(h, S, S, D3DFMT_A32B32G32R32F, true, outB)) return false;
 	if (!fillTex(depth, dep, 1)) return false;
 	{ std::vector<float> z(size_t(S) * S * 4, 0.0f); if (!fillTex(captured, z, 4)) return false; }
-	struct Push { float prevViewProj[16], forward[4], right[4], up[4], move[4], params[4], backbone[4], rect[4]; uint32_t samplerIndex; float clampK, peopleCap, antiLag, fireflyK; };
-	static_assert(sizeof(Push) == 196, "the RtDenoise push block");
+	struct Push { float prevViewProj[16], forward[4], right[4], up[4], move[4], params[4], backbone[4], rect[4]; uint32_t samplerIndex; float clampK, peopleCap, antiLag, fireflyK, fastFrames; };
+	static_assert(sizeof(Push) == 200, "the RtDenoise push block");
 	uint32_t rng = 777;
 	auto rnd = [&]() { rng = rng * 747796405u + 2891336453u; uint32_t x = ((rng >> ((rng >> 28u) + 4u)) ^ rng) * 277803737u; return float(((x >> 22u) ^ x) >> 8) / 16777216.0f; };
 	// one frame through the pass: noisy in, history (a, b) in, the output read back as the next history
@@ -191,7 +191,7 @@ static bool sceneDenoiseAntiLag(Ctx& c) {
 		bd[7].Slot = 0; bd[7].Type = NVR_EXT_BIND_SAMPLER; bd[7].pResource = gPointClamp;
 		NVR_EXT_DRAW_DESC d = {};
 		d.pPipeline = pass.pipe; d.TargetCount = 2; d.Targets[0].pResource = outA.s; d.Targets[1].pResource = outB.s;
-		d.BindingCount = 8; d.pBindings = bd; d.pPushData = &t; d.PushDataSize = 196;
+		d.BindingCount = 8; d.pBindings = bd; d.pPushData = &t; d.PushDataSize = 200;
 		CHECKHR(h.ext->Draw(&d), "Draw");
 		return readTex(h, outA, a, 4) && readTex(h, outB, b, 4);
 	};

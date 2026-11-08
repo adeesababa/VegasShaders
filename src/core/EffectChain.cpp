@@ -1606,6 +1606,8 @@ static const EffectChain::Step PostTonemapSteps[] = {
 void EffectChain::Run(ShaderManager* manager, Stage stage, ChainContext& ctx) {
 	const Step* steps = stage == PreTonemap ? PreTonemapSteps : PostTonemapSteps;
 	const size_t count = stage == PreTonemap ? _countof(PreTonemapSteps) : _countof(PostTonemapSteps);
-	for (size_t i = 0; i < count && !ctx.stop; i++)
+	for (size_t i = 0; i < count && !ctx.stop; i++) {
+		SessionLog::StageScope stage(steps[i].name);	// UNOFFICIAL 2026-11-07 (perf-ptcost): the step's name for the CRASH and STALL lines
 		(manager->*steps[i].function)(ctx);
+	}
 }

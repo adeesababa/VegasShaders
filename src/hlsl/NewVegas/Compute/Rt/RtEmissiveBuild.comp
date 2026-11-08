@@ -77,7 +77,8 @@ void main() {
 	}
 	barrier();
 	const uint g = sFound;
-	const bool ok = g != 0xFFFFFFFFu && records[g].geometryId == geometryId && records[g].vertexOffset != 0xFFFFFFFFu && tris > 0u &&
+	const bool ok = g != 0xFFFFFFFFu && (records[g].geometryId & 0x00FFFFFFu) == geometryId &&	// (2026-11-07 perf-reflfix: bit 31 = the smooth normals)
+		 records[g].vertexOffset != 0xFFFFFFFFu && tris > 0u &&
 		tris <= kTrianglesMax && first <= kTrianglesMax - tris;   // (ptaaa-hangfix: no uint wrap; was first + tris <= 65536)
 
 	// 2. + 3. the triangles' power, running sum, bound

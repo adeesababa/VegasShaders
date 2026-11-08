@@ -289,11 +289,13 @@ vec3 HitNormal(uint instance, uint prim, mat4x3 toScene, vec3 d) {
 // (2026-11-07, RT-DETAIL-GAPS.md section 2) the hit's SHADING normal: n bent by the surface's own normal map where its record has one
 // (flag 0x80: [Main.Main.RayTracing] RealNormalMaps, the real map from set 1; RtHit.glsl rtHitNormalMapped). Shade is diffuse, so the
 // bend counts however the ray meets the bump (it stays on the triangle's side). n itself stays for the lift off the surface.
+// (2026-11-07 perf-reflfix) first the smooth vertex normal (RtHit.glsl rtHitSmoothNormal: no facets on round things), then the map.
 vec3 ShadingNormal(uint instance, uint prim, vec2 bary, vec3 n, mat4x3 toScene, vec3 d) {
+    const vec3 smoothN = rtHitSmoothNormal(instance, prim, bary, n, mat3(toScene), d);
 #ifdef RT_HIT_NORMAL_MAPS
-    return rtHitNormalMapped(instance, prim, bary, n, mat3(toScene));
+    return rtHitNormalMapped(instance, prim, bary, smoothN, mat3(toScene));
 #else
-    return n;
+    return smoothN;
 #endif
 }
 

@@ -46,6 +46,7 @@
 #include "NvrRtProtocol.h"
 #include "NvrRtCapture.h"	// UNOFFICIAL 2026-11-03 frame capture / replay (claude/rt-replay)
 #include "RtArenaGuard.h"	// kRtArenaGuardSpv (RtArenaGuard.comp)
+#include "RtNormals.h"	// kRtNormalsSpv (RtNormals.comp): smooth vertex normals (2026-11-07 perf-reflfix)
 #include "RtDisplace.h"		// kRtDisplaceSpv (RtDisplace.comp; UNOFFICIAL 2026-11-07, protocol 8: NvrRtDisplace.inl)
 #include "RtOmm.h"			// kRtOmmSpv (RtOmm.comp; UNOFFICIAL 2026-11-07 ptaaa-omm, protocol 9: NvrRtOmm.inl)
 #include "RtOmmProbe.h"		// kRtOmmProbeSpv (RtOmmProbe.comp: the opacity micromaps' hardware self-test)
@@ -508,7 +509,14 @@ namespace {
 		bool						dynamic = false;				// built with ALLOW_UPDATE: later frames refit it in place
 		bool						compacted = false;
 		uint32_t					opFlags = 0;					// UNOFFICIAL 2026-11-03: NVR_RT_OP_FLAG_* of its build (the capture rebuilds it the same way)
+		// UNOFFICIAL 2026-11-07 (perf-reflfix) smooth vertex normals: `vertices` words just BEFORE vertexOffset (allocated with the data:
+		// the block starts at vertexOffset - normalWords), one packed normal a vertex (RtNormals.comp); normalsReady once packed. The
+		// records of instances traced through it carry NVR_RT_RECORD_GEO_NORMALS in their geometryId (NvrRtProtocol.h).
+		uint32_t					normalWords = 0;
+		bool						normalsReady = false;
 	};
+	// The geometry data words a geometry owns (its normals block first)
+	inline uint32_t DataBase(const Geometry& g) { return g.vertexOffset == NVR_RT_NO_DATA ? NVR_RT_NO_DATA : g.vertexOffset - g.normalWords; }
 
 	// The geometry data's words: first fit.
 	struct WordPool {
@@ -769,6 +777,12 @@ namespace {
 		VkPipelineLayout guardLayout = VK_NULL_HANDLE;
 		VkPipeline		guardPipeline = VK_NULL_HANDLE;
 		Buffer			guardResult;		// 2 uints a slot, host visible: [0] stale indices, [1] out-of-range indices
+		// UNOFFICIAL 2026-11-07 (perf-reflfix) the smooth vertex normals (RtNormals.comp): geometries waiting for theirs (static ones the
+		// frame's budget left over), and what was made (logged every 600 frames)
+		VkPipelineLayout normalsLayout = VK_NULL_HANDLE;
+		VkPipeline		normalsPipeline = VK_NULL_HANDLE;
+		std::vector<uint32_t> normalsWaiting;
+		uint64_t		normalsMade = 0, normalsRefreshed = 0, normalsVertices = 0, normalsNoRoom = 0;
 		uint64_t		staleFrames = 0, rangeFrames = 0;
 		bool			toldStale = false, toldRange = false;
 		std::vector<CompactReady> compactReady;		// sizes read back, copied at the next frame
@@ -929,7 +943,7 @@ namespace {
 				h.vk.destroyAs(h.vk.device, p.geometry.as, nullptr);
 				h.structures.Free(h.vk, p.geometry.block, p.geometry.offset, p.geometry.size);
 			}
-			h.dataWords.Free(p.geometry.vertexOffset, p.geometry.dataWords);
+			h.dataWords.Free(DataBase(p.geometry), p.geometry.dataWords + p.geometry.normalWords);	// (2026-11-07 perf-reflfix: with the normals block)
 			return true;
 		});
 		h.pendingFrees.erase(it, h.pendingFrees.end());
@@ -946,6 +960,66 @@ namespace {
 		h.triangles -= it->second.triangles;
 		h.pendingFrees.push_back({ frame, it->second });	// frames up to this one may still trace it
 		h.geometries.erase(it);
+	}
+
+	// UNOFFICIAL 2026-11-07 (perf-reflfix) the smooth vertex normals (RtNormals.comp) of the geometries in `now` (built or posed this frame)
+	// and of static ones still waiting: one accumulator for all of them from the geometry data (freed once the frame is done), ACCUMULATE
+	// per geometry, then PACK into each one's normals block. At most kNormalsBudget vertices a frame (a cell's load builds thousands of
+	// meshes at once); static geometry over it waits for the next frames, posed actors simply keep last frame's normals.
+	void MakeNormals(Helper& h, VkCommandBuffer cmd, const std::vector<uint32_t>& now, uint64_t frame) {
+		if (!h.normalsPipeline || (now.empty() && h.normalsWaiting.empty())) return;
+		const uint32_t kNormalsBudget = 1u << 20;
+		struct Job { uint32_t id; Geometry* g; uint32_t acc; };
+		std::vector<Job> jobs;
+		std::vector<uint32_t> waiting;
+		uint32_t vertices = 0;
+		std::unordered_map<uint32_t, bool> taken;
+		auto consider = [&](uint32_t id) {
+			auto it = h.geometries.find(id);
+			if (it == h.geometries.end() || !it->second.normalWords || it->second.vertexOffset == NVR_RT_NO_DATA || it->second.indexOffset == NVR_RT_NO_DATA) return;
+			if (!taken.emplace(id, true).second) return;
+			Geometry& g = it->second;
+			if (!jobs.empty() && vertices + g.vertices > kNormalsBudget) {
+				if (!g.dynamic || !g.normalsReady) waiting.push_back(id);	// (a posed actor with normals keeps them a frame)
+				return;
+			}
+			jobs.push_back({ id, &g, vertices });
+			vertices += g.vertices;
+		};
+		for (uint32_t id : h.normalsWaiting) consider(id);
+		for (uint32_t id : now) consider(id);
+		h.normalsWaiting.swap(waiting);
+		if (jobs.empty()) return;
+		uint32_t acc = h.dataWords.Allocate(3u * vertices);
+		if (acc == NVR_RT_NO_DATA) {	// no room for the accumulator: everything waits (static) or keeps its old normals (posed)
+			h.normalsNoRoom++;
+			for (const Job& j : jobs) if (!j.g->dynamic || !j.g->normalsReady) h.normalsWaiting.push_back(j.id);
+			return;
+		}
+		vkCmdFillBuffer(cmd, h.geometryData.buffer, (VkDeviceSize)acc * 4, (VkDeviceSize)vertices * 12, 0);
+		FullBarrier(cmd);
+		struct { uint64_t data; uint32_t vertexOffset, indexOffset, normalOffset, accOffset, vertices, triangles, mode; } push = {};
+		push.data = h.geometryData.address;
+		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, h.normalsPipeline);
+		for (uint32_t mode = 0; mode < 2; mode++) {
+			for (const Job& j : jobs) {
+				const Geometry& g = *j.g;
+				push.vertexOffset = g.vertexOffset; push.indexOffset = g.indexOffset; push.normalOffset = g.vertexOffset - g.normalWords;
+				push.accOffset = acc + 3u * j.acc; push.vertices = g.vertices; push.triangles = g.triangles; push.mode = mode;
+				vkCmdPushConstants(cmd, h.normalsLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+				vkCmdDispatch(cmd, ((mode ? g.vertices : g.triangles) + 63u) / 64u, 1u, 1u);
+			}
+			FullBarrier(cmd);
+		}
+		for (const Job& j : jobs) {
+			if (j.g->normalsReady) h.normalsRefreshed++; else h.normalsMade++;
+			j.g->normalsReady = true;
+		}
+		h.normalsVertices += vertices;
+		Geometry temp;	// the accumulator's words: freed once this frame's commands are done
+		temp.vertexOffset = acc;
+		temp.dataWords = 3u * vertices;
+		h.pendingFrees.push_back({ frame, temp });
 	}
 
 	// ---------------------------------------------------------------------------------------------------------------------
@@ -1426,6 +1500,7 @@ namespace {
 			// validation layer (NvrRtHelper.validate). AMD's builder survived it; NVIDIA's lost the device. Only the LAST op for an id is
 			// built (the newest pose / data); the earlier ones are skipped (counted in h.duplicateBuilds, logged every 600 frames).
 			std::unordered_map<uint32_t, uint32_t> lastBuildOf;
+			std::vector<uint32_t> normalsNow;	// (2026-11-07 perf-reflfix) geometries whose smooth normals are made this frame (RtNormals.comp)
 			for (uint32_t i = 0; i < f.opCount; i++)
 				if (f.ops[i].op == NVR_RT_OP_BUILD && f.ops[i].id) lastBuildOf[f.ops[i].id] = i;
 			for (uint32_t i = 0; i < f.opCount; i++) {
@@ -1478,6 +1553,8 @@ namespace {
 					b.dstAccelerationStructure = old.as;
 					if (old.vertexOffset != NVR_RT_NO_DATA)	// the posed positions for the shaders too (the triangle list is the same)
 						dataCopies.push_back({ (VkDeviceSize)op.arenaTexel * 4, (VkDeviceSize)old.vertexOffset * 4, (VkDeviceSize)op.vertexCount * 12 });
+					if (old.normalWords) normalsNow.push_back(op.id);	// (2026-11-07 perf-reflfix) its normals from the new pose
+
 					geoms.push_back(g);
 					infos.push_back(b);
 					ranges.push_back({ op.triangleCount, 0, 0, 0 });
@@ -1508,8 +1585,15 @@ namespace {
 				addressInfo.accelerationStructure = geo.as;
 				geo.address = h.vk.asAddress(h.vk.device, &addressInfo);
 				// its positions and triangle list kept for the shaders (binding 11), when there is room
+				// (2026-11-07 perf-reflfix) with a word a vertex before them for its smooth normals (RtNormals.comp; without room for those:
+				// the data alone, flat normals as before)
 				geo.dataWords = (uint32_t)texels;
-				geo.vertexOffset = h.dataWords.Allocate(geo.dataWords);
+				geo.normalWords = h.normalsPipeline ? op.vertexCount : 0u;
+				uint32_t base = h.dataWords.Allocate(geo.dataWords + geo.normalWords);
+				if (base == NVR_RT_NO_DATA && geo.normalWords) { geo.normalWords = 0; base = h.dataWords.Allocate(geo.dataWords); }
+				geo.vertexOffset = base == NVR_RT_NO_DATA ? NVR_RT_NO_DATA : base + geo.normalWords;
+				if (geo.vertexOffset == NVR_RT_NO_DATA) geo.normalWords = 0;
+				if (geo.normalWords) normalsNow.push_back(op.id);
 				if (geo.vertexOffset != NVR_RT_NO_DATA) {
 					geo.indexOffset = geo.vertexOffset + 3u * op.vertexCount;
 					if (uv) geo.uvOffset = geo.indexOffset + 3u * op.triangleCount;
@@ -1561,6 +1645,8 @@ namespace {
 				}
 				s.measured[0] = true;
 			}
+			// (2026-11-07 perf-reflfix) the smooth vertex normals of the geometry built / posed this frame (and of those still waiting)
+			MakeNormals(h, cmd, normalsNow, frameNumber);
 			// (2026-11-07, protocol 8) DATA ops: vertex attributes kept for the displacement (NvrRtDisplace.inl), no structure
 			if (dataOps) {
 				std::vector<VkBufferCopy> dataOnly;
@@ -1600,6 +1686,8 @@ namespace {
 			r.geometryId = in.geometryId;
 			r.vertexOffset = geo.vertexOffset;
 			r.indexOffset = geo.indexOffset;
+			// (2026-11-07 perf-reflfix) its smooth vertex normals are ready (just before its positions: RtHit.glsl rtHitSmoothNormal)
+			if (geo.normalWords && geo.normalsReady && geo.vertexOffset != NVR_RT_NO_DATA) r.geometryId |= NVR_RT_RECORD_GEO_NORMALS;
 			if (r.flags & NVR_RT_RECORD_ALPHA_TESTED) {
 				if (geo.uvOffset == NVR_RT_NO_DATA) continue;	// no texcoords (no room in the data): it would block as a solid quad
 				memcpy(&r.albedo[3], &geo.uvOffset, 4);
@@ -1845,6 +1933,10 @@ namespace {
 		if (frameNumber % 600 == 0 && h.duplicateBuilds)
 			Log("frame %llu: %llu duplicate builds skipped so far (the same geometry id twice in a frame: only the last is built)",
 				(unsigned long long)frameNumber, (unsigned long long)h.duplicateBuilds);
+		if (frameNumber % 600 == 0 && (h.normalsMade || h.normalsNoRoom))	// (2026-11-07 perf-reflfix)
+			Log("frame %llu: smooth normals made for %llu geometries (+ %llu refreshed after a pose), %llu vertices, %zu waiting, %llu frames without room",
+				(unsigned long long)frameNumber, (unsigned long long)h.normalsMade, (unsigned long long)h.normalsRefreshed,
+				(unsigned long long)h.normalsVertices, h.normalsWaiting.size(), (unsigned long long)h.normalsNoRoom);
 		return true;
 	}
 
@@ -2049,6 +2141,23 @@ namespace {
 					h.guardResult = Buffer();
 				else memset(h.guardResult.mapped, 0, kCmdRing * 8);
 				Log("arena guard: %s", h.guardPipeline && h.guardResult.buffer ? "on (indices clamped before every build, sequence texel checked)" : "OFF (pipeline or buffer failed)");
+				// (2026-11-07 perf-reflfix) the smooth vertex normals (RtNormals.comp): 40 bytes of push constants, no descriptors
+				VkShaderModuleCreateInfo normalsInfo = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+				normalsInfo.codeSize = sizeof(kRtNormalsSpv);
+				normalsInfo.pCode = kRtNormalsSpv;
+				VkShaderModule normalsModule = VK_NULL_HANDLE;
+				if (vkCreatePipelineLayout(h.vk.device, &layoutInfo, nullptr, &h.normalsLayout) == VK_SUCCESS &&
+					vkCreateShaderModule(h.vk.device, &normalsInfo, nullptr, &normalsModule) == VK_SUCCESS) {
+					VkComputePipelineCreateInfo info = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+					info.stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+					info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+					info.stage.module = normalsModule;
+					info.stage.pName = "main";
+					info.layout = h.normalsLayout;
+					if (vkCreateComputePipelines(h.vk.device, VK_NULL_HANDLE, 1, &info, nullptr, &h.normalsPipeline) != VK_SUCCESS) h.normalsPipeline = VK_NULL_HANDLE;
+					vkDestroyShaderModule(h.vk.device, normalsModule, nullptr);
+				}
+				Log("smooth normals: %s", h.normalsPipeline ? "on (a packed normal a vertex before its positions, RtNormals.comp)" : "OFF (pipeline failed: flat triangle normals)");
 			}
 			if (h.vk.cmdWriteAsProperties && h.vk.cmdCopyAs) {
 				VkQueryPoolCreateInfo compactInfo = { VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };

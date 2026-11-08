@@ -305,11 +305,13 @@
     <ClInclude Include="..\src\core\RtVideoMemory.h" />
     <ClInclude Include="..\src\core\RtFaceMorph.h" />
     <ClInclude Include="..\src\core\RtLightGrid.h" />
+    <ClInclude Include="..\src\core\RrRectPlan.h" />
     <ClInclude Include="..\src\core\RtSunShadows.h" />
     <ClInclude Include="..\src\core\RtFogVisibility.h" />
     <ClInclude Include="..\src\core\RtFogGrid.h" />
     <ClInclude Include="..\src\core\RtPathTrace.h" />
     <ClInclude Include="..\src\core\RtDenoise.h" />
+    <ClInclude Include="..\src\core\RtHistoryTime.h" />
     <ClInclude Include="..\src\core\HiZ.h" />
     <ClInclude Include="..\src\core\Upscaler.h" />
     <ClInclude Include="..\src\core\PixelInspector.h" />

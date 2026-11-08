@@ -135,6 +135,7 @@ namespace RtDenoise {
 			float peopleCap;	// (2026-11-07) RGB mode: PeopleHistory (0 off)
 			float antiLag;		// (2026-11-07) RGB mode: AntiLag (0 off)
 			float fireflyK;		// (2026-11-07 ptaaa-denoiser) RGB mode: AntiFirefly (0 off; not in RtDenoiseTemporal.frag's block: it gets 192 bytes)
+			float fastFrames;	// (2026-11-07 perf-history) RGB mode: the anti-lag's fast history in frames (0: 4, as before)
 		};
 		struct SpecPush {		// (2026-11-07 ptaaa-denoiser) RtDenoiseTemporalSpec.frag: TemporalPush + spec before the sampler
 			float prevViewProj[16];
@@ -147,6 +148,7 @@ namespace RtDenoise {
 			float peopleCap;
 			float antiLag;
 			float fireflyK;
+			float fastFrames;	// (2026-11-07 perf-history)
 		};
 		struct AtrousPush {		// RtDenoiseAtrous.frag / RtDenoiseAtrousRgb.frag (guideSigma, specular: RGB mode only)
 			float params[4], size[4];
@@ -155,7 +157,7 @@ namespace RtDenoise {
 			UInt32 specular;
 			float historyFix;	// (2026-11-07 ptaaa-denoiser) RGB mode: Settings.HistoryFix
 		};
-		static_assert(sizeof(TemporalPush) == 196 && sizeof(SpecPush) == 212 && sizeof(AtrousPush) == 48, "the passes' push blocks");
+		static_assert(sizeof(TemporalPush) == 200 && sizeof(SpecPush) == 216 && sizeof(AtrousPush) == 48, "the passes' push blocks");
 		struct FireflyPush {	// (2026-11-07 ptaaa-denoiser) RtDenoiseFirefly.frag
 			float size[4];
 			UInt32 samplerIndex;
@@ -263,6 +265,30 @@ namespace RtDenoise {
 		return ok;
 	}
 
+	// UNOFFICIAL 2026-11-07 (perf-history) the history clock (RtDenoise.h, RtHistoryTime.h): fed once a rendered frame, by the first caller
+	RtHistoryTime::Clock HistoryClock() {
+		static RtHistoryTime::Smoother smoother;
+		static RtHistoryTime::Clock clock;
+		static UInt32 frame = 0xFFFFFFFF;
+		static UInt32 logged = 0, fed = 0;
+		const UInt32 now = TheFrameRateManager->FrameNumber;
+		if (now == frame) return clock;
+		if (frame != 0xFFFFFFFF && now - frame > 30u) smoother.Reset();	// (no RT denoiser for a while: start from this frame's time)
+		frame = now;
+		smoother.Feed((float)TheFrameRateManager->ElapsedTime, TheShaderManager->GameState.isCameraCut);
+		clock.dt = smoother.average;
+		clock.on = TheSettingManager->GetSettingI("Main.Main.RayTracing", "DenoiseTimeBased") != 0;
+		clock.maxSeconds = (std::max)(0.0f, TheSettingManager->GetSettingF("Main.Main.RayTracing", "DenoiseMaxHistorySeconds"));
+		if ((fed++ % 3600u) == 120u && logged < 12) {
+			logged++;
+			Logger::Log("UNOFFICIAL RT denoise history: %s, frame time %.1f ms (%.0f fps, smoothed): a history of 32 frames at 60 fps keeps %.1f frames (%.2f s)%s",
+				clock.on ? "time-based (DenoiseTimeBased)" : "frame-based (DenoiseTimeBased off)", clock.dt * 1000.0f, 1.0f / clock.dt,
+				RtHistoryTime::Frames(32.0f, clock), RtHistoryTime::Frames(32.0f, clock) * clock.dt,
+				clock.maxSeconds > 0.0f ? ", DenoiseMaxHistorySeconds on" : "");
+		}
+		return clock;
+	}
+
 	Denoiser* Create(const char* Name) {
 		Denoiser* d = new Denoiser();
 		d->effect = Name ? Name : "RT denoiser";
@@ -343,7 +369,10 @@ namespace RtDenoise {
 		t.right[0] = view._11 / proj._11; t.right[1] = view._21 / proj._11; t.right[2] = view._31 / proj._11;
 		t.up[0] = view._12 / proj._22; t.up[1] = view._22 / proj._22; t.up[2] = view._32 / proj._22;
 		t.move[0] = move.x; t.move[1] = move.y; t.move[2] = move.z; t.move[3] = cut ? 1.0f : 0.0f;
-		t.params[0] = (std::max)(S.MaxHistory, 1.0f); t.params[1] = S.DepthTolerance; t.params[2] = 1.0f / w; t.params[3] = 1.0f / h;
+		// (2026-11-07 perf-history) every length in frames is "frames at 60 fps": the same seconds at this frame rate (RtHistoryTime.h)
+		const RtHistoryTime::Clock clock = HistoryClock();
+		t.params[0] = RtHistoryTime::Frames((std::max)(S.MaxHistory, 1.0f), clock); t.params[1] = S.DepthTolerance; t.params[2] = 1.0f / w; t.params[3] = 1.0f / h;
+		t.fastFrames = RtHistoryTime::Frames(RtHistoryTime::kFastFrames, clock, RtHistoryTime::kFastFramesMin);
 		t.clampK = (std::max)(S.HistoryClamp, 0.0f);
 
 		GpuProfileScope gpu(*d->timer, Device);
@@ -361,7 +390,7 @@ namespace RtDenoise {
 		const bool motion = (shared || (rgb && S.ObjectMotion)) && ObjectMotion::Ready();
 		t.backbone[0] = motion ? 1.0f : 0.0f;
 		t.backbone[1] = shared ? 1.0f : 0.0f;
-		t.backbone[2] = motion && rgb ? (float)(std::max)(S.MovingHistory, 0) : 0.0f;	// 2026-10-31 (rt-ao-sky) RT GI: GIMovingHistory
+		t.backbone[2] = motion && rgb ? RtHistoryTime::Frames((float)(std::max)(S.MovingHistory, 0), clock) : 0.0f;	// 2026-10-31 (rt-ao-sky) RT GI: GIMovingHistory
 		t.backbone[3] = shared && scale == 2 ? 1.0f : 0.0f;	// 2026-10-31 (rt-ao-sky) half size: the mask over the pixel's 2 x 2 full-size ones
 		IUnknown* motionImage = motion ? (IUnknown*)ObjectMotion::Texture : (IUnknown*)depth;
 		IUnknown* sharedImage = shared ? (IUnknown*)shared : (IUnknown*)depth;
@@ -400,7 +429,7 @@ namespace RtDenoise {
 			// (2026-11-07) PeopleHistory: the captured normals mark people's pixels (alpha > 1.5); without them (CapturedNormals off) no cap
 			// (2026-11-07 ptaaa-firstperson) or the caller's mask (Settings.People: also the view model, > 3.5)
 			IDirect3DBaseTexture9* captured = S.PeopleHistory > 0.0f ? (S.People ? S.People : Texture("TESR_CapturedNormalsBuffer")) : nullptr;
-			t.peopleCap = captured ? S.PeopleHistory : 0.0f;
+			t.peopleCap = captured ? RtHistoryTime::Frames(S.PeopleHistory, clock) : 0.0f;
 			t.antiLag = (std::max)(S.AntiLag, 0.0f);
 			IUnknown* temporalImages[7] = { Noisy, d->history[last], depth, d->historyB[last], motionImage, sharedImage, captured ? (IUnknown*)captured : (IUnknown*)depth };
 			if (!spec) ok = nowA && nowB && excess && Draw(temporalRgb, nowA, temporalImages, 7, &t, sizeof(t), nowB, excess);
@@ -408,8 +437,8 @@ namespace RtDenoise {
 				IDirect3DSurface9* nowC = Surface(d->historyC[now]);
 				SpecPush ts = {};
 				memcpy(&ts, &t, offsetof(TemporalPush, samplerIndex));	// prevViewProj .. rect
-				ts.spec[0] = (std::max)(S.MirrorHistory, 1.0f); ts.spec[1] = S.Virtual ? 1.0f : 0.0f;
-				ts.clampK = t.clampK; ts.peopleCap = t.peopleCap; ts.antiLag = t.antiLag; ts.fireflyK = t.fireflyK;
+				ts.spec[0] = RtHistoryTime::Frames((std::max)(S.MirrorHistory, 1.0f), clock); ts.spec[1] = S.Virtual ? 1.0f : 0.0f;
+				ts.clampK = t.clampK; ts.peopleCap = t.peopleCap; ts.antiLag = t.antiLag; ts.fireflyK = t.fireflyK; ts.fastFrames = t.fastFrames;
 				IUnknown* specImages[9] = { temporalImages[0], temporalImages[1], temporalImages[2], temporalImages[3], temporalImages[4], temporalImages[5],
 					temporalImages[6], S.Roughness, d->historyC[last] };
 				ok = nowA && nowB && nowC && excess && Draw(temporalSpec, nowA, specImages, 9, &ts, sizeof(ts), nowB, nowC, excess);
@@ -440,7 +469,7 @@ namespace RtDenoise {
 				const bool guide = rgb && !spec && S.Guide && S.GuideAlbedo && S.GuideSigma > 0.0f;
 				a.guideSigma = guide ? S.GuideSigma : 0.0f;
 				a.specular = (spec ? 1u : 0u) | (rgb && S.AntiFirefly > 0.0f && fireflyPipe ? 2u : 0u);	// (2026-11-07 ptaaa-denoiser) bit 0 specular mode (the roughness in the guide frame's slot), bit 1 the symmetric test (AntiFirefly)
-				a.historyFix = (std::max)(S.HistoryFix, 0.0f);	// (2026-11-07 ptaaa-denoiser)
+				a.historyFix = RtHistoryTime::Frames((std::max)(S.HistoryFix, 0.0f), clock);	// (2026-11-07 ptaaa-denoiser; perf-history: frames at 60 fps)
 				IUnknown* images[5] = { sourceA, normals, sourceB, spec ? (IUnknown*)S.Roughness : guide ? (IUnknown*)S.Guide : (IUnknown*)sourceA,
 					guide ? (IUnknown*)S.GuideAlbedo : (IUnknown*)sourceA };
 				ok = Draw(atrousRgb, lastPass ? Output : targetA, images, 5, &a, sizeof(a), lastPass ? scratch : targetB);

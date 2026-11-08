@@ -6,6 +6,7 @@
 #include "RtTessContact.h"	// (2026-11-07 rtgap-tess) the bumps' slack + PTContactShadows in the frame row (shared with tools/nvr-rt-host)
 #include "RtMaterials.h"	// (2026-11-07 ptaaa-materials) glass, foliage, skin, cloth keys in the frame row (shared with tools/nvr-rt-host)
 #include "RtEmissiveRow.h"	// (2026-11-07 ptaaa-emissive) PTEmissive's emissive row + remap (shared with tools/nvr-rt-host)
+#include "RtPtCost.h"	// (2026-11-07 perf-ptcost) the ray budget keys in the frame row (shared with tools/nvr-rt-host)
 #include "RtPathTrace.h"
 #include "RtCore.h"
 #include "DxvkCompute.h"
@@ -88,7 +89,7 @@ namespace {
 		// scratch store (protocol 6). -1 auto = on under PTRealtime; its test keys: neighbours, their radius (pixels), the reservoirs' count cap,
 		// the normal test (cos) and the plane test (share of the hit's distance)
 		int		restirDI = -1;
-		int		restirDISpatial = 4;
+		int		restirDISpatial = 2;	// (2026-11-07 perf-ptcost: 2, was 4)
 		float	restirDIRadius = 16.0f, restirDIMaxM = 20.0f, restirDINormal = 0.9f, restirDIPlane = 0.05f;
 		// UNOFFICIAL 2026-11-07 PTRadianceCache (section 48): the world-space radiance cache for the path's last hit (-1 auto: on under PTRealtime);
 		// its cell near the camera (units), how many samples deep a cell's mean is, the samples a cell needs before it is read, the frames an
@@ -103,6 +104,11 @@ namespace {
 		int		emissive = -1;
 		int		emissiveMax = 64;
 		int		emissiveTriangles = (int)RtEmissiveRow::kTrianglesMax;
+		// UNOFFICIAL 2026-11-07 (perf-ptcost, RT-PATH-TRACING.md "perf-ptcost"; RtPtCost.h) the ray budget: PTRestirDIRays 0 = ReSTIR DI's
+		// targets unshadowed + one shadow ray for the chosen sample (1 = a ray inside every target, as before; 2 / 3 test variants),
+		// PTBounceLights 0 = one light sample a bounce hit (1 = the sun, the lamp and the emissive point each, as before). A missing key: 0
+		int		restirDIRays = 0;
+		int		bounceLights = 0;
 		int		gameLamps = 4;			// PTGameLamps (2026-11-03 rtspec): the lamps as the game lights them: 1 its falloff ((1 - (d/r)^2)^2.2), 2 its colour
 										// (colour x dimmer decoded together), 3 both, 4 the game's own lamp table (its lamps, reach and colour) + its falloff,
 										// 0 neither (the older guess, as RT GI)
@@ -275,6 +281,8 @@ namespace {
 		S.restirDIMaxM = f("PTRestirDIMaxM", 1.0f, 255.0f);
 		S.restirDINormal = f("PTRestirDINormal", -1.0f, 1.0f);
 		S.restirDIPlane = f("PTRestirDIPlane", 0.001f, 1.0f);
+		S.restirDIRays = i("PTRestirDIRays", 0, 3);	// (2026-11-07 perf-ptcost)
+		S.bounceLights = i("PTBounceLights", 0, 1);
 		// UNOFFICIAL 2026-11-07 (ptaaa-materials, RT-PATH-TRACING.md "materials") the material models (a missing key: 0, off)
 		S.materials.glass = (float)i("PTGlass", 0, 2);
 		S.materials.glassTint = f("PTGlassTint", 0.0f, 1.0f);
@@ -684,7 +692,8 @@ namespace {
 		const D3DXMATRIX& view = TheRenderManager->viewMatrix;
 		const D3DXMATRIX& proj = TheRenderManager->projMatrix;
 		const D3DXVECTOR4& camera = TheRenderManager->CameraPosition;
-		const float key[8] = { (float)S.bounces + 100.0f * (float)S.bounceHalf + 1000.0f * (float)S.lastSky + 10000.0f * (float)S.lastBounce + 100000.0f * (float)S.lampFalloff + 1000000.0f * S.lampGain, S.sky, S.ambient,
+		const float key[8] = { (float)S.bounces + 100.0f * (float)S.bounceHalf + 1000.0f * (float)S.lastSky + 10000.0f * (float)S.lastBounce + 100000.0f * (float)S.lampFalloff + 1000000.0f * S.lampGain,
+			S.sky + 100.0f * (float)S.restirDIRays + 1000.0f * (float)S.bounceLights, S.ambient,	// (perf-ptcost: + the ray budget keys)
 			S.glow + (S.emissive > 0 ? 1000.0f : 0.0f) + 16.0f * S.materials.glass + 64.0f * S.materials.glassTint + 256.0f * S.materials.foliage + 1024.0f * S.materials.skin + 4096.0f * S.materials.sheen, S.clamp + 1000.0f * S.indirectClamp, (float)S.debugView + (S.primary ? 16.0f : 0.0f) + (S.specular ? 32.0f : 0.0f) + (S.glowLights ? 64.0f : 0.0f) + 128.0f * (float)S.gameLamps + (S.lightGrid ? 1024.0f : 0.0f) + 2048.0f * (float)S.bounceAlpha + 8192.0f * floorf(S.bounceDistance), proj._11, proj._22 };	// (2026-11-04: PTLightGrid too, so an A/B starts each mean fresh)
 		bool moved = !lastValid;
 		for (int i = 0; i < 16 && !moved; i++) moved = fabsf(((const float*)&view)[i] - ((const float*)&lastView)[i]) > 1.0e-4f;
@@ -774,13 +783,27 @@ namespace {
 		if (S.specular) flags |= 128u;
 		if ((S.gameLamps & 1) || S.gameLamps == 4) flags |= 2048u;	// (2026-11-03 rtspec) PTGameLamps: the game's falloff
 		if (S.glowFromFrame) flags |= 8192u;	// (2026-11-05) PTGlowFromFrame
-		if (S.bounceHalf > 0 && !S.restirGI) flags |= 16384u;	// (2026-11-06) PTBounceHalf (not with PTRestirGI: it moves the first direct light first)
+		// UNOFFICIAL 2026-11-07 (perf-ptcost FIX, the tester log of 11-07 19:45) PTRestirGI runs only where its images were made at the helper's
+		// start (Setup): turned on later, the `gi` path below never ran, yet every `!S.restirGI` here turned ReSTIR DI, the radiance cache,
+		// PTEmissive, PTBounceHalf and the denoiser split off: a cheaper, worse picture with nothing said (the tester's "10 ms"). Now the
+		// setting counts only while it can run; the menu marks it "restart" (ImGuiManager kRestartSettings) and the log says so once.
+		const bool giReady = S.restirGI && S.denoise && shaderGI >= 0 && shaderReuse >= 0 && imageGIResult >= 0 && imageResA[1] >= 0;
+		{
+			static bool told = false;
+			if (S.restirGI && !giReady && imageGIResult < 0 && !told) {
+				told = true;
+				Logger::Log("UNOFFICIAL RT path trace: PTRestirGI is on but its images were not made at the RT helper's start: it starts with the next helper "
+					"start (restart the game, or reloadshaders); until then the path tracer runs without it (ReSTIR DI, the radiance cache, PTEmissive stay on).");
+			}
+			if (giReady) told = false;
+		}
+		if (S.bounceHalf > 0 && !giReady) flags |= 16384u;	// (2026-11-06) PTBounceHalf (not with PTRestirGI: it moves the first direct light first)
 		if (S.lastSky > 0) flags |= 32768u;	// (2026-11-06) PTLastSky
 		if (S.lastBounce > 0) flags |= 65536u;	// (2026-11-06 b) PTLastBounce
 		if (S.lampFalloff == 1) flags |= 131072u;	// (2026-11-06 c) PTLampFalloff physical
 		if (S.denoise && imageAlbedoOut >= 0) flags |= 512u;	// (2026-11-03) demodulated for the denoiser
 		// (2026-11-07 ptaaa-denoiser) PTDenoiseSplit: diffuse and specular apart (not with PTRestirGI: its variant has no split)
-		if ((flags & 512u) && S.denoiseSplit && imageSpec >= 0 && !S.restirGI) flags |= 4194304u;
+		if ((flags & 512u) && S.denoiseSplit && imageSpec >= 0 && !giReady) flags |= 4194304u;
 		// (2026-11-02 b) the sky on misses: RT reflections' SkyPanorama (the sky as the screen saw it, clouds and all; needs the Reflections
 		// effect with [Shaders.Reflections.RT] SkyPanorama), last frame's, while it is fresh; else the 2-colour gradient
 		ReflectionsEffect* reflections = TheShaderManager->Effects.Reflections;
@@ -813,11 +836,11 @@ namespace {
 		// (2026-11-03) all the lamps through the lamp image (G32R32F, 4 texels a lamp), when it can be filled and copied this frame
 		// (2026-11-03 b) PTGlowLights: the glow lights after the lamps (rect.z = how many)
 		// (2026-11-07 ptaaa-emissive) PTEmissive: needs the glow (flag 4), the lamp image, its build pass and room for it before the trace
-		const bool emissiveWanted = S.emissive > 0 && S.glow > 0.0f && shaderEmissive >= 0 && imageLamps >= 0 && (flags & 4u) && !S.restirGI &&
+		const bool emissiveWanted = S.emissive > 0 && S.glow > 0.0f && shaderEmissive >= 0 && imageLamps >= 0 && (flags & 4u) && !giReady &&
 			cacheLog2Setup > 0 && RtCore::PassesLeft() >= (S.radianceCache > 0 ? 3u : 2u);	// (the build, the trace, the cache's resolve)
 		const int glowCount = Glows(emissiveWanted);
-		const bool restir = S.restirDI > 0 && (flags & 512u) && !S.restirGI;	// (2026-11-07) PTRestirDI needs the lamp image (its frame row)
-		const bool cache = S.radianceCache > 0 && shaderCache >= 0 && cacheLog2Setup > 0 && !S.restirGI;	// (2026-11-07) PTRadianceCache too
+		const bool restir = S.restirDI > 0 && (flags & 512u) && !giReady;	// (2026-11-07) PTRestirDI needs the lamp image (its frame row)
+		const bool cache = S.radianceCache > 0 && shaderCache >= 0 && cacheLog2Setup > 0 && !giReady;	// (2026-11-07) PTRadianceCache too
 		const bool energy = S.specular;	// (2026-11-07) PTSpecular's energy table rides in the frame row (section 49)
 		// (2026-11-07 rtgap-tess; RT-DETAIL-GAPS.md section 1, RT-PATH-TRACING.md section 56) the bumps' slack (1a) and PTContactShadows (1b)
 		// ride in the frame row's texels 16-21 (RtTessContact.h): they need the lamp image too
@@ -857,6 +880,12 @@ namespace {
 					row[30] = lampCount > 0 ? lampData[0].colour[3] : 0.0f; row[31] = 0.0f;
 					RtTessContact::PackRow(row, slack, contact);	// (2026-11-07 rtgap-tess) texels 16-21
 					RtMaterials::PackRow(row, S.materials);	// (2026-11-07 ptaaa-materials) texels 24-26
+					{	// (2026-11-07 perf-ptcost) texels 28-29: the ray budget keys + whether this frame's scene holds the hidden first-person body
+						RtPtCost::Keys cost;
+						cost.restirRays = (float)S.restirDIRays; cost.bounceLights = (float)S.bounceLights;
+						cost.oneCameraQuery = RtCore::HiddenInstances() == 0 ? 1.0f : 0.0f;
+						RtPtCost::PackRow(row, cost);
+					}
 					// (2026-11-07 ptaaa-emissive) PTEmissive: the emissive row (RtEmissiveRow.h), the records' numbers, texel 22 (how many, where)
 					float* emRow = (float*)((char*)r.pBits + (size_t)r.Pitch * kEmissiveRow);
 					memset(emRow, 0, sizeof(float) * 2 * kLightTexels);
@@ -899,7 +928,7 @@ namespace {
 			flags & 4u ? glowAtlas : albedoAtlas >= 0 ? albedoAtlas : imageDisplay, imageDepth, imageNormals, imageAlbedo, imagePano, imageFrame,
 			flags & 64u ? normalAtlas : albedoAtlas >= 0 ? albedoAtlas : imageDisplay, imageMaterial, imageAlbedoOut, imageLamps };
 		// (2026-11-04 d) PTRestirGI (with PTDenoise): the trace's variant writes the first-bounce sample out, RtRestirGI.spv reuses it
-		const bool gi = S.restirGI && S.denoise && (flags & 512u) && shaderGI >= 0 && shaderReuse >= 0 && imageGIResult >= 0 && imageResA[1] >= 0;
+		const bool gi = giReady && (flags & 512u);
 		if (gi) {
 			const int images16[16] = { imageA, imageB, imageDisplay, images[3], images[4], images[5], imageDepth, imageNormals, imageAlbedo, imagePano,
 				imageFrame, images[11], imageMaterial, imageAlbedoOut, imageLamps, imageGIResult };
@@ -940,7 +969,10 @@ namespace {
 			if (!RtCore::AddPass(flags & 4096u ? shaderGrid : shader, images16, split ? 16 : 15, 0x7u | (flags & 512u ? 1u << 13 : 0u) | (split ? 1u << 15 : 0u), &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) return;
 			if (flags & 524288u) {	// (2026-11-07) PTRadianceCache: fold this frame's samples into the cells (RtPathTraceCache.comp)
 				const UINT entries = 1u << cacheLog2Setup;
-				const float params[8] = { (float)entries, (float)(CacheBaseWords(w, h) / 4096ull), S.cacheMaxSamples, S.cacheMaxAge, S.cacheMaxFrames, 0.0f, 0.0f, 0.0f };
+				// (2026-11-07 perf-history) PTCacheMaxFrames is frames at 60 fps (the lag behind a change of light): the same seconds here.
+				// PTCacheMaxAge (when an unseen cell is freed) and PTCacheMaxSamples (a noise cap) stay frames / samples.
+				const float params[8] = { (float)entries, (float)(CacheBaseWords(w, h) / 4096ull), S.cacheMaxSamples, S.cacheMaxAge,
+					RtHistoryTime::Frames(S.cacheMaxFrames, RtDenoise::HistoryClock()), 0.0f, 0.0f, 0.0f };
 				if (!RtCore::AddPass(shaderCache, nullptr, 0, 0u, params, sizeof(params), (entries + 63) / 64, 1)) {
 					static int logged = 0;
 					if (logged++ < 4) Logger::Log("UNOFFICIAL RT path trace: the radiance cache's resolve pass did not fit this frame (the frame's passes are full): the cache keeps last frame's light.");
@@ -1214,7 +1246,14 @@ namespace RtPathTrace {
 	// UNOFFICIAL 2026-11-07 (ptaaa-denoiser) DLSS RR's guides from the path tracer (RtPathTrace.h)
 	bool RrGuides(IDirect3DTexture9** Albedo, IDirect3DTexture9** SpecularRG, IDirect3DTexture9** SpecularBRough) {
 		*Albedo = *SpecularRG = *SpecularBRough = nullptr;
-		if (!Replacing() || !S.denoise || !albedoThisFrame || !albedoTexture || tracedScale[0] != 1.0f || tracedScale[1] != 1.0f) return false;
+		// (2026-11-07 perf-rr) RR at RenderScale < 1: the trace covered the frame's render rect and copied its albedos into the top-left of
+		// these screen-size textures (CopyOut tw x th), exactly where RR's guide pass reads every other input in a rect frame (one thread per
+		// render pixel). So they are RR's guides whenever the traced rect is this frame's rect (was: only at scale 1). A rect that does not
+		// match (the RenderScale changed since the trace) leaves the G-buffer's guides.
+		const float frameScaleX = RenderRect::On ? RenderRect::ScaleX : 1.0f, frameScaleY = RenderRect::On ? RenderRect::ScaleY : 1.0f;
+		const UINT frameW = RenderRect::Width(textureWidth), frameH = RenderRect::Height(textureHeight);
+		const bool sameRect = fabsf(tracedScale[0] - frameScaleX) < 1e-4f && fabsf(tracedScale[1] - frameScaleY) < 1e-4f && lastRect[0] == frameW && lastRect[1] == frameH;
+		if (!Replacing() || !S.denoise || !albedoThisFrame || !albedoTexture || !sameRect) return false;
 		*Albedo = albedoTexture;
 		if (splitThisFrame) { *SpecularRG = specAlbedoA; *SpecularBRough = specAlbedoB; }
 		return true;

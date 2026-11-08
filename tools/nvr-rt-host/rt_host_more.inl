@@ -27,6 +27,7 @@ static bool registerMore(Host& h, const std::string& spv, const std::string& com
 	gM.aoLight = h.AddImage("ao frame light", S, S, NVR_EXT_SHARED_RGBA16F);
 	gM.albedoAtlas = h.AddImage("albedo atlas", 2048, 2048, NVR_EXT_SHARED_RGBA8);
 	gM.ptLamps = h.AddImage("pt lamps", kLightTexels, 3 + kGridRows, NVR_EXT_SHARED_RG32F);   // (2026-11-07: + the frame row, + the emissive row)
+	gPtCostImage = gM.ptLamps;   // (2026-11-07 perf-ptcost) NVR_RT_HOST_PTCOST patches its frame row
 	gM.ptAlbedoOut = h.AddImage("pt first albedo", S, S, NVR_EXT_SHARED_RGBA16F);
 	gM.giResult = h.AddImage("pt gi result", S, S, NVR_EXT_SHARED_RGBA16F);
 	for (int i = 0; i < 2; i++) {

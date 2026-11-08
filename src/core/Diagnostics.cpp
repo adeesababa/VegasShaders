@@ -2261,6 +2261,7 @@ void EffectStatus::TargetSize(const char* name, unsigned width, unsigned height)
 // --- Diagnostics ---
 
 void Diagnostics::OnFinalPicture(IDirect3DDevice9* device, IDirect3DSurface9* picture) {
+	SessionLog::StageScope stage("flash detector / report (read-backs)");	// (2026-11-07 perf-ptcost: STALL lines)
 	static unsigned lastFrame = 0xFFFFFFFF;
 	const unsigned frame = FrameNow();
 	if (frame == lastFrame || !TheShaderManager || !TheRenderManager || !TheSettingManager) return;
@@ -2461,6 +2462,7 @@ bool Diagnostics::SelfTestSkip(const EffectRecord* effect) {
 
 void Diagnostics::HistoryProbe(const char* name, IDirect3DSurface9* input, unsigned inputWidth, unsigned inputHeight, IDirect3DSurface9* output, std::string (*state)()) {
 	if (!Wt.on || Wt.failed || !name || !output || !TheRenderManager || !TheRenderManager->device || !TheShaderManager) return;
+	SessionLog::StageScope stage("history watch (read-backs)");	// (2026-11-07 perf-ptcost: STALL lines)
 	IDirect3DDevice9* device = TheRenderManager->device;
 	const unsigned frame = FrameNow();
 	Watch::Slot* slot = nullptr;

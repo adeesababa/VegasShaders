@@ -45,6 +45,7 @@ layout(push_constant) uniform Push {
     float peopleCap;
     float antiLag;
     float fireflyK;      // (2026-11-07 ptaaa-denoiser) AntiFirefly k (0 off): as RtDenoiseTemporalRgb.frag
+    float fastFrames;    // (2026-11-07 perf-history) AntiLag's fast history in frames (0: 4): as RtDenoiseTemporalRgb.frag
 } pc;
 
 layout(location = 0) in vec2 uv;
@@ -171,7 +172,7 @@ void main() {
                 ha.rgb = clamp(ha.rgb, max(m1 - pc.clampK * dev, vec3(0.0)), m1 + pc.clampK * dev);
             }
             // AntiLag as the RGB pass (NRD ReBLUR's fast history)
-            const float kFast = 4.0;
+            const float kFast = pc.fastFrames > 0.0 ? pc.fastFrames : 4.0;   // (perf-history: was 4.0)
             if (pc.fireflyK > 0.0) {   // (ptaaa-denoiser) AntiFirefly with a history: + k x this pixel's recent raw mean (B.a, as the RGB pass)
                 const float limit = max(spatialLimit, pc.fireflyK * hb.a);
                 used = l > limit ? value * (limit / l) : value;

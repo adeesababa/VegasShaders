@@ -83,11 +83,11 @@ static unsigned long long CacheBaseWords(UINT w, UINT h) { return ((12ull * w * 
 static unsigned long long EmissiveBaseWords(UINT w, UINT h, int cacheLog2) { return CacheBaseWords(w, h) + (16ull << cacheLog2); }
 
 // RtDenoise.cpp's push blocks (RGB mode; tools/nvr-rt-host/rt_layout_check.py checks the game's against the shaders)
-struct TemporalPush { float prevViewProj[16], forward[4], right[4], up[4], move[4], params[4], backbone[4], rect[4]; uint32_t samplerIndex; float clampK, peopleCap, antiLag, fireflyK; };
-struct SpecPush { float prevViewProj[16], forward[4], right[4], up[4], move[4], params[4], backbone[4], rect[4], spec[4]; uint32_t samplerIndex; float clampK, peopleCap, antiLag, fireflyK; };
+struct TemporalPush { float prevViewProj[16], forward[4], right[4], up[4], move[4], params[4], backbone[4], rect[4]; uint32_t samplerIndex; float clampK, peopleCap, antiLag, fireflyK, fastFrames; };
+struct SpecPush { float prevViewProj[16], forward[4], right[4], up[4], move[4], params[4], backbone[4], rect[4], spec[4]; uint32_t samplerIndex; float clampK, peopleCap, antiLag, fireflyK, fastFrames; };
 struct AtrousPush { float params[4], size[4]; uint32_t samplerIndex; float guideSigma; uint32_t specular; float historyFix; };
 struct FireflyPush { float size[4]; uint32_t samplerIndex, pad0, pad1, pad2; };
-static_assert(sizeof(TemporalPush) == 196 && sizeof(SpecPush) == 212 && sizeof(AtrousPush) == 48 && sizeof(FireflyPush) == 32, "RtDenoise.cpp's push blocks");
+static_assert(sizeof(TemporalPush) == 200 && sizeof(SpecPush) == 216 && sizeof(AtrousPush) == 48 && sizeof(FireflyPush) == 32, "RtDenoise.cpp's push blocks");
 static_assert(offsetof(SpecPush, spec) == offsetof(TemporalPush, samplerIndex), "SpecPush = TemporalPush's head + spec");
 
 // ------------------------------------------------------------------------------------------------------------------------------

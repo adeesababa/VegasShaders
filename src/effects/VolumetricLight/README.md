@@ -63,7 +63,8 @@ points move (a per-cell, per-frame shift) and last frame's value is blended in, 
 centre (trilinear in the old grid): an even average over the frames since a restart, held at Temporal (0.9) for a still cell and at
 TemporalMoving (0.7) for one that moved a whole cell (the resampling blurs; a moving edge lags). The history restarts on a camera jump
 over 500 units, a sun turn over ~2.5 degrees, a frame not traced, or a grid change. Range (8000, capped by SceneRadius) bounds the traced
-cells; RayLength 20000.
+cells; RayLength 20000. (2026-11-07 perf-history) Temporal and TemporalMoving are the weights AT 60 FPS: with `[Main.Main.RayTracing]
+DenoiseTimeBased` (default on) the grid uses k^(60 dt), the same fade a second (0.9 -> 0.73, 0.7 -> 0.34 at 20 fps).
 
 **When.** On by default but it only rides along: `Wants` = Enabled, the core Running, outdoors, not underwater, this effect on, and
 `RtCore::OthersWant` (another RT effect traces this frame). Without the fork, a ray tracing GPU, the helper or another RT effect: nothing

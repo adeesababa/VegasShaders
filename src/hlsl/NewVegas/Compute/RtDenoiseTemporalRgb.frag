@@ -29,6 +29,8 @@ layout(push_constant) uniform Push {
     float peopleCap;     // (2026-11-07) PeopleHistory: people's pixels (captured normal alpha > 1.5) keep at most this many frames (0 off)
     float antiLag;       // (2026-11-07) AntiLag: k, the fast history's window in standard errors (0 off)
     float fireflyK;      // (2026-11-07 ptaaa-denoiser) AntiFirefly: k (0 off; FireflyClamp below)
+    float fastFrames;    // (2026-11-07 perf-history) AntiLag: the fast history in frames (RtHistoryTime.h: 4 at 60 fps, the same seconds at
+                         // other frame rates, at least 2); 0: 4 (the value it had when hard-coded)
 } pc;
 
 // (2026-11-07 ptaaa-denoiser) AntiFirefly (Settings.AntiFirefly, PTDenoiseAntiFirefly), NRD-style: a new sample brighter than both its
@@ -143,7 +145,7 @@ void main() {
                     // PTDenoiseHistory. (Simulated 2026-11-07, 20000 pixels: a 0 -> 1 step reaches 0.70 after 6 frames, 0.17 without; a still
                     // Bernoulli 0.3 pixel keeps mean 0.3000 and the same noise. The fast history's OWN spread was 3x slower: a step inflates it.
                     // The old 3 x 3 clamp of the raw sample darkened the picture 5 %.)
-                    const float kFast = 4.0;
+                    const float kFast = pc.fastFrames > 0.0 ? pc.fastFrames : 4.0;   // (perf-history: was 4.0)
                     // (ptaaa-denoiser) AntiFirefly with a history: the limit is also k x this pixel's recent raw mean
                     if (pc.fireflyK > 0.0) {
                         const float limit = max(spatialLimit, pc.fireflyK * hb.a);

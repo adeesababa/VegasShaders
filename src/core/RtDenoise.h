@@ -11,6 +11,11 @@
 // use the noisy signal. Camera cuts (a jump of the camera) restart the history by themselves.
 // UNOFFICIAL 2026-10-30 DLSS RR (docs\next\FORK2-DLSS-RR.md): Run also returns false, without a pass, while Upscaler::
 // RayReconstructionWantsRaw() is true (DLSS Ray Reconstruction denoises the raw signal); every history restarts after such frames.
+// UNOFFICIAL 2026-11-07 (perf-history, RtHistoryTime.h): every length in frames below (MaxHistory, PeopleHistory, MovingHistory,
+// MirrorHistory, HistoryFix, the anti-lag's fast history) means FRAMES AT 60 FPS: Run turns it into the same seconds at this frame rate
+// (HistoryClock(); [Main.Main.RayTracing] DenoiseTimeBased, DenoiseMaxHistorySeconds). At 60 fps nothing changes.
+
+#include "RtHistoryTime.h"
 
 namespace RtDenoise {
 	struct Settings {
@@ -38,9 +43,9 @@ namespace RtDenoise {
 		IDirect3DBaseTexture9* Guide = nullptr;			// UNOFFICIAL 2026-11-07 (RGB mode): the game's lit frame (the scene as stored) and the
 		IDirect3DBaseTexture9* GuideAlbedo = nullptr;	// first surface's colour: the a-trous passes stop at the game's own shading edges
 		float	GuideSigma = 0.0f;						// (their ratio; this relative difference weighs a tap down by 1 / e; 0 = off)
-		float	AntiLag = 0.0f;			// UNOFFICIAL 2026-11-07 (RGB mode): a fast history (4 frames) beside the long one; where the long one's
-										// luminance leaves the fast mean's window (this many standard errors; 0 = off) it is clamped and restarts
-										// at 6 frames: trails clear in a few frames (NRD ReBLUR's anti-lag; PTDenoiseAntiLag)
+		float	AntiLag = 0.0f;			// UNOFFICIAL 2026-11-07 (RGB mode): a fast history (4 frames at 60 fps) beside the long one; where the long
+										// one's luminance leaves the fast mean's window (this many standard errors; 0 = off) it is clamped and
+										// restarts at the fast history's length: trails clear in a few frames (NRD ReBLUR's anti-lag; PTDenoiseAntiLag)
 		int		MovingHistory = 0;		// UNOFFICIAL 2026-10-31 (RGB mode, with DenoiseBackbone and B1's object motion): pixels whose surface moves
 										// itself (> 0.25 units a frame) keep at most this many frames of history (0 = no cap; RT GI: GIMovingHistory)
 		// UNOFFICIAL 2026-11-07 (ptaaa-denoiser, docs/next/RT-PATH-TRACING.md "ptaaa-denoiser"):
@@ -65,6 +70,11 @@ namespace RtDenoise {
 										// as a speckle by the brightness test (trails behind a moving lamp / object). The path tracer: PTDenoiseHistoryFix
 	};
 	struct Denoiser;
+
+	// UNOFFICIAL 2026-11-07 (perf-history) this frame's history clock (RtHistoryTime.h): the smoothed frame time (updated on the first
+	// call of a rendered frame from TheFrameRateManager->ElapsedTime; a hitch, a load or a camera cut restarts it), DenoiseTimeBased and
+	// DenoiseMaxHistorySeconds. Every RT denoiser converts its frame counts with it (RtHistoryTime::Frames / Keep).
+	RtHistoryTime::Clock HistoryClock();
 
 	Denoiser*	Create(const char* Name);
 	// UNOFFICIAL 2026-10-31 DenoiseBackbone: this frame's shared temporal backbone (RGBA16F, full size: rg = last frame's uv - uv, b = 1

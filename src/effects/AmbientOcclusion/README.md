@@ -51,6 +51,11 @@ Skylighting (outdoors, off by default) takes away the sky's share of the light w
 
 Unchanged (all read by AmbientOcclusion.cpp): the Exteriors and Interiors sections (Enabled, Samples, StrengthMultiplier, ClampStrength, Range, AngleBias, LumThreshold, BlurDropThreshold, BlurRadiusMultiplier); Status Enabled; GTAO (Enabled, MaxRadius); FastPaths (Enabled); Skylighting (Enabled, Version, Strength, Distance, ShareApply, OpenThreshold, DepthNormals, AmbientScale, SoftWidth, DebugView, Reflections, MinReflection, LightCap, OpenSides); AOLowRes; Max Quality; NvrDxvkPasses and NvrDxvkVariants; RT (separate, section 9).
 
+(2026-11-07 perf-history, docs/next/RT-PATH-TRACING.md "perf-history") With `[Main.Main.RayTracing] DenoiseTimeBased` (default on) the RT
+estimate's time behaviour is in seconds, as tuned at 60 fps: the RT AO temporal pass keeps 0.9 of last frame at 60 fps and 0.9^(60 dt) at
+other frame rates (0.73 at 20 fps); `[Shaders.AmbientOcclusion.RT] CacheFrames` and `GIMovingHistory` and the RT GI / AO denoisers'
+histories (RtDenoise, 16 frames) are frames at 60 fps, kept as the same seconds. At 60 fps nothing changes.
+
 ## 5. Passes and outputs
 
 ### Techniques

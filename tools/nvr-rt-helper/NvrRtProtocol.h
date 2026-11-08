@@ -111,6 +111,12 @@ inline uint32_t NvrRtKindOf(uint32_t flags) { return ((flags >> 1) & 1u) | ((fla
 // alpha-tested record: bits 26-28 roughness (0 unknown, k = 1..7: k / 7), bits 29-31 metal (0 unknown, k = 1..7: (k - 1) / 6)
 #define NVR_RT_RECORD_ROUGH_SHIFT   26u
 #define NVR_RT_RECORD_METAL_SHIFT   29u
+// UNOFFICIAL 2026-11-07 (perf-reflfix) smooth vertex normals: the HELPER sets this bit in a record's geometryId (NVR's ids are 24 bits)
+// when the geometry's packed vertex normals are ready, one word a vertex just BEFORE its positions in binding 11: at
+// vertexOffset - (indexOffset - vertexOffset) / 3 (the positions are 3 words a vertex and the triangle list follows them), octahedral
+// 16 + 16 bit in object space, 0 = none (tools/nvr-rt-helper/RtNormals.comp makes them; RtHit.glsl rtHitSmoothNormal reads them).
+// A shader comparing geometryId masks it (RtEmissiveBuild.comp). No layout change (protocol 9): an older shader ignores the bit.
+#define NVR_RT_RECORD_GEO_NORMALS   0x80000000u
 #define NVR_RT_MASK_ACTOR           0x20u     // UNOFFICIAL 2026-10-29: skinned actors ([Main.Main.RayTracing] Actors), posed every frame
 #define NVR_RT_MASK_ALPHA           0x10u     // the instance mask of alpha-tested geometry (rays that cannot test alpha leave it out)
 #define NVR_RT_MASK_PLAYER          0x40u     // UNOFFICIAL 2026-10-30: the player's own rigid parts with Actors on (the third-person body's

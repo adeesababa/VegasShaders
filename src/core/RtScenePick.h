@@ -161,6 +161,62 @@ namespace RtScenePick {
 		return true;
 	}
 
+	// --- (2026-11-07 perf-mirrorfix) skinned actor partitions (RtCore::AddSkinned) -----------------------------------------------------
+	// Until now every partition went in OPAQUE (rtsun-13), alpha test or not: hair cards were solid sheets in mirrors (their transparent
+	// parts' pale colour a white fringe round the head), and they shadowed the face inside them (the face dark in reflections). Now a
+	// partition whose alpha property tests (hair, brows, lashes, beards, eye cards, fringed clothing) and that is not skin goes in
+	// ALPHA-TESTED: its record carries NVR_RT_RECORD_ALPHA_TESTED + its reference + its atlas slot, its structure is built non-opaque
+	// (NVR_RT_OP_FLAG_ALPHA), and it keeps the actors' mask (0x20): every ray that tests alpha (RtAlpha.glsl rtAlphaPass) cuts it out; rays
+	// traced opaque see it solid, as before. Skin (SkinTexturePath: bodies, heads, hands) stays opaque whatever its alpha property says.
+	// Hair is tinted by the game (the hair shaders' HairTint, c2: the albedo x 2 x tint; Render.cpp notes it per geometry): such a record
+	// is TINTED: ALPHA_TESTED and TEXTURED both set (never both otherwise), its albedo rgb the tint's LINEAR colour, which RtHit.glsl
+	// rtHitMap multiplies into the texture's colour (x kTintScale = 2^2.2: the game's x 2 in the stored curve); the albedo alone (no
+	// texture: the averages-only shaders) is the hair's colour.
+	struct ActorPart {
+		bool		albedoKnown = false;
+		bool		textured = false;		// the build carried texcoords and the diffuse has an atlas slot (hasUv && slot >= 0)
+		int			slot = -1;
+		bool		normalMap = false;		// RealNormalMaps: the body's normal map
+		bool		skin = false;			// SkinTexturePath (the path tracer's skin kind)
+		bool		alphaTested = false;	// ActorAlphaTested's answer AND the structure was built non-opaque (the entry's last build)
+		uint32_t	alphaRef = 0;
+		bool		tinted = false;			// a hair tint was noted for it (with alphaTested only)
+	};
+	constexpr float kTintScale = 4.5947934f;	// 2^2.2: the hair shaders' albedo x 2 (stored curve) in linear light
+
+	// The partition goes in alpha-tested: its alpha property tests, it is not skin, [Main.Main.RayTracing] AlphaTested is on
+	inline bool ActorAlphaTested(bool hasAlphaProperty, uint16_t alphaFlags, bool skin, bool alphaTestedOn) {
+		return alphaTestedOn && hasAlphaProperty && (alphaFlags & kAlphaTest) && !skin;
+	}
+	// Its reference: the property's; blended too (the game's hair: test + blend), at least 128, where the blend is half opaque (the hashed
+	// test in RtAlpha.glsl then keeps a texel with the probability of its alpha: the blend's coverage)
+	inline uint32_t ActorAlphaRef(uint16_t alphaFlags, uint32_t alphaTestRef) {
+		const uint32_t ref = alphaTestRef & 0xFFu;
+		return (alphaFlags & kAlphaBlend) && ref < 128u ? 128u : ref;
+	}
+	inline uint32_t ActorRecordFlags(const ActorPart& a) {
+		uint32_t flags = a.albedoKnown ? NVR_RT_RECORD_ALBEDO_KNOWN : 0u;
+		if (a.textured) {
+			if (a.alphaTested) {
+				flags |= NVR_RT_RECORD_ALPHA_TESTED | ((a.alphaRef & 0xFFu) << 8) | ((uint32_t)a.slot << 16);
+				if (a.tinted) flags |= NVR_RT_RECORD_TEXTURED;	// TINTED (both bits)
+			}
+			else flags |= NVR_RT_RECORD_TEXTURED | ((uint32_t)a.slot << 16);
+			if (a.normalMap) flags |= NVR_RT_RECORD_NORMAL;
+		}
+		if (a.skin) flags |= NvrRtKindBits(NVR_RT_KIND_SKIN);
+		return flags;
+	}
+	// The pose's build: dynamic, its texcoords, non-opaque when alpha-tested (only with texcoords: without them no ray could test it)
+	inline uint32_t ActorOpFlags(bool hasUv, bool alphaTested) {
+		return NVR_RT_OP_FLAG_DYNAMIC | (hasUv ? NVR_RT_OP_FLAG_TEXCOORDS : 0u) | (hasUv && alphaTested ? NVR_RT_OP_FLAG_ALPHA : 0u);
+	}
+	inline bool IsTinted(uint32_t flags) {
+		return (flags & (NVR_RT_RECORD_ALPHA_TESTED | NVR_RT_RECORD_TEXTURED)) == (NVR_RT_RECORD_ALPHA_TESTED | NVR_RT_RECORD_TEXTURED);
+	}
+	// The tint's linear colour for the record from the shader's HairTint (c2, the stored curve, 0..1)
+	inline float TintLinear(float c) { c = c < 0.0f ? 0.0f : c > 1.0f ? 1.0f : c; return powf(c, 2.2f); }
+
 	// The instance's custom index (NvrRtProtocol.h NVR_RT_CUSTOM_*): land, hidden (the first-person body), decal
 	inline uint32_t CustomIndex(const Record& r) {
 		return (r.land ? NVR_RT_CUSTOM_LAND : 0u) | (r.hidden ? NVR_RT_CUSTOM_HIDDEN : 0u) | (r.decal ? NVR_RT_CUSTOM_DECAL : 0u);

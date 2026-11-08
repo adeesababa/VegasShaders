@@ -1019,6 +1019,7 @@ namespace RtLampShadows {
 			ds.stabilize = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "DenoiserStabilize"), 0.0f), 16.0f);
 			ds.debugView = TheSettingManager->GetSettingI(kSection, "DenoiserDebugView");
 			ds.core = (std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "DenoiserCore"), 0), 2);	// (A/B: 1, 2 = AMD FidelityFX Shadows)
+			RtShadowDenoise::TimeScale(ds, RtDenoise::HistoryClock());	// UNOFFICIAL 2026-11-07 (perf-history) frames at 60 fps -> the same seconds
 			RtShadowDenoise::DenoiseConstants d;
 			RtShadowDenoise::Fill(d, now, before, tw, th, tw, th, 1, DenoiseLayers.count, frame, ds, moved, 0.0f);
 			DenoiseLayers.Write(d);

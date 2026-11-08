@@ -4,6 +4,7 @@
 #include "RtFogVisibility.h"
 #include "RtCore.h"
 #include "RtFogGrid.h"
+#include "RtDenoise.h"	// UNOFFICIAL 2026-11-07 (perf-history) HistoryClock
 
 namespace {
 	const char* const kSection = "Shaders.VolumetricLight.RT";
@@ -91,6 +92,10 @@ namespace {
 		const bool sunUp = shadows->Constants.ShadowFade.x < 1.0f;
 
 		RtFogGrid::Settings s = S.grid;
+		// UNOFFICIAL 2026-11-07 (perf-history) Temporal / TemporalMoving are last frame's weight at 60 fps: the same decay a second here
+		const RtHistoryTime::Clock clock = RtDenoise::HistoryClock();
+		s.temporal = RtHistoryTime::Keep(s.temporal, clock);
+		s.temporalMoving = RtHistoryTime::Keep(s.temporalMoving, clock);
 		s.range = (std::min)(s.range, (std::max)(512.0f, TheSettingManager->GetSettingF("Main.Main.RayTracing", "SceneRadius")));
 		const int atlas = RtCore::AlphaAtlasImage();
 		s.alphaTested = RtCore::AlphaTested() && atlas >= 0;

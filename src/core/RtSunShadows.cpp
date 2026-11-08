@@ -299,6 +299,7 @@ namespace {
 				ds.maxHistory = S.denoiserHistory; ds.maxRadius = S.denoiserMaxRadius / (float)scale; ds.stabilize = S.denoiserStabilize;
 				ds.debugView = S.denoiserDebugView;
 				ds.core = (std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "DenoiserCore"), 0), 2);	// (A/B: 1, 2 = AMD FidelityFX Shadows)
+				RtShadowDenoise::TimeScale(ds, RtDenoise::HistoryClock());	// UNOFFICIAL 2026-11-07 (perf-history) frames at 60 fps -> the same seconds
 				RtShadowDenoise::DenoiseConstants d;
 				RtShadowDenoise::Fill(d, now, before, tw, th, rw, rh, 0, 1, frames, ds, moved, c.alpha[2]);
 				d.layerReset[0][0] = before.valid ? 0.0f : 1.0f;

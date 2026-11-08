@@ -38,7 +38,21 @@
 #include "RtFaceMorph.h"     // (2026-11-07) faces and lip-sync: a head's change detection and feed (src/core), run by the facemorph scene
 #include "RtFogGrid.h"       // (2026-11-07 ptaaa-fog) RT fog visibility: the trace pass's constants + history rules (src/core), run by the fogvis scene
 #include "RtViewModel.h"     // (2026-11-07 ptaaa-firstperson) PTViewModel's prep pass (src/core), run by the vmprep scene
+#include "RtPtCost.h"        // (2026-11-07 perf-ptcost) the path tracer's ray budget keys (src/core): the NVR_RT_HOST_PTCOST knob
 #include <d3dcompiler.h>
+
+// (2026-11-07 perf-ptcost) NVR_RT_HOST_PTCOST="r,b,c": every upload of the path tracer's lamp image (gPtCostImage, rt_host_more.inl) gets
+// these ray budget keys in its frame row (RtPtCost.h: PTRestirDIRays, PTBounceLights, one camera query), so any pt scene runs the old
+// (1,1,0) or the cheap (0,0,1) path; unset: the scenes' rows as they write them (0 = the cheap path; the camera's two queries)
+static int gPtCostImage = -1;
+static const char* const gPtCostEnv = std::getenv("NVR_RT_HOST_PTCOST");
+static const unsigned gPtCostFrameRow = 49;   // RtPathTrace.cpp kFrameRow
+// its 4th value 1: count mode (texel 29.y): the display's alpha = 1 + the pixel's ray queries; the host sums them per scene
+static float gPtCostCountKey() { float a = 0, b = 0, c = 0, d = 0; if (gPtCostEnv) sscanf_s(gPtCostEnv, "%f,%f,%f,%f", &a, &b, &c, &d); return d; }
+static const bool gPtCostCount = gPtCostCountKey() > 0.5f;
+static int gPtCostDisplay = -1;
+static double gPtCostRays = 0.0, gPtCostMax = 0.0;
+static unsigned long long gPtCostPixels = 0;
 
 #pragma comment(lib, "d3d9.lib")
 #pragma comment(lib, "d3dcompiler.lib")
@@ -132,6 +146,17 @@ struct Object {               // one instance of one mesh
 	uint32_t instFlags = 0;   // (2026-11-07 tessblas, protocol 8) NvrRtInstance::flags bits 8-31 (NVR_RT_INSTANCE_DISPLACE + key)
 	uint32_t kind = NVR_RT_KIND_PLAIN;   // (2026-11-07 ptaaa-materials) the path tracer's material kind (glass: mask 0x10, built non-opaque)
 	uint32_t emissive = 0;    // (2026-11-07 ptaaa-emissive) PTEmissive's number + 1 in the record's bits 8-15 (RtScenePick::WithEmissive)
+	bool actor = false;       // (2026-11-07 perf-mirrorfix) a skinned actor's partition: mask 0x20, RtScenePick::ActorRecordFlags (alphaTested: a cut-out)
+	bool tinted = false;      // ... with the hair's tint (albedo = the tint's linear colour)
+	uint32_t recordFlags() const {
+		if (actor) {
+			RtScenePick::ActorPart a;
+			a.albedoKnown = albedoKnown; a.textured = (alphaTested || textured) && alphaSlot >= 0; a.slot = alphaSlot; a.normalMap = normalMap;
+			a.alphaTested = alphaTested; a.alphaRef = alphaRef; a.tinted = tinted && alphaTested;
+			return RtScenePick::ActorRecordFlags(a);
+		}
+		return RtScenePick::WithEmissive(RtScenePick::RecordFlags(record()), emissive);
+	}
 	RtScenePick::Record record() const {
 		RtScenePick::Record r;
 		r.land = land; r.albedoKnown = albedoKnown; r.glowMap = glow; r.alphaTested = alphaTested; r.alphaRef = alphaRef;
@@ -141,7 +166,7 @@ struct Object {               // one instance of one mesh
 		r.kind = kind;
 		return r;
 	}
-	uint32_t mask() const { return RtScenePick::InstanceMask(record()); }
+	uint32_t mask() const { return actor ? NVR_RT_MASK_ACTOR : RtScenePick::InstanceMask(record()); }
 };
 
 struct World {
@@ -171,7 +196,9 @@ static Hit trace(const World& w, V3 o, V3 d, float tMin, float tMax, uint32_t ma
 		const Object& ob = w.objects[oi];
 		if (!(ob.mask() & mask)) continue;
 		if (ob.decal && skipDecals) continue;
-		if (ob.alphaTested && !testAlpha && !alphaSolid) continue;   // (rays that do not test alpha leave 0x10 out: the callers' masks do that too)
+		if (ob.alphaTested && !testAlpha && !alphaSolid && !ob.actor) continue;   // (rays that do not test alpha leave 0x10 out: the callers' masks do that too)
+		// (2026-11-07 perf-mirrorfix) an alpha-tested actor part keeps mask 0x20: a ray that does not test alpha sees it solid (traced opaque)
+		const bool cutOut = ob.alphaTested && !alphaSolid && (testAlpha || !ob.actor);
 		const Mesh& m = w.meshes[ob.mesh];
 		for (size_t k = 0; k + 2 < m.idx.size(); k += 3) {
 			const V3 a = m.pos[m.idx[k]] * ob.scale + ob.offset, b = m.pos[m.idx[k + 1]] * ob.scale + ob.offset, c = m.pos[m.idx[k + 2]] * ob.scale + ob.offset;
@@ -193,7 +220,7 @@ static Hit trace(const World& w, V3 o, V3 d, float tMin, float tMax, uint32_t ma
 				u = ua[0] * (1 - bu - bv) + ub[0] * bu + uc[0] * bv;
 				v = ua[1] * (1 - bu - bv) + ub[1] * bu + uc[1] * bv;
 			}
-			if (ob.alphaTested && !alphaSolid && !(w.alphaAt(ob, u, v) > float(ob.alphaRef) / 255.0f)) continue;
+			if (cutOut && !(w.alphaAt(ob, u, v) > float(ob.alphaRef) / 255.0f)) continue;
 			best.hit = true; best.t = t; best.object = int(oi); best.u = u; best.v = v;
 			V3 n = normalize(cross(e1, e2));
 			best.n = dot(n, d) > 0 ? -n : n;
@@ -519,9 +546,20 @@ struct Host {
 	}
 
 	// ---- CopyIn: floats (channels of the format, row-major w x h) into a shared image through a D3D9 texture, as RtCore::CopyIn
-	bool Upload(int image, const std::vector<float>& data, UINT x = 0, UINT y = 0, UINT w = 0, UINT h = 0) {
+	bool Upload(int image, const std::vector<float>& dataIn, UINT x = 0, UINT y = 0, UINT w = 0, UINT h = 0) {
 		Image& im = images[image];
 		if (!w) { w = im.w; h = im.h; }
+		const std::vector<float>* use = &dataIn;
+		std::vector<float> patched;
+		if (gPtCostEnv && image == gPtCostImage && !x && !y && h > gPtCostFrameRow && im.format == NVR_EXT_SHARED_RG32F) {   // (perf-ptcost knob)
+			RtPtCost::Keys k;
+			sscanf_s(gPtCostEnv, "%f,%f,%f", &k.restirRays, &k.bounceLights, &k.oneCameraQuery);
+			patched = dataIn;
+			RtPtCost::PackRow(&patched[size_t(w) * gPtCostFrameRow * 2], k);
+			patched[size_t(w) * gPtCostFrameRow * 2 + 2 * RtPtCost::kTexel + 3] = gPtCostCount ? 1.0f : 0.0f;   // texel 29.y: count mode
+			use = &patched;
+		}
+		const std::vector<float>& data = *use;
 		const int ch = channels(im.format);
 		const D3DFORMAT fmt = d3dFormat(im.format);
 		IDirect3DTexture9 *sys = nullptr, *gpu = nullptr;
@@ -577,6 +615,10 @@ struct Host {
 			}
 		}
 		im.readSys->UnlockRect();
+		// (perf-ptcost) NVR_RT_HOST_PTCOST's 4th value 1: the path tracer writes 1 + its ray queries a pixel into the display's alpha
+		// (RtPathTrace.comp gRayCount); summed here over every read of the display, printed after the scene
+		if (gPtCostCount && image == gPtCostDisplay && ch == 4)
+			for (size_t p = 0; p < size_t(im.w) * im.h; p++) { const float a = out[p * 4 + 3]; if (a > 0.5f) { gPtCostRays += a - 1.0; gPtCostPixels++; gPtCostMax = std::max(gPtCostMax, double(a - 1.0f)); } }
 		return true;
 	}
 
@@ -627,7 +669,7 @@ struct Host {
 			in.flags = 0x1u | o.instFlags;   // both faces (RtCore); (protocol 8) the displacement flag + key
 			NvrRtInstanceRecord r = {};
 			r.albedo[0] = o.albedo.x; r.albedo[1] = o.albedo.y; r.albedo[2] = o.albedo.z; r.albedo[3] = 1.0f;
-			r.flags = RtScenePick::WithEmissive(RtScenePick::RecordFlags(o.record()), o.emissive);   // (2026-11-07 ptaaa-emissive)
+			r.flags = o.recordFlags();   // (2026-11-07 ptaaa-emissive: WithEmissive; perf-mirrorfix: actor parts)
 			r.geometryId = in.geometryId;
 			f.instances[count] = in; f.records[count] = r; count++;
 		}
@@ -1282,12 +1324,14 @@ static bool sceneCameraMove(Ctx& c) {
 #include "rt_host_light.inl"	// (2026-11-06) the path tracer's lamp falloff: game vs physical (PTLampFalloff)	// (2026-11-06) chain-link: fine cut-outs through the 64 x 64 atlas slot
 #include "rt_host_pt.inl"	// (2026-11-07) the path tracer's quality scenes: ReSTIR DI (PTRestirDI)
 #include "rt_host_emissive.inl"	// (2026-11-07 ptaaa-emissive) PTEmissive: glowing triangles as lights vs the exact glow
+#include "rt_host_ptcost.inl"	// (2026-11-07 perf-ptcost) the path tracer's ray budget: rays a pixel, picture vs the old budget
 #include "rt_host_pthidden.inl"	// (2026-11-07) the path tracer's camera rays pass over the hidden first-person body
 #include "rt_host_denoisepeople.inl"	// (2026-11-07) RtDenoise RGB: PeopleHistory (the path tracer's dialogue ghosting)
 #include "rt_host_aniso.inl"	// (2026-11-07) anisotropic filtering at ray-traced hits (ray cones)
 #include "rt_host_tess.inl"	// (2026-11-07 rtgap-tess) the tessellation gaps: start slack + contact shadows (docs/next/RT-DETAIL-GAPS.md section 1)
 #include "rt_host_ptdetail.inl"	// (2026-11-07) PTDetail + PTDenoiseGuide: the game's fine shading on the path-traced picture
 #include "rt_host_decals.inl"	// (2026-11-07 rtgap-decals) decals: shadow / AO rays pass them, reflections and camera rays see them
+#include "rt_host_hair.inl"	// (2026-11-07 perf-mirrorfix) an actor's alpha-tested hair card in a mirror: cut out, tinted
 #include "rt_host_normals.inl"	// (2026-11-07) RealNormalMaps: the real normal maps at traced hits (PT, RT reflections, RT GI)
 #include "rt_host_tessblas.inl"	// (2026-11-07, rtgap-tessblas, protocol 8) displaced geometry in the RT scene vs the CPU's truth
 #include "rt_host_textures.inl"	// (2026-11-07, protocol 8) real textures' routes: BC blocks, the GPU route through the fork, auto caps, release
@@ -1297,6 +1341,9 @@ static bool sceneCameraMove(Ctx& c) {
 #include "rt_host_omm.inl"	// (2026-11-07 ptaaa-omm, protocol 9) opacity micromaps: the state builder + its check vs rtAlphaPass, the curve, the thresholds
 #include "rt_host_ptsplit.inl"	// (2026-11-07 ptaaa-denoiser) the path tracer's split denoiser: diffuse / specular, hit-distance reprojection, object motion
 #include "rt_host_shutdown.inl"	// (2026-11-07 rt-shutdown) the helper's + the game's shutdown: quit with frames pending, the game killed mid-flight
+#include "rt_host_historytime.inl"	// (2026-11-07 perf-history) the denoisers' history in seconds, not frames (RtHistoryTime.h)
+#include "rt_host_reflfix.inl"	// (2026-11-07 perf-reflfix) smooth vertex normals at traced hits + MetalBounce (a chrome sphere in a mirror)
+#include "rt_host_rrrect.inl"	// (2026-11-07 perf-rr) DLSS RR at RenderScale < 1: the guide pass at the render size, the composite's rect mapping
 
 // ------------------------------------------------------------------------------------------------------------------------------
 int main(int argc, char** argv) {
@@ -1315,7 +1362,7 @@ int main(int argc, char** argv) {
 		else if (a == "--scene" && i + 1 < argc) only.push_back(argv[++i]);
 		else if (a == "--keep-going") keepGoing = true;
 		else { std::printf("usage: NvrRtHost.exe --helper <NvrRtHelper.exe> --spv <folder> [--out <folder>] [--device <name part>] [--scene <name>]...\n"
-			"scenes: furnace alphacard material chainlink manylamps mirror cameramove sun ao pathtex falloff restirlamps restirgi denoise lamplookup scenepick decals sameframe movingrest facemorph fogvis\n"); return 2; }
+			"scenes: furnace alphacard material chainlink manylamps mirror cameramove sun ao pathtex falloff restirlamps restirgi denoise lamplookup scenepick decals hairmirror sameframe movingrest facemorph fogvis\n"); return 2; }
 	}
 	if (helperExe.empty() || spv.empty()) { std::printf("--helper and --spv are required\n"); return 2; }
 	{ char full[MAX_PATH]; GetFullPathNameA(spv.c_str(), MAX_PATH, full, nullptr); spv = full; }
@@ -1342,6 +1389,7 @@ int main(int argc, char** argv) {
 	c.ptA = host.AddImage("pt mean rg", S, S, NVR_EXT_SHARED_RG32F);
 	c.ptB = host.AddImage("pt mean b", S, S, NVR_EXT_SHARED_RG32F);
 	c.ptDisplay = host.AddImage("pt display", S, S, NVR_EXT_SHARED_RGBA16F);
+	gPtCostDisplay = c.ptDisplay;   // (perf-ptcost) the ray count's image
 	c.aux16 = host.AddImage("rgba16f aux", S, S, NVR_EXT_SHARED_RGBA16F);
 	c.pano = host.AddImage("sky panorama", 128, 128, NVR_EXT_SHARED_RGBA16F);
 	c.refDir = host.AddImage("refl dir", S, S, NVR_EXT_SHARED_RG32F);
@@ -1357,8 +1405,10 @@ int main(int argc, char** argv) {
 	if (!registerMore(host, spv, compute, includes) || !registerSameFrame(host, spv)) { say("RESULT: FAIL (shared images)\n"); return 1; }
 	if (!registerSigma(host, spv) || !registerTess(host)) { say("RESULT: FAIL (shared images)\n"); return 1; }
 	if (!registerDecals(host, spv)) { say("RESULT: FAIL (shaders)\n"); return 1; }
+	if (!registerHair(host, spv)) { say("RESULT: FAIL (shaders)\n"); return 1; }	// (2026-11-07 perf-mirrorfix)
 	if (!registerNormals(host, spv)) { say("RESULT: FAIL (shaders)\n"); return 1; }
 	if (!registerOmm(host, spv)) { say("RESULT: FAIL (shaders)\n"); return 1; }   // (2026-11-07 ptaaa-omm)
+	if (!registerReflFix(host)) { say("RESULT: FAIL (shared images)\n"); return 1; }	// (2026-11-07 perf-reflfix)
 	if (!registerPtSplit(host)) { say("RESULT: FAIL (shared images)\n"); return 1; }	// (2026-11-07 ptaaa-denoiser)
 	gCacheShader = host.AddShader(spv + "\\RtPathTraceCache.spv");   // (2026-11-07) PTRadianceCache's resolve pass
 	gEmissiveShader = host.AddShader(spv + "\\RtEmissiveBuild.spv");   // (2026-11-07 ptaaa-emissive) PTEmissive's light list
@@ -1384,6 +1434,7 @@ int main(int argc, char** argv) {
 		{ "realtex", "the chain-link cut-out with the REAL texture (protocol 7: full size, mips, set 1) vs the exact shadow", [&] { return sceneChainLink(c, true); } },
 		{ "manylamps", "48 lamps, slots past 32 (RtLampTrace)", [&] { return sceneManyLamps(c); } },
 		{ "mirror", "mirror floor + blocks (ReflectionsRT)", [&] { return sceneMirror(c); } },
+		{ "reflfix", "a sphere in a mirror (perf-reflfix): smooth vertex normals at RT reflection + path tracer hits vs the exact sphere (before: the triangle's), MetalBounce: a chrome sphere reflects the boxes beside it (one mirror ray) vs the CPU (ReflectionsRT, RtPathTrace, RtNormals)", [&] { return sceneReflFix(c); } },
 		{ "cameramove", "camera move with history (RtLampTraceMany)", [&] { return sceneCameraMove(c); } },
 		{ "sun", "sun shadows, half resolution, Penumbra blockers (RtSunShadow)", [&] { return sceneSun(c); } },
 		{ "ao", "AO + sky visibility (RtAOTrace)", [&] { return sceneAO(c); } },
@@ -1394,6 +1445,7 @@ int main(int argc, char** argv) {
 		{ "specfurnace", "path tracer specular energy: a white metal box under a uniform sky (VNDF + multiple-scattering compensation)", [&] { return sceneSpecularFurnace(c); } },
 		{ "cache", "path tracer radiance cache (PTRadianceCache): 2 bounces + the cache vs 32 bounces, the light halved", [&] { return sceneRadianceCache(c); } },
 		{ "emissive", "path tracer PTEmissive: glowing triangles as lights (MIS, ReSTIR DI with lamps) vs the exact glow, bounce-only brute force, noise + cost", [&] { return sceneEmissive(c); } },
+		{ "ptcost", "path tracer ray budget (PTRestirDIRays, PTBounceLights, one camera query): rays a pixel and the picture vs the old budget, PTRealtime-like", [&] { return scenePtCost(c); } },
 		{ "restirgi", "ReSTIR GI on the path tracer (RtPathTraceGI + RtRestirGI)", [&] { return sceneRestirGI(c); } },
 		{ "denoise", "the game's RtDenoise passes (fork, D3D9 side)", [&] { return sceneDenoise(c); } },
 		{ "sigmalamps", "RT shadow denoiser, lamps of physical size vs the exact soft shadow, still + moving (RtLampTraceSigma + RtShadowDenoise)", [&] { return sceneSigmaLamps(c); } },
@@ -1408,9 +1460,12 @@ int main(int argc, char** argv) {
 		{ "ptfirefly", "RtDenoise AntiFirefly (PTDenoiseAntiFirefly): a room lit by bounces off a sunlit patch vs the 512-path mean, rare real fireflies + a glint + a thin line, the furnace", [&] { return scenePtFirefly(c); } },
 		{ "ptdenoisecost", "the denoiser passes' GPU time at 1280 x 720: today's chain vs the split's specular chain (informational)", [&] { return scenePtDenoiseCost(c); } },
 		{ "denoiseantilag", "RtDenoise RGB temporal AntiLag: a step clears in a few frames, a still noisy pixel keeps its mean and noise", [&] { return sceneDenoiseAntiLag(c); } },
+		{ "historytime", "the denoisers' history in SECONDS (RtHistoryTime.h): 60 fps bit for bit as before; at 20 fps a step's ghost and a moving light's trail clear in the same seconds (RtDenoiseTemporalRgb)", [&] { return sceneHistoryTime(c); } },
+		{ "rrrect", "DLSS RR at RenderScale < 1 (perf-rr): DlssRRGuides one thread per render pixel on rect-layout inputs (outside the rect untouched, the view ray over the render size) + DlssRRComposite filling the screen from the rect (nearest alpha, bilinear weapon) and its native branch", [&] { return sceneRrRect(c); } },
 		{ "lamplookup", "the lamp shaders' lookup PointShadowTraced (D3D9 ps_3_0)", [&] { return sceneLampLookup(c); } },
 		{ "scenepick", "RtCore's scene picking rules + record packing (RtScenePick.h)", [&] { return sceneScenePick(c); } },
 		{ "decals", "decals (lifted cut-outs, NVR_RT_CUSTOM_DECAL): lamp / AO / sun rays pass them, reflections and camera rays see them (RtLampTrace, ReflectionsRTAlpha, RtAOTrace)", [&] { return sceneDecals(c); } },
+		{ "hairmirror", "an actor's alpha-tested hair card in a mirror (perf-mirrorfix): reflection + sun rays through its gaps, its tint (record, atlas x tint); the old opaque packing as control (ReflectionsRTAlpha, ReflectionsRTAlphaTex)", [&] { return sceneHairMirror(c); } },
 		{ "movingrest", "ManyLights histories under a walking person: MovingCasterHistory 0 vs 2 (RtLampTraceMany + RtLampTraceRestir)", [&] { return sceneMovingRest(c); } },
 		{ "ptaniso", "anisotropic filtering at ray-traced hits: a floor of real textures at a glancing angle, ray cones vs one mip (RtPathTrace + RtTextures)", [&] { return scenePtAniso(c); } },
 		{ "ptdetail", "the path-traced picture keeps the game's fine shading (PTDetail) and the a-trous stops at its edges (PTDenoiseGuide)", [&] { return scenePtDetail(c); } },
@@ -1441,7 +1496,10 @@ int main(int argc, char** argv) {
 		if (!only.empty() && std::find(only.begin(), only.end(), s.name) == only.end()) continue;
 		const ULONGLONG ts = GetTickCount64();
 		say("[%s] %s\n", s.name, s.what);
+		gPtCostRays = gPtCostMax = 0.0; gPtCostPixels = 0;
 		const bool ok = s.run();
+		if (gPtCostCount && gPtCostPixels)   // (perf-ptcost) the count mode's sum over the scene's display reads
+			say("  PTCOST ray queries a pixel and frame: mean %.3f, max %.0f (%llu pixel reads; keys %s)\n", gPtCostRays / double(gPtCostPixels), gPtCostMax, gPtCostPixels, gPtCostEnv);
 		ran++;
 		if (!ok) failed++;
 		char line[256];

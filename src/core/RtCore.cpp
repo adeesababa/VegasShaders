@@ -19,6 +19,7 @@ const char* RtMaterialClassOf(NiGeometry* geometry);	// UNOFFICIAL 2026-11-07 pt
 #include "RtTexturePack.h"	// (2026-11-07, protocol 8) the real textures' routes, packing, budget and release (tested by tools/nvr-rt-host)
 #include "RtVideoMemory.h"	// (2026-11-07) the GPU's video memory for RealTextureMaxSize / RealTextureBudgetMB = 0 (auto)
 #include "RtFaceMorph.h"	// (2026-11-07) faces and lip-sync: a head's change detection and feed (tested by tools/nvr-rt-host "facemorph")
+#include "RtHairTint.h"	// (2026-11-07 perf-mirrorfix) the hair shaders' tint, noted per geometry by Render.cpp
 #include "DisplaceShadows.h"	// (2026-11-07 rtgap-tessblas) the land draws' LandHeight (which layers have a height)
 
 // UNOFFICIAL 2026-11-05 (rtrefl-only: the demo room's ceiling met by no reflection ray) the first 64 distinct meshes a cell that the
@@ -162,6 +163,7 @@ namespace {
 		bool	sent = false;		// a BUILD op went to the helper
 		bool	refused = false;	// the fork refused it (logged once): never again
 		bool	textured = false;	// skinned: its last build carried texcoords (hit textures)
+		bool	alphaBuilt = false;	// (2026-11-07 perf-mirrorfix) skinned: its last build was non-opaque (an alpha-tested part)
 		bool	skinned = false;	// an actor's partition (dropped at once when the player changes cell)
 		// UNOFFICIAL 2026-10-31 actors (docs\next\RT-SUN-SOFT-AND-BUILD.md): the camera its last pose was posed against (the posed
 		// vertices are camera relative: the instance moves them by pose camera - camera), that pose's world-space bone palette
@@ -344,6 +346,7 @@ namespace {
 		UInt32		actorRebuild = 8;					// [Main.Main.RayTracing] ActorRebuildInterval (live; 0 never)
 		UInt32		actorUpdates[4] = {};				// since the last line: posed, still (not posed), between poses (ActorUpdateInterval), rebuilds
 		UInt32		actorPartitions = 0;				// skinned partitions staged (exchanges 1-60)
+		UInt32		actorAlphaParts = 0, actorTintedParts = 0;	// (2026-11-07 perf-mirrorfix) poses built alpha-tested, of them tinted (hair)
 		UInt32		partitionFate[5] = {};
 		UInt32		skinTex[6] = {};	// hit textures on actors: not PPLighting, no diffuse, texcoords elsewhere, no slot, staged without texcoords, textured				// skipped: no buffer data, too many bones, not described, streams / half positions, palette
 		std::vector<ID3D9NvrExtSharedImage*> images;	// [0] = the arena
@@ -488,6 +491,7 @@ namespace {
 		void		Displace(NiGeometry* geo, GeometryEntry& entry, NvrRtInstance& instance, bool land, BSShaderProperty* shaderProperty,
 						const NVR_EXT_RT_GEOMETRY_DESC& desc, bool textured);
 		UInt32		instances = 0, waiting = 0, released = 0;
+		UInt32		hiddenInstances = 0;	// (2026-11-07 perf-ptcost) this exchange's NVR_RT_CUSTOM_HIDDEN instances (RtCore::HiddenInstances)
 		float		radius = 8192.0f;
 		// UNOFFICIAL 2026-10-30 scene cost (the main session's soak list, item 2), all [Main.Main.RayTracing], live:
 		//   Compact: static geometry is compacted by the helper after its build (NVR_RT_OP_FLAG_COMPACT; about half the memory).
@@ -961,7 +965,18 @@ namespace {
 		return 0;
 	}
 
+	// UNOFFICIAL 2026-11-07 (perf-ptcost) the STALL lines' RT state (SessionLog.h StallWatch::SetExtra; runs on the watchdog thread, its reads
+	// guarded there: plain counters and the shared block's two frame numbers)
+	void StallText(char* out, unsigned size) {
+		const Core& c = TheCore;
+		const NvrRtShared* s = c.shared;
+		sprintf_s(out, size, "RT core: state %d, exchanges recorded %llu, the helper has read up to %lld (latest published %lld)%s", (int)c.state,
+			(unsigned long long)c.frame, s ? (long long)s->consumedFrame : -1ll, s ? (long long)s->latestFrame : -1ll, c.recording ? ", recording an exchange now" : "");
+	}
+
 	bool Core::Start() {
+		SessionLog::StageScope stage("RT core: starting the RT helper");	// (2026-11-07 perf-ptcost: STALL lines)
+		SessionLog::StallWatch::SetExtra(StallText);
 		ID3D9NvrExt* ext = DxvkCompute::Extension();
 		if (!ext || !DxvkCompute::Available()) { TurnOff("no Vegas Shaders DXVK (native D3D9 or stock DXVK)"); return false; }
 		if (FAILED(ext->QueryInterface(__uuidof(ID3D9NvrExtShare), (void**)&share)) || !share) {
@@ -1254,6 +1269,7 @@ namespace {
 	}
 
 	void Core::Stop(const char* why) {
+		SessionLog::StageScope stage("RT core: stopping the RT helper");	// (2026-11-07 perf-ptcost: STALL lines)
 		if (why && state != Idle && state != Off) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT helper stopped: %s.", why);
 		if (watchdog) {
 			InterlockedExchange(&watchStop, 1);
@@ -1519,8 +1535,9 @@ namespace {
 		BSDismemberSkinInstance* dismember = *(void**)skin == Pointers::VirtualTables::BSDismemberSkinInstance ? (BSDismemberSkinInstance*)skin : nullptr;
 		if (dismember && !dismember->IsRenderable) { skip[kSkinned]++; return; }
 		NiAlphaProperty* alpha = (NiAlphaProperty*)geo->GetProperty(NiProperty::PropertyType::kType_Alpha);
-		// Bodies are alpha-tested (the hair and fringe edges): they go in opaque (rtsun-13: with them left out, only heads and hands were
-		// in the scene). Blended-only (glass, fx) stays out.
+		// Bodies are alpha-tested (the hair and fringe edges): they go in (rtsun-13: with them left out, only heads and hands were in the
+		// scene); (2026-11-07 perf-mirrorfix) the alpha-tested parts that are not skin as cut-outs (RtScenePick::ActorAlphaTested, below).
+		// Blended-only (glass, fx) stays out.
 		if (alpha && (alpha->flags & NiAlphaProperty::AlphaFlags::ALPHA_BLEND_MASK) && !(alpha->flags & NiAlphaProperty::AlphaFlags::TEST_ENABLE_MASK)) { skip[kAlpha]++; return; }
 		// The skin shader is not a "lighting property" by its shader index, but its class is BSShaderPPLightingProperty (the textures)
 		const UInt32 shaderType = static_cast<NiShadeProperty*>((NiProperty*)shaderProperty)->m_eShaderType;
@@ -1542,6 +1559,13 @@ namespace {
 			const NiSourceTexture* source = textures ? *textures : nullptr;
 			skinKind = source && RtScenePick::SkinTexturePath(source->ddsPath1);
 		}
+		// (2026-11-07 perf-mirrorfix) hair, brows, lashes, beards, eye cards, fringed clothes: cut out by every ray that tests alpha (they
+		// were solid sheets: the hair's card round the head in mirrors, its pale transparent texels a white fringe, the face inside it
+		// shadowed dark); the hair's tint from its draw (RtHairTint, Render.cpp)
+		const bool alphaPart = hitTextures && ppLighting && RtScenePick::ActorAlphaTested(alpha != nullptr, alpha ? alpha->flags : 0, skinKind, alphaOn);
+		const UInt32 actorAlphaRef = alphaPart ? RtScenePick::ActorAlphaRef(alpha->flags, alpha->alphaTestRef) : 0u;
+		float hairTint[3] = { 1.0f, 1.0f, 1.0f };
+		const bool tinted = alphaPart && RtHairTint::Find(geo, hairTint);
 		const float cx = TheRenderManager->CameraPosition.x, cy = TheRenderManager->CameraPosition.y, cz = TheRenderManager->CameraPosition.z;
 		static std::vector<NVR_EXT_RT_RANGE> ranges;
 		static std::vector<float> palette;
@@ -1676,9 +1700,18 @@ namespace {
 					hasUv = slot >= 0 && info.Texels == 3u * (info.VertexCount + info.TriangleCount) + 2u * info.VertexCount;
 					entry.textured = hasUv;
 					if (slot >= 0) skinTex[hasUv ? 5 : 4]++;
-					op.flags = NVR_RT_OP_FLAG_DYNAMIC | (hasUv ? NVR_RT_OP_FLAG_TEXCOORDS : 0u);
+					// (2026-11-07 perf-mirrorfix) non-opaque when alpha-tested (RtScenePick::ActorOpFlags)
+					op.flags = RtScenePick::ActorOpFlags(hasUv, alphaPart);
+					const bool builtAlpha = (op.flags & NVR_RT_OP_FLAG_ALPHA) != 0;
 					// 2026-10-31 ActorRebuildInterval: every Nth pose built afresh (the helper refits the others)
 					if (entry.sent && actorRebuild && (++entry.poses % actorRebuild) == 0) { op.flags |= NVR_RT_OP_FLAG_REBUILD; actorUpdates[3]++; }
+					// (2026-11-07 perf-mirrorfix) a refit must keep the structure's opacity (Vulkan: the geometry flags of its build); the helper
+					// refits on the same counts and texcoords only, so a change of the alpha decision alone (an alpha property that changed) is
+					// built afresh here
+					if (entry.sent && entry.alphaBuilt != builtAlpha) op.flags |= NVR_RT_OP_FLAG_REBUILD;
+					entry.alphaBuilt = builtAlpha;
+					if (builtAlpha) actorAlphaParts++;
+					if (builtAlpha && tinted) actorTintedParts++;
 					arenaUsed += info.Texels;
 					entry.sent = true;
 					if (face) face->pending = false;
@@ -1698,10 +1731,23 @@ namespace {
 			}
 
 			NvrRtInstanceRecord& extra = record->records[record->instanceCount];
-			extra.albedo[0] = albedo.rgb[0]; extra.albedo[1] = albedo.rgb[1]; extra.albedo[2] = albedo.rgb[2]; extra.albedo[3] = 1.0f;
-			extra.flags = (albedo.known ? NVR_RT_RECORD_ALBEDO_KNOWN : 0u) | (hasUv && slot >= 0 ? NVR_RT_RECORD_TEXTURED | ((UInt32)slot << 16) : 0u) |
-				(hasUv && slot >= 0 && skinNormal ? NVR_RT_RECORD_NORMAL : 0u) |	// (2026-11-07) RealNormalMaps
-				(skinKind ? NvrRtKindBits(NVR_RT_KIND_SKIN) : 0u);	// (2026-11-07 ptaaa-materials)
+			// (2026-11-07 perf-mirrorfix) RtScenePick::ActorRecordFlags: textured, or alpha-tested (+ tinted) where the structure was built
+			// non-opaque (entry.alphaBuilt: frames without a pose keep what the helper has)
+			RtScenePick::ActorPart actorPart;
+			actorPart.albedoKnown = albedo.known;
+			actorPart.textured = hasUv && slot >= 0;
+			actorPart.slot = slot;
+			actorPart.normalMap = skinNormal != nullptr;	// (2026-11-07) RealNormalMaps
+			actorPart.skin = skinKind;	// (2026-11-07 ptaaa-materials)
+			actorPart.alphaTested = actorPart.textured && entry.alphaBuilt;
+			actorPart.alphaRef = actorAlphaRef;
+			actorPart.tinted = actorPart.alphaTested && tinted;
+			if (actorPart.tinted) {	// the record's albedo: the tint's linear colour (RtHit.glsl multiplies it into the texture; alone: the hair's colour)
+				for (int k = 0; k < 3; k++) extra.albedo[k] = RtScenePick::TintLinear(hairTint[k]);
+			}
+			else { extra.albedo[0] = albedo.rgb[0]; extra.albedo[1] = albedo.rgb[1]; extra.albedo[2] = albedo.rgb[2]; }
+			extra.albedo[3] = 1.0f;
+			extra.flags = RtScenePick::ActorRecordFlags(actorPart);
 			if (skinKind) skinParts++;
 			extra.geometryId = entry.id;
 			extra.vertexOffset = extra.indexOffset = 0;
@@ -2848,6 +2894,8 @@ namespace {
 
 	void Core::Gather() {
 		sceneFrame++;
+		RtHairTint::Frame = sceneFrame;	// (2026-11-07 perf-mirrorfix) the hair draws note their tint while actors with textures are traced
+		RtHairTint::Wanted = actorsOn && rtSkin && hitTextures;
 		// A cell change (a door, a jump, a load): every actor partition goes at once (its buffers and bones may be unloaded and the
 		// addresses reused by new ones); the actors still there are posed again from scratch this frame
 		static const void* lastCell = nullptr;
@@ -3099,7 +3147,10 @@ namespace {
 		Core& c = *this;
 		// The ring slot: the helper must have copied out the record that used it last (normally long ago; a few ms at worst)
 		const UInt64 n = c.frame + 1;
-		for (int i = 0; i < 100 && c.shared->consumedFrame + (int64_t)NVR_RT_FRAME_RING < (int64_t)n; i++) Sleep(1);
+		{
+			SessionLog::StageScope wait("RT core: waiting for the helper's ring slot (100 ms at most)");	// (2026-11-07 perf-ptcost: STALL lines)
+			for (int i = 0; i < 100 && c.shared->consumedFrame + (int64_t)NVR_RT_FRAME_RING < (int64_t)n; i++) Sleep(1);
+		}
 		if (c.shared->consumedFrame + (int64_t)NVR_RT_FRAME_RING < (int64_t)n) {
 			static UInt32 skipped = 0;
 			if ((skipped++ % 300) == 0) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT helper behind (frame %llu, read up to %lld): this frame not traced (%u so far).",
@@ -3136,6 +3187,11 @@ namespace {
 			memcpy(f.instances, c.frameInstances.data(), c.frameInstances.size() * sizeof(NvrRtInstance));
 			memcpy(f.records, c.frameRecords.data(), c.frameRecords.size() * sizeof(NvrRtInstanceRecord));
 			f.instanceCount = (uint32_t)c.frameInstances.size();
+		}
+		{	// (2026-11-07 perf-ptcost) RtCore::HiddenInstances for the users' records
+			UInt32 hidden = 0;
+			for (uint32_t i = 0; i < f.instanceCount; i++) if (f.instances[i].customIndex & NVR_RT_CUSTOM_HIDDEN) hidden++;
+			c.hiddenInstances = hidden;
 		}
 		if (only) { if (only->Record) only->Record(Device); }
 		else for (const RtCore::User& user : c.users) if (user.Point == 0 && !c.Out(user) && user.Wants && user.Wants() && user.Record) user.Record(Device);
@@ -3249,6 +3305,9 @@ namespace {
 					"no slot %u, staged without texcoords %u, textured %u", c.actorPartitions, c.rtSkin ? "fork 1.8-rt-skin" : "this d3d9.dll has no skinning: off",
 					c.partitionFate[0], c.partitionFate[1], c.partitionFate[2], c.partitionFate[3], c.partitionFate[4],
 					c.skinTex[0], c.skinTex[1], c.skinTex[2], c.skinTex[3], c.skinTex[4], c.skinTex[5]);
+			if (n == 60 && c.actorsOn)	// (2026-11-07 perf-mirrorfix)
+				Logger::Log("RT CORE: actors: %u poses built as cut-outs (alpha-tested hair, brows, eye cards, fringes: AlphaTested %s), %u of them with "
+					"the hair's tint (%u tints noted from the hair draws)", c.actorAlphaParts, c.alphaOn ? "on" : "off", c.actorTintedParts, (unsigned)RtHairTint::Tints.size());
 			if (n == 60) {
 				const UInt32* a = c.alphaFate;
 				Logger::Log("RT CORE: alpha-tested meshes met (exchanges 1-60): taken %u, atlas %u slots; left out: blended only %u, AlphaTested off %u, "
@@ -3356,6 +3415,7 @@ int RtCore::AlphaAtlasImage() { return TheCore.alphaOn || TheCore.hitTextures ? 
 int RtCore::AlbedoAtlasImage() { return TheCore.state == Core::Running && TheCore.hitTextures ? TheCore.albedoAtlasImage : -1; }
 int RtCore::GlowAtlasImage() { return TheCore.state == Core::Running && TheCore.hitTextures ? TheCore.glowAtlasImage : -1; }
 int RtCore::NormalAtlasImage() { return TheCore.state == Core::Running && TheCore.hitTextures ? TheCore.normalAtlasImage : -1; }	// UNOFFICIAL 2026-11-02
+UInt32 RtCore::HiddenInstances() { return TheCore.hiddenInstances; }	// UNOFFICIAL 2026-11-07 (perf-ptcost; RtCore.h)
 bool RtCore::GrassWanted() { return TheCore.state == Core::Running && TheCore.grassOn; }
 void RtCore::DisplacedCopies(bool& Land, bool& Objects) {	// UNOFFICIAL 2026-11-07
 	const bool on = TheCore.state == Core::Running;
