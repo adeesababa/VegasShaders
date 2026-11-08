@@ -34,6 +34,7 @@ layout(set = 0, binding = 1, std140) uniform Pass {
 	                    // (2026-11-07 perf-reflfix2: [2i + 1] rgb the game's colour, LINEAR, w its falloff: RtLampLight.glsl)
 	vec4 frame;         // (2026-11-07 perf-reflfix2) x a frame number (0..65535, wraps): MetalBounce's GGX sample changes every frame;
 	                    // y 1 = that sample is wanted (a denoiser averages the frames); z the flashlight's lamp index + 1 (0: none), w its cone
+	                    // (2026-11-08 perf-reflfix3: the sample is fixed per pixel now; y only > 1.5 = test 11's per-frame sample, a host test)
 } p;
 #include "RtLampLight.glsl"   // (2026-11-07 perf-reflfix2) the lamps as the game's shaders light them (Resolve's RtShadeHit uses the same)
 layout(set = 0, binding = 2, rg32f) uniform readonly image2D dirImage;      // RayGen: the reflected direction, octahedral (world = scene axes)
@@ -244,14 +245,30 @@ bool MetalBounce(uint instance, out float hitRough) {
 // and pixel (Pass frame.x) while something averages the frames (frame.y: the RT reflection denoiser, DLSS RR); else the plain mirror
 // direction (as perf-reflfix: gold then shows as sharp as chrome). Before, every bouncing metal reflected along the exact mirror direction:
 // gold (0.33) in a mirror was as sharp as chrome (0.08), while seen directly its reflection is blurred by its roughness.
+// (2026-11-08 perf-reflfix3, test 11: the gold sphere SHIMMERED in the mirror) a mirror pixel keeps no history (one exact ray, no blur),
+// so the per-frame sample above showed raw every frame. Now the sample is FIXED per pixel: one of 9 points of the lobe (a Fibonacci set:
+// u1 = (s + 0.5) / 9, u2 = s x 0.618), s = (x mod 3) + 3 (y mod 3), so every 3 x 3 block of pixels holds all 9 and ReflectionsRTResolve.frag
+// averages each bouncing pixel with its 8 neighbours on the same metal (RtBounceAverage): the 9-ray mean of the lobe, the same every frame.
+// Metal up to roughness 0.1 (chrome, the codes 1-2) bounces along the exact mirror direction (its lobe is under a degree: sharp). The
+// rougher classes go to Resolve in the hit flags' bits 1 and 4 (unused for a bounce): BounceClass, 1 = 0.18, 2 = 0.33, 3 = 0.51.
+// frame.y > 1.5 (a test: the RT host's before / after) keeps test 11's per-frame random sample.
+uint BounceClass(float rough) { return rough < 0.1 ? 0u : rough < 0.25 ? 1u : rough < 0.42 ? 2u : 3u; }
+uint BounceClassBits(uint c) { return (c & 1u) | ((c & 2u) << 1u); }   // (bit 0 and bit 2: values 1, 4)
 uint RtHash(uint v) { v = v * 747796405u + 2891336453u; v = ((v >> ((v >> 28u) + 4u)) ^ v) * 277803737u; return (v >> 22u) ^ v; }
 vec3 BounceDirection(vec3 dir, vec3 n, vec3 geo, float rough, ivec2 pixel) {
 	vec3 d2 = reflect(dir, n);
 	const float a = rough * rough;
-	if (p.frame.y > 0.5 && a > 1.0e-4) {
-		const uint h1 = RtHash(uint(pixel.x) ^ RtHash(uint(pixel.y) ^ RtHash(uint(p.frame.x) + 0x9E3779B9u)));
-		const uint h2 = RtHash(h1 + 0x68E31DA4u);
-		const float u1 = float(h1 >> 8u) * (1.0 / 16777216.0), u2 = float(h2 >> 8u) * (1.0 / 16777216.0);
+	if (BounceClass(rough) > 0u && a > 1.0e-4) {
+		float u1, u2;
+		if (p.frame.y > 1.5) {   // (test 11's sample, the host's "before")
+			const uint h1 = RtHash(uint(pixel.x) ^ RtHash(uint(pixel.y) ^ RtHash(uint(p.frame.x) + 0x9E3779B9u)));
+			const uint h2 = RtHash(h1 + 0x68E31DA4u);
+			u1 = float(h1 >> 8u) * (1.0 / 16777216.0); u2 = float(h2 >> 8u) * (1.0 / 16777216.0);
+		}
+		else {
+			const float s = float((pixel.x % 3) + 3 * (pixel.y % 3));
+			u1 = (s + 0.5) / 9.0; u2 = fract(s * 0.61803398875 + 0.5);
+		}
 		const vec3 t = normalize(abs(n.z) < 0.999 ? cross(n, vec3(0.0, 0.0, 1.0)) : cross(n, vec3(1.0, 0.0, 0.0)));
 		const vec3 b = cross(n, t);
 		const vec3 v = -dir;
@@ -371,7 +388,7 @@ void main() {
 		rayQueryInitializeEXT(q2, scene, RT_RAY_FLAGS, mask, off, 0.5, d2, max(tMax - t, tMax * 0.25));
 		RtProceed(q2);
 		if (rayQueryGetIntersectionTypeEXT(q2, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
-			imageStore(hitImage, pixel, vec4(t, float(256u | 512u), OctEncode(d2)));
+			imageStore(hitImage, pixel, vec4(t, float(256u | 512u | BounceClassBits(BounceClass(hitRough))), OctEncode(d2)));
 			imageStore(shadeImage, pixel, vec4(1.0, 1.0, 1.0, 1.0));
 			imageStore(bounceImage, pixel, vec4(tint, 0.0));
 			return;
@@ -381,7 +398,7 @@ void main() {
 		const HitShade h2 = ShadeHit(uint(rayQueryGetIntersectionInstanceIdEXT(q2, true)), uint(rayQueryGetIntersectionPrimitiveIndexEXT(q2, true)),
 			rayQueryGetIntersectionBarycentricsEXT(q2, true), mat3(rayQueryGetIntersectionObjectToWorldEXT(q2, true)), off + d2 * t2, d2, t2,
 			max(roughness, hitRough), cone2);
-		const uint flags2 = 256u | (h2.flags & (2u | 8u | 0xF0u));   // its albedo / glow / key lamp (its land / normal bits: unused for a bounce)
+		const uint flags2 = 256u | (h2.flags & (2u | 8u | 0xF0u)) | BounceClassBits(BounceClass(hitRough));   // its albedo / glow / key lamp; (perf-reflfix3) bits 1, 4: the metal's class
 		imageStore(hitImage, pixel, vec4(t, float(flags2), OctEncode(d2)));
 		imageStore(shadeImage, pixel, vec4(h2.albedo, h2.visible));
 		imageStore(bounceImage, pixel, vec4(tint, max(t2, 1.0e-3)));

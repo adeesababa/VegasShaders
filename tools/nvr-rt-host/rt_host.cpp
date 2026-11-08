@@ -40,6 +40,7 @@
 #include "RtViewModel.h"     // (2026-11-07 ptaaa-firstperson) PTViewModel's prep pass (src/core), run by the vmprep scene
 #include "RtPtCost.h"        // (2026-11-07 perf-ptcost) the path tracer's ray budget keys (src/core): the NVR_RT_HOST_PTCOST knob
 #include "RtFlashlightCode.h" // (2026-11-07 perf-reflfix2) the path tracer's flashlight code (src/core), run by the ptflashlight scene
+#include "RtHairTint.h"      // (2026-11-08 perf-reflfix3) the hair's tint for the RT scene (src/core), run by the hairtint scene
 #include "../../src/effects/Reflections/RtReflLamps.h"   // (2026-11-07 perf-reflfix2) RT reflections' lamps as the game lights them (reflorbs)
 #include <d3dcompiler.h>
 
@@ -1349,6 +1350,7 @@ static bool sceneCameraMove(Ctx& c) {
 #include "rt_host_historytime.inl"	// (2026-11-07 perf-history) the denoisers' history in seconds, not frames (RtHistoryTime.h)
 #include "rt_host_reflfix.inl"	// (2026-11-07 perf-reflfix) smooth vertex normals at traced hits + MetalBounce (a chrome sphere in a mirror)
 #include "rt_host_reflfix2.inl"	// (2026-11-07 perf-reflfix2) RT reflections' lamps vs the game's, MetalBounce's GGX lobe, the path tracer's flashlight
+#include "rt_host_reflfix3.inl"	// (2026-11-08 perf-reflfix3) a lamp by a ceiling, the flashlight at its origin, the gold's shimmer, the player's hair tint
 #include "rt_host_rrrect.inl"	// (2026-11-07 perf-rr) DLSS RR at RenderScale < 1: the guide pass at the render size, the composite's rect mapping
 #include "rt_host_flashhead.inl"	// (2026-11-07 perf-flashlight) a lamp in the hidden first-person head under SameFrame lamp shadows (RtLampPrimary + RtLampTrace / Sigma + RtLampEye)
 
@@ -1417,6 +1419,7 @@ int main(int argc, char** argv) {
 	if (!registerOmm(host, spv)) { say("RESULT: FAIL (shaders)\n"); return 1; }   // (2026-11-07 ptaaa-omm)
 	if (!registerReflFix(host)) { say("RESULT: FAIL (shared images)\n"); return 1; }	// (2026-11-07 perf-reflfix)
 	if (!registerReflFix2(host, spv)) { say("RESULT: FAIL (shaders)\n"); return 1; }	// (2026-11-07 perf-reflfix2)
+	if (!registerReflFix3(host, spv)) { say("RESULT: FAIL (shaders)\n"); return 1; }	// (2026-11-08 perf-reflfix3)
 	if (!registerPtSplit(host)) { say("RESULT: FAIL (shared images)\n"); return 1; }	// (2026-11-07 ptaaa-denoiser)
 	gCacheShader = host.AddShader(spv + "\\RtPathTraceCache.spv");   // (2026-11-07) PTRadianceCache's resolve pass
 	gEmissiveShader = host.AddShader(spv + "\\RtEmissiveBuild.spv");   // (2026-11-07 ptaaa-emissive) PTEmissive's light list
@@ -1447,6 +1450,10 @@ int main(int argc, char** argv) {
 		{ "reflorbs", "RT reflections' lamp estimate vs the game's own lamp light (perf-reflfix2: the RT test room's mirror orbs): RtLampLight.glsl on the GPU + RtReflLamps::Pack vs the game's maths (dimmer clamp, LOD, LightScale, falloff / LampFalloff's shape); the helper's key-lamp pick (RtLampLightCheck, ReflectionsRT)", [&] { return sceneReflOrbs(c); } },
 		{ "reflbounce", "MetalBounce's direction from the metal's GGX lobe (perf-reflfix2: gold as sharp as chrome in a mirror) vs the CPU's VNDF lobe; the exact mirror without a denoiser; the roughness code (k / 7)^2 (ReflectionsRT)", [&] { return sceneReflBounce(c); } },
 		{ "ptflashlight", "the path tracer's flashlight (lamp 0, its cone in the frame row's texel 15) in a dark room: the first hit's direct light inside / outside the cone vs the CPU in every variant (no lamp image, lamp image, PTLightGrid, PTRestirDI, PTRestirGI's tracer; the ray budget's defaults) + the picture (RtPathTrace*)", [&] { return scenePtFlashlight(c); } },
+		{ "reflnear", "RT reflections near a light (perf-reflfix3): a lamp 4 units under a ceiling vs the game's per-pixel lamp light (bounded); the flashlight's light at hits round its own origin (none within 24 units: the orb round the reflected head) (RtLampLightCheck)", [&] { return sceneReflNear(c); } },
+		{ "reflshimmer", "the gold sphere in a mirror (perf-reflfix3): test 11's per-frame bounce sample vs the fixed 9-point lobe + Resolve's 3 x 3 mean (emulated on the helper's images): shimmer of a still view, error vs the 256-ray truth (ReflectionsRT)", [&] { return sceneReflShimmer(c); } },
+		{ "hairtint", "the player's hair tint when the game never draws it (perf-reflfix3, first person): RtHairTint::For (noted at any age, the TESNPC hair colour, its byte order) (CPU)", [&] { return sceneHairTint(c); } },
+		{ "mirrorlamp", "MirrorLampHighlight (perf-reflfix3, the lamp dots on mirrors / chrome): the composite's ReflLampHighlightScale + ring + mix on a synthetic lit mirror (point-lamp spots, a sun glint, stripes) and the gold's soft highlight (ReflHighlightCheck)", [&] { return sceneMirrorLamp(c); } },
 		{ "cameramove", "camera move with history (RtLampTraceMany)", [&] { return sceneCameraMove(c); } },
 		{ "sun", "sun shadows, half resolution, Penumbra blockers (RtSunShadow)", [&] { return sceneSun(c); } },
 		{ "ao", "AO + sky visibility (RtAOTrace)", [&] { return sceneAO(c); } },

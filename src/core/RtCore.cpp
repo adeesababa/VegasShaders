@@ -1567,7 +1567,23 @@ namespace {
 		const bool alphaPart = hitTextures && ppLighting && RtScenePick::ActorAlphaTested(alpha != nullptr, alpha ? alpha->flags : 0, skinKind, alphaOn);
 		const UInt32 actorAlphaRef = alphaPart ? RtScenePick::ActorAlphaRef(alpha->flags, alpha->alphaTestRef) : 0u;
 		float hairTint[3] = { 1.0f, 1.0f, 1.0f };
-		const bool tinted = alphaPart && RtHairTint::Find(geo, hairTint);
+		// (2026-11-08 perf-reflfix3, test 11: the player's hair white in the chrome sphere in first person, where the game never draws the
+		// third-person hair) the noted tint at any age, else the player's own hair colour (TESNPC::hairColor, +0x1D8) for a Hair-flagged part
+		bool tinted = false;
+		if (alphaPart) {
+			const bool hairFlag = (shaderProperty->ulFlags[0] & BSShaderProperty::Hair) != 0;
+			UInt32 packed = 0;
+			const bool playerHair = walkingPlayer && Player && Player->baseForm && Player->baseForm->formType == TESForm::kFormType_NPC;
+			if (playerHair) packed = *(const UInt32*)((const UInt8*)Player->baseForm + 0x1D8);
+			const int how = RtHairTint::For(geo, hairFlag, playerHair, packed, hairTint);
+			tinted = how != 0;
+			static int toldHair = 0;
+			if (how == 2 && toldHair < 2) {
+				toldHair++;
+				Logger::Log("RT CORE hair tint (perf-reflfix3): the player's hair '%s' not drawn this session (first person): its tint from the player's hair colour %08X = %.3f %.3f %.3f (%s)",
+					geo->m_pcName ? geo->m_pcName : "", packed, hairTint[0], hairTint[1], hairTint[2], RtHairTint::OrderCalibrated ? "byte order checked against a drawn tint" : "byte order 0x00RRGGBB, not yet checked");
+			}
+		}
 		// (2026-11-07 perf-mirrorfix2) a FaceGen face: the game's face colour is 2((2(fg0 - 0.5) + base) 2 fg1), not the base texture (the
 		// face dark in mirrors): its gain from the three textures' averages (RtScenePick::FaceGenGain; 2^2.2 where the maps cannot be read)
 		float faceGain = 0.0f;

@@ -136,6 +136,35 @@ void main() {
             vec3 hitW = borrowed ? borrowHitW : surfaceW + worldR * hitData.x;
             vec2 source;
             vec3 hitColour = RtHitColour(hitW, hitData, shade, bounce, worldR, roughness, source);
+            // 2026-11-08 (perf-reflfix3, test 11: the gold sphere shimmered in the mirror) rough metal's bounce: the helper's sample is one of
+            // 9 fixed points of the metal's lobe by the pixel's place in a 3 x 3 block (ReflectionsRTBody.glsl BounceDirection); the 8
+            // neighbours on the same metal (a bounce of the same class, the surface at the same depth, the first hits within 10 % of the distance + 16 units of each other) are its other
+            // 8: their mean is the lobe's 9-ray answer, the same every frame. Chrome (class 0) keeps its one exact mirror ray.
+            const uint bounceClass = (hitFlags & 256u) != 0u ? (hitFlags & 1u) | ((hitFlags >> 1u) & 2u) : 0u;
+            if (bounceClass > 0u && !borrowed && !weaponRay) {
+                vec3 total = hitColour;
+                float count = 1.0;
+                for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
+                    if (dx == 0 && dy == 0) continue;
+                    const ivec2 nb = texel + ivec2(dx, dy);
+                    const vec2 nRay = texelFetch(sampler2D(t_rtRay, POINT_S), nb, 0).xy;
+                    if (nRay.x <= 0.0 || nRay.y < 1.5 || nRay.y > 3.5) continue;          // (no own ray there: a borrower, a weapon pixel, nothing)
+                    if (abs(nRay.x - ray.x) > ray.x * 0.05 + 4.0) continue;              // another surface
+                    const vec4 nHit = texelFetch(sampler2D(t_rtHit, POINT_S), nb, 0);
+                    const uint nFlags = uint(nHit.y + 0.5);
+                    if (nHit.x <= 0.0 || (nFlags & 256u) == 0u || ((nFlags & 1u) | ((nFlags >> 1u) & 2u)) != bounceClass) continue;
+                    const vec2 nUV = (vec2(nb) + 0.5) * LowTexel - 0.5 * (LowTexel - cb.reciprocalResolution.xy);
+                    const vec3 nSurface = ViewToWorldDir(SurfacePosition(nUV, nRay.x));
+                    const vec3 nDir = OctDecode(texelFetch(sampler2D(t_rtDir, POINT_S), nb, 0).xy);
+                    const vec3 nHitW = nSurface + nDir * nHit.x;
+                    if (length(nHitW - hitW) > hitData.x * 0.1 + 16.0) continue;   // another thing met first (the metal's hit points lie together)
+                    vec2 nSource;
+                    total += RtHitColour(nHitW, nHit, texelFetch(sampler2D(t_rtShade, POINT_S), nb, 0),
+                        texelFetch(sampler2D(t_rtBounce, POINT_S), nb, 0), nDir, roughness, nSource);
+                    count += 1.0;
+                }
+                hitColour = total / count;
+            }
             rtScreenShare = missing * source.x;
             rtCubeShare = missing * (1.0 - source.x) * source.y;
             rtGuessShare = missing - rtScreenShare - rtCubeShare;

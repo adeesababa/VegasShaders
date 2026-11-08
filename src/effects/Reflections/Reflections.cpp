@@ -33,6 +33,9 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.Mirror = std::clamp(TheSettingManager->GetSettingF(section, "Mirror"), 0.0f, 1.0f);	// UNOFFICIAL 2026-11-05
 	Settings.MirrorSmoothOnly = TheSettingManager->GetSettingI(section, "MirrorSmoothOnly") != 0;	// UNOFFICIAL 2026-11-06	// UNOFFICIAL 2026-11-05
 	Settings.KeepFlashlight = TheSettingManager->GetSettingI(section, "KeepFlashlight") != 0;	// UNOFFICIAL 2026-11-07 (perf-reflfix2)
+	// UNOFFICIAL 2026-11-08 (perf-reflfix3) a missing key reads 0 = the lamp highlights gone on mirrors (the default); NaN: as before (1)
+	Settings.MirrorLampHighlight = TheSettingManager->GetSettingF(section, "MirrorLampHighlight");
+	Settings.MirrorLampHighlight = Settings.MirrorLampHighlight == Settings.MirrorLampHighlight ? std::clamp(Settings.MirrorLampHighlight, 0.0f, 1.0f) : 1.0f;
 	Settings.WetRoughness = std::clamp(TheSettingManager->GetSettingF(section, "WetRoughness"), 0.02f, 1.0f);
 	Settings.MaxDistance = std::clamp(TheSettingManager->GetSettingF(section, "MaxDistance"), 200.0f, 20000.0f);
 	Settings.Steps = std::clamp(TheSettingManager->GetSettingI(section, "Steps"), 8, 64);
@@ -386,7 +389,7 @@ bool ReflectionsEffect::RtTrace(IDirect3DDevice9* Device, IDirect3DSurface9* tar
 		// frame) because something averages the frames: the RT reflection denoiser, or DLSS RR (the raw resolve); without either the bounce
 		// stays the exact mirror direction (a mirror pixel keeps no Temporal history: the samples' noise would show as it is)
 		RtPending.frame = D3DXVECTOR4((float)(TheFrameRateManager->FrameNumber & 0xFFFFu),
-			rtDenoiseFrame || Upscaler::RayReconstructionWantsRaw() ? 1.0f : 0.0f, (float)(RtFlashIndex + 1), RtFlashCode);	// zw: the flashlight (perf-reflfix2)
+			0.0f, (float)(RtFlashIndex + 1), RtFlashCode);	// zw: the flashlight (perf-reflfix2); y 0 (2026-11-08 perf-reflfix3: the bounce's lobe sample is fixed per pixel, ReflectionsRTBody.glsl; 2 = test 11's per-frame sample, the host's test only)
 		static GpuTimer exchangeTimer("  Reflections RT (exchange)");
 		GpuProfileScope gpu(exchangeTimer, Device);
 		traced = RtCoreClient::Exchange(Device, RtUser) && RtRecorded;
@@ -889,6 +892,7 @@ namespace {
 		D3DXVECTOR4	weapon;		// UNOFFICIAL 2026-10-30 x on, y WeaponFovScale, z strength, w roughness without material data
 		D3DXVECTOR4	renderScale;	// UNOFFICIAL 2026-11-03 TESR_RenderScale: xy the rect frame's scale, zw 1 / xy; 1 in a native frame
 		D3DXVECTOR4	flashPos, flashDir, flashColor, flashLook;	// UNOFFICIAL 2026-11-07 (perf-reflfix2) KeepFlashlight (ReflectionsComposite.frag)
+		D3DXVECTOR4	mirrorLamp, sunDirection;	// UNOFFICIAL 2026-11-08 (perf-reflfix3) MirrorLampHighlight (ReflLampHighlight.glsl)
 	};
 	ReflUniforms ReflUploaded;	// what the uniform buffer holds (one effect instance)
 	struct ReflPush { D3DXVECTOR4 cube; UInt32 linearIndex, pointIndex, mipIndex, pass; };
@@ -1153,15 +1157,24 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	// mixes the reflection over a share of the surface's lit colour, the flashlight's highlight on it included, while no ray ever sees the
 	// flashlight itself; the composite adds that share of its highlight back (ReflectionsComposite.frag FlashlightHighlight)
 	uniforms.flashPos = uniforms.flashDir = uniforms.flashColor = uniforms.flashLook = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
-	if (Settings.KeepFlashlight) {
+	{	// (2026-11-08 perf-reflfix3: filled whenever the flashlight is on: MirrorLampHighlight keeps its glint; KeepFlashlight = flashLook.z)
 		D3DXVECTOR4 fl[3];
 		if (FlashlightDeferred::LightParams(fl)) {
 			const float gamma = LinearScene::Gamma > 1.0f ? LinearScene::Gamma : 2.2f, e = 2.2f / gamma;	// (to the composite's linear space)
 			uniforms.flashPos = fl[0];
 			uniforms.flashDir = fl[1];
 			uniforms.flashColor = D3DXVECTOR4(powf((std::max)(fl[2].x, 0.0f), e), powf((std::max)(fl[2].y, 0.0f), e), powf((std::max)(fl[2].z, 0.0f), e), fl[2].w);
-			uniforms.flashLook = D3DXVECTOR4(TheShaderManager->Effects.Flashlight->Deferred.Falloff, 8.0f, 0.0f, 0.0f);
+			uniforms.flashLook = D3DXVECTOR4(TheShaderManager->Effects.Flashlight->Deferred.Falloff, 2.0f, Settings.KeepFlashlight ? 1.0f : 0.0f, 0.0f);	// (y the cap: 2026-11-08 perf-reflfix3 8 -> 2, the glint of the light in a mirror bloomed into an orb; z KeepFlashlight)
 		}
+	}
+	// UNOFFICIAL 2026-11-08 (perf-reflfix3) MirrorLampHighlight (ReflLampHighlight.glsl): the point lamps' highlight on mirror-smooth / chrome
+	// pixels the reflection covers, scaled to this (0 = gone, 1 = as before); the sun's glint kept (its direction), the flashlight's too
+	{
+		const D3DXVECTOR4& sun = TheShaderManager->ShaderConst.SunDir;
+		D3DXVECTOR3 toSun(sun.x, sun.y, sun.z);
+		if (D3DXVec3Length(&toSun) > 1.0e-4f) D3DXVec3Normalize(&toSun, &toSun);
+		uniforms.mirrorLamp = D3DXVECTOR4(1.0f - Settings.MirrorLampHighlight, 12.0f, RtSunAmount() > 0.0f ? 1.0f : 0.0f, 0.0f);
+		uniforms.sunDirection = D3DXVECTOR4(toSun.x, toSun.y, toSun.z, 0.0f);
 	}
 	ID3D9NvrExtBuffer* buffer = extUniforms.Buffer;
 	if (!buffer || memcmp(&uniforms, &ReflUploaded, sizeof(uniforms))) {

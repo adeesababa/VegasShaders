@@ -64,6 +64,8 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4 flashDir;              // composite: pos xyz camera-relative, w its reach (0: off this frame); dir xyz its axis, w cos of the cone's
     vec4 flashColor;            // edge; color rgb its light (the composite's linear space), w cos of the full-strength edge; look x Falloff
     vec4 flashLook;             // ([Shaders.Flashlight.Deferred]), y the cap on its highlight (linear)
+    vec4 mirrorLamp;            // UNOFFICIAL 2026-11-08 (perf-reflfix3) MirrorLampHighlight (ReflLampHighlight.glsl): x 1 - MirrorLampHighlight (0: off),
+    vec4 sunDirection;          // y the ring's radius (full-resolution pixels), z 1 = the sun is up (its glint kept); sunDirection xyz toward the sun (world)
 } cb;
 
 layout(push_constant) uniform Push {

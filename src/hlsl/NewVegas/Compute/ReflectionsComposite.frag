@@ -3,6 +3,31 @@
 #version 450
 #extension GL_GOOGLE_include_directive : enable
 #include "Reflections.glsl"
+#include "ReflLampHighlight.glsl"   // (2026-11-08 perf-reflfix3) MirrorLampHighlight
+
+// UNOFFICIAL 2026-11-08 (perf-reflfix3) MirrorLampHighlight: the ring round the pixel (8 taps at cb.mirrorLamp.y full-resolution pixels, the
+// same surface: depth within 5 % + 4 units) for ReflLampHighlightScale, and what to keep: the sun's glint (the reflected direction within
+// ~2-4 degrees of the sun, while it is up) and the flashlight's (toward its light). P: the surface (view space), N, V as main's.
+vec3 MirrorLampHighlight(vec3 lin, vec3 P, vec3 N, float depth, vec3 share, float roughness) {
+    if (!(cb.mirrorLamp.x > 0.0) || roughness >= 0.15) return lin;
+    vec3 top = vec3(0.0);
+    int valid = 0;
+    const vec2 px = cb.reciprocalResolution.xy * cb.mirrorLamp.y;
+    for (int k = 0; k < 8; k++) {
+        const float a = 0.7853982 * float(k);
+        const vec2 at = uv + vec2(cos(a), sin(a)) * px;
+        if (any(lessThan(at, vec2(0.0))) || any(greaterThan(at, cb.renderScale.xy))) continue;
+        if (abs(readDepthLod(at) - depth) > depth * 0.05 + 4.0) continue;
+        ReflHighlightRingAdd(ReflHighlightLuma(linearize(textureLod(sampler2D(t_rendered, POINT_S), at, 0.0).rgb)), top);
+        valid++;
+    }
+    const float ringMax = top.z;
+    const vec3 R = reflect(normalize(P), N);   // (view space)
+    float keep = 0.0;
+    if (cb.mirrorLamp.z > 0.5) keep = smoothstep(0.9976, 0.9994, dot(R, normalize(WorldToViewDir(cb.sunDirection.xyz))));   // (cos 4 .. 2 degrees)
+    if (cb.flashPos.w > 0.0) keep = max(keep, smoothstep(0.9976, 0.9994, dot(R, normalize(WorldToViewDir(cb.flashPos.xyz) - P))));
+    return ReflLampHighlightScale(lin, ringMax, valid, share, roughness, cb.mirrorLamp.x, keep);
+}
 
 // UNOFFICIAL 2026-11-07 (perf-reflfix2, the flashlight team: with RT on the flashlight's spot faded on mirrors, chrome and gold) KeepFlashlight:
 // the composite lays the reflection over a share of the surface's lit colour, and that colour holds the flashlight's highlight
@@ -11,7 +36,7 @@
 // or cookie), capped at flashLook.y: main adds that share of it back (the reflection replaces the environment's light, not the light's).
 // view: the surface (view space, from the eye), N its normal, F0 the share's Fresnel colour
 vec3 FlashlightHighlight(vec3 P, vec3 N, float roughness, vec3 F0) {
-    if (!(cb.flashPos.w > 0.0)) return vec3(0.0);
+    if (!(cb.flashPos.w > 0.0) || cb.flashLook.z < 0.5) return vec3(0.0);   // (2026-11-08: flashPos is there for MirrorLampHighlight too; z KeepFlashlight)
     const vec3 toLight = WorldToViewDir(cb.flashPos.xyz) - P;
     const float d = length(toLight);
     if (!(d < cb.flashPos.w) || d < 1.0e-3) return vec3(0.0);
@@ -118,6 +143,7 @@ void main() {
     if (DebugView > 0.5) { o_color = vec4(delinearize(reflected * share), color.a); return; }
 
     vec3 lin = linearize(color.rgb);
+    lin = MirrorLampHighlight(lin, SurfacePosition(uv, depth), N, depth, share, roughness);   // (2026-11-08 perf-reflfix3)
     // (2026-11-07 perf-reflfix2) KeepFlashlight: the flashlight's highlight, of which the mix below takes away the reflection's share
     const vec3 highlight = FlashlightHighlight(SurfacePosition(uv, depth), N, roughness, f0);
     // REFL_ADD_ON: ReflectAdd.

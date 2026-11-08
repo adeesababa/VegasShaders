@@ -334,10 +334,11 @@ static bool sceneReflBounce(Ctx& c) {
 	int below = 0;
 	for (int fr = 0; fr < F; fr++) {
 		std::vector<float> hit;
-		if (!pass(float(100 + fr * 37), 1.0f, hit)) { releaseWorld(h, ids); return false; }
+		if (!pass(float(100 + fr * 37), 2.0f, hit)) { releaseWorld(h, ids); return false; }
 		for (UINT p = 0; p < S * S; p++) {
 			if (sphereOf[p] < 0 || !(int(base0[p * 4 + 1] + 0.5f) & 256) || !(int(hit[p * 4 + 1] + 0.5f) & 256)) continue;
-			const V3 d0 = octDecode(base0[p * 4 + 2], base0[p * 4 + 3]), d = octDecode(hit[p * 4 + 2], hit[p * 4 + 3]);
+			// (2026-11-08 perf-reflfix3: against the mirror direction about the exact normal: the frame.y 0 run is the fixed lobe point now, not the mirror)
+			const V3 d0 = vIn[p] * -1.0f - nTrue[p] * (2 * dot(vIn[p] * -1.0f, nTrue[p])), d = octDecode(hit[p * 4 + 2], hit[p * 4 + 3]);
 			sumAngle[p] += angleDeg(d, d0);
 			sumDir[p] = sumDir[p] + d;
 			if (dot(d, nFlat[p]) < -1e-3f) below++;   // (the shader keeps it above the hit TRIANGLE: its flat normal)
@@ -358,15 +359,16 @@ static bool sceneReflBounce(Ctx& c) {
 		double cpu = 0;
 		for (int k = 0; k < 256; k++) cpu += angleDeg(vndfReflect(vIn[p], nTrue[p], a, rnd(), rnd()), mirror);
 		cpuMean[s] += cpu / 256; gpuMean[s] += sumAngle[p] / F; count[s]++;
-		meanDirOff[s] += angleDeg(sumDir[p], octDecode(base0[p * 4 + 2], base0[p * 4 + 3]));
+		meanDirOff[s] += angleDeg(sumDir[p], vIn[p] * -1.0f - nTrue[p] * (2 * dot(vIn[p] * -1.0f, nTrue[p])));
 	}
 	for (int s = 1; s <= 2; s++) if (count[s]) { cpuMean[s] /= count[s]; gpuMean[s] /= count[s]; meanDirOff[s] /= count[s]; }
 	const bool okStill = total > 200 && same == total;
 	const bool okGold = count[1] > 100 && std::fabs(gpuMean[1] / std::max(cpuMean[1], 1e-6) - 1.0) < 0.2 && gpuMean[1] > 2.0;
-	const bool okChrome = count[2] > 100 && gpuMean[2] < 1.5 && std::fabs(gpuMean[2] - cpuMean[2]) < 0.6;
+	// (2026-11-08 perf-reflfix3) chrome (class 0, roughness under 0.1) bounces along the exact mirror direction now: no spread at all
+	const bool okChrome = count[2] > 100 && gpuMean[2] < 0.6;   // (the smooth normal's own error vs the exact sphere: reflfix A, ~0.1-0.3 deg)
 	const bool ok = okStill && okGold && okChrome && below == 0;
 	say("  MetalBounce without a denoiser (frame.y 0): %d sphere pixels bounced, the same direction two frames running at %d -> %s\n", total, same, okStill ? "ok" : "BAD");
-	say("  with the denoiser (frame.y 1), %d frames: gold (code %u = %.3f) %d pixels, mean angle from the mirror direction %.2f deg (the CPU's GGX lobe "
+	say("  the lobe's per-frame random sample (frame.y 2: test 11's, kept as a test; the game now uses the fixed 9 points, scene reflshimmer), %d frames: gold (code %u = %.3f) %d pixels, mean angle from the mirror direction %.2f deg (the CPU's GGX lobe "
 		"%.2f), the frames' mean direction %.2f deg off; chrome (code %u = %.3f) %d pixels, %.2f deg (CPU %.2f); below the surface %d -> %s\n",
 		F, NvrRtRoughCode(0.35f), NvrRtRoughOf(NvrRtRoughCode(0.35f)), count[1], gpuMean[1], cpuMean[1], meanDirOff[1], NvrRtRoughCode(0.125f),
 		NvrRtRoughOf(NvrRtRoughCode(0.125f)), count[2], gpuMean[2], cpuMean[2], below, okGold && okChrome && below == 0 ? "ok" : "BAD");

@@ -52,11 +52,16 @@ float RtSpotCone(float code, vec3 toPoint) {
 }
 
 // The flashlight's light: the lamp's x its cone squared (FlashlightDeferred.hlsl att = falloff x cone x cone)
+// (2026-11-08 perf-reflfix3, test 11: a big white orb round the reflected player's head) x RtSpotNear: nothing within 24 units of the
+// light, full from 48: the flashlight sits on the player, and what a reflection ray meets right there is the player's own head / body (the
+// falloff is 1 at d = 0 and part of the head lies inside the cone); the game's own pass never lights it there (its shadow map and the
+// G-buffer: the player's head is not drawn in first person, and in third person the light leaves from in front of it)
+float RtSpotNear(float d) { return smoothstep(24.0, 48.0, d); }
 vec3 RtSpotLight(vec4 pos, vec4 col, float code, vec3 hitW, vec3 n) {
 	const vec3 l = RtLampLight(pos, col, hitW, n);
 	if (!(dot(l, l) > 0.0)) return l;
 	const float s = RtSpotCone(code, normalize(hitW - pos.xyz));
-	return l * (s * s);
+	return l * (s * s * RtSpotNear(length(hitW - pos.xyz)));
 }
 
 #endif

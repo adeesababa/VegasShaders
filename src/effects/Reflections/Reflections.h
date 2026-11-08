@@ -16,6 +16,7 @@ public:
 		float	Roughness;		// dry surfaces (0 mirror .. 1 matte)
 		bool	MirrorSmoothOnly;	// 2026-11-06: Mirror only on surfaces whose own roughness is under 0.05 (the test room's mirror panels)
 		bool	KeepFlashlight;		// 2026-11-07 (perf-reflfix2): the Vulkan composite keeps the flashlight's highlight under the reflection
+		float	MirrorLampHighlight;	// 2026-11-08 (perf-reflfix3): the point lamps' highlight left on mirror / chrome pixels the reflection covers (0..1)
 		float	Mirror;			// 2026-11-05: 0 real stone/tile (F0 0.04) .. 1 a true mirror (F0 1): how much of the reflection shows at any angle
 		float	WetRoughness;	// wet surfaces
 		float	MaxDistance;	// ray length, game units

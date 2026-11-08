@@ -129,3 +129,16 @@ Tester (RTX 4090, test 10, the RT test room) and the flashlight team. docs/next/
   sphere (the denoiser off: the bounce then stays sharp, report it), the beam's spot on screen but not in the mirror (HitFlashlight off,
   or HitLamps off).
 - RT test host scenes `reflorbs`, `reflbounce` (`tools/nvr-rt-host/run.ps1 -Scene reflorbs`).
+
+## Steady gold in mirrors, the flashlight near the player, undrawn hair (2026-11-08, perf-reflfix3)
+docs/next/RT-PATH-TRACING.md "Team perf-reflfix3" has the numbers.
+- **MetalBounce on rough metal** (roughness 0.1 and up: gold, brass): the bounce's GGX sample is fixed per pixel (one of 9 lobe points by
+  its place in a 3 x 3 block) and Resolve averages each bouncing pixel with its neighbours on the same metal: the lobe's 9-ray mean, the
+  same every frame (test 11 drew a new sample each frame and a mirror keeps no history: the gold shimmered). Chrome keeps one exact ray.
+- **HitFlashlight**: no light within 24 units of the flashlight, full from 48 (the reflected head was a white orb). KeepFlashlight's glint
+  is capped at 2 linear (was 8).
+- **Hair**: RT hair keeps its tint while the game is not drawing it (first person: the player's hair from the player's hair colour).
+- What correct looks like: the gold in the mirror smooth and still (a fine blur of the room, no sparkle); no orb round the reflected head
+  (the flashlight's spot on the walls stays); the player's hair its own colour in chrome and mirrors in first person. Small bright dots at
+  the lamps in mirrors and chrome are the surface's own highlight of each lamp (as on the gold on screen), not a fault.
+- **MirrorLampHighlight** (`[Shaders.Reflections.Main]`, default 0, live; the Vulkan composite): the point lamps' own highlight on mirror-smooth / chrome surfaces the reflection covers (the blooming dots) is taken out before the mix (above 1.0 linear and above its 12-pixel surroundings); the sun's and the flashlight's glints stay, the gold's soft highlights (roughness 0.15 and up) are not touched. 1 = as before. Host scene `mirrorlamp`.
