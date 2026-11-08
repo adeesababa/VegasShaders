@@ -37,9 +37,11 @@ layout(set = 2, binding = 1, std140) uniform RtConstants {
     vec4 rt5;      // 2026-11-07: x 1 = the RT reflection denoiser runs this frame (core/RtReflDenoise.h): RayGen's second noise number
                     // decorrelated, RayGen writes the march's hit distance, Resolve the hit distance (Spread .y)
                     // (2026-11-07 perf-reflfix2) y the flashlight's lamp index + 1 (0: none), z its cone (src/core/RtFlashlightCode.h)
+                    // (2026-11-08 perf-reflfix4) w MirrorJitter's code (RtMirrorJitter.glsl; 0 off)
 } rtc;
 
 #include "Rt/RtLampLight.glsl"   // (2026-11-07 perf-reflfix2) a lamp's light as the game's shaders give it
+#include "RtMirrorJitter.glsl"   // (2026-11-08 perf-reflfix4) MirrorJitter: rt5.w the code
 
 #define RtOn (rtc.rt.x > 0.5)
 #define RtDenoiserOn (rtc.rt5.x > 0.5)

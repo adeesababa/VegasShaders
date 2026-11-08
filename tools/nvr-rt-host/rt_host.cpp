@@ -170,6 +170,7 @@ struct Object {               // one instance of one mesh
 		r.hookMask = hookMask; r.hidden = hidden; r.decal = decal;
 		r.normalMap = normalMap;
 		r.kind = kind;
+		r.tinted = tinted && alphaTested;	// (2026-11-08 perf-reflfix4) the rigid hair: a TINTED static record
 		return r;
 	}
 	uint32_t mask() const { return actor ? NVR_RT_MASK_ACTOR : RtScenePick::InstanceMask(record()); }
@@ -1351,6 +1352,8 @@ static bool sceneCameraMove(Ctx& c) {
 #include "rt_host_reflfix.inl"	// (2026-11-07 perf-reflfix) smooth vertex normals at traced hits + MetalBounce (a chrome sphere in a mirror)
 #include "rt_host_reflfix2.inl"	// (2026-11-07 perf-reflfix2) RT reflections' lamps vs the game's, MetalBounce's GGX lobe, the path tracer's flashlight
 #include "rt_host_reflfix3.inl"	// (2026-11-08 perf-reflfix3) a lamp by a ceiling, the flashlight at its origin, the gold's shimmer, the player's hair tint
+#include "rt_host_reflfix4.inl"	// (2026-11-08 perf-reflfix4) the gold smooth in a mirror / chrome (5 x 5 tent), the mirror's silver F0, the hair's tint from its property
+#include "rt_host_mirroraa.inl"	// (2026-11-08 perf-reflfix4) blocky mirrors: MirrorJitter vs 4x rays vs the old centred ray
 #include "rt_host_rrrect.inl"	// (2026-11-07 perf-rr) DLSS RR at RenderScale < 1: the guide pass at the render size, the composite's rect mapping
 #include "rt_host_flashhead.inl"	// (2026-11-07 perf-flashlight) a lamp in the hidden first-person head under SameFrame lamp shadows (RtLampPrimary + RtLampTrace / Sigma + RtLampEye)
 
@@ -1420,6 +1423,7 @@ int main(int argc, char** argv) {
 	if (!registerReflFix(host)) { say("RESULT: FAIL (shared images)\n"); return 1; }	// (2026-11-07 perf-reflfix)
 	if (!registerReflFix2(host, spv)) { say("RESULT: FAIL (shaders)\n"); return 1; }	// (2026-11-07 perf-reflfix2)
 	if (!registerReflFix3(host, spv)) { say("RESULT: FAIL (shaders)\n"); return 1; }	// (2026-11-08 perf-reflfix3)
+	if (!registerReflFix4(host, spv)) { say("RESULT: FAIL (shaders)\n"); return 1; }	// (2026-11-08 perf-reflfix4)
 	if (!registerPtSplit(host)) { say("RESULT: FAIL (shared images)\n"); return 1; }	// (2026-11-07 ptaaa-denoiser)
 	gCacheShader = host.AddShader(spv + "\\RtPathTraceCache.spv");   // (2026-11-07) PTRadianceCache's resolve pass
 	gEmissiveShader = host.AddShader(spv + "\\RtEmissiveBuild.spv");   // (2026-11-07 ptaaa-emissive) PTEmissive's light list
@@ -1451,8 +1455,12 @@ int main(int argc, char** argv) {
 		{ "reflbounce", "MetalBounce's direction from the metal's GGX lobe (perf-reflfix2: gold as sharp as chrome in a mirror) vs the CPU's VNDF lobe; the exact mirror without a denoiser; the roughness code (k / 7)^2 (ReflectionsRT)", [&] { return sceneReflBounce(c); } },
 		{ "ptflashlight", "the path tracer's flashlight (lamp 0, its cone in the frame row's texel 15) in a dark room: the first hit's direct light inside / outside the cone vs the CPU in every variant (no lamp image, lamp image, PTLightGrid, PTRestirDI, PTRestirGI's tracer; the ray budget's defaults) + the picture (RtPathTrace*)", [&] { return scenePtFlashlight(c); } },
 		{ "reflnear", "RT reflections near a light (perf-reflfix3): a lamp 4 units under a ceiling vs the game's per-pixel lamp light (bounded); the flashlight's light at hits round its own origin (none within 24 units: the orb round the reflected head) (RtLampLightCheck)", [&] { return sceneReflNear(c); } },
-		{ "reflshimmer", "the gold sphere in a mirror (perf-reflfix3): test 11's per-frame bounce sample vs the fixed 9-point lobe + Resolve's 3 x 3 mean (emulated on the helper's images): shimmer of a still view, error vs the 256-ray truth (ReflectionsRT)", [&] { return sceneReflShimmer(c); } },
-		{ "hairtint", "the player's hair tint when the game never draws it (perf-reflfix3, first person): RtHairTint::For (noted at any age, the TESNPC hair colour, its byte order) (CPU)", [&] { return sceneHairTint(c); } },
+		{ "reflshimmer", "the gold sphere in a mirror (perf-reflfix3): test 11's per-frame bounce sample vs the fixed 9-point lobe + Resolve's average (perf-reflfix4: the 5 x 5 tent) (emulated on the helper's images): shimmer of a still view, error vs the 256-ray truth (ReflectionsRT)", [&] { return sceneReflShimmer(c); } },
+		{ "hairtint", "the hair's tint as the game gives it (perf-reflfix4): the shader property's +0x84 (RtHairTint::For), a noted draw and the player's TESNPC colour (R in the low byte) as fallbacks; the rigid hair's TINTED static record (CPU)", [&] { return sceneHairTint4(c); } },
+		{ "reflsmooth", "the gold seen in a mirror (shot B) and in a chrome sphere (shot A) (perf-reflfix4): Resolve's average emulated on the helper's images, test 12's 3 x 3 box vs the 5 x 5 tent: blocks (Laplacian), error vs the 64-ray stratified truth, shimmer; pictures out\\reflsmooth_*.pfm (ReflectionsRT)", [&] { return sceneReflSmooth(c); } },
+		{ "hairglow", "the RIGID hair (a static alpha-tested tinted card) in a mirror on the game's variant ReflectionsRTAlphaTexGlow (perf-reflfix4, the lead's run: the reflected hair still white): with the GLOW flag its slot-2 hair layer map replaced the tinted colour (test 12, bb2dc764); without it the texture x the tint", [&] { return sceneHairGlow(c); } },
+		{ "mirroraa", "blocky mirrors (perf-reflfix4): a mirror's outlines and hard shadow edges vs a 4-ray-a-pixel reference, still / camera pan / moving box: the old centred ray, A one ray an output pixel, B MirrorJitter (8 points + the denoiser's virtual history); the helper honours the code; the trace pass's cost (ReflectionsRT)", [&] { return sceneMirrorAA(c); } },
+		{ "mirrorf0", "MetalBounce's F0 (perf-reflfix4, ReflMetalF0.glsl): a mirror-smooth metal with a near-black texture reflects in neutral silver, the rough gold in its own colour (ReflectionsRT)", [&] { return sceneMirrorF0(c); } },
 		{ "mirrorlamp", "MirrorLampHighlight (perf-reflfix3, the lamp dots on mirrors / chrome): the composite's ReflLampHighlightScale + ring + mix on a synthetic lit mirror (point-lamp spots, a sun glint, stripes) and the gold's soft highlight (ReflHighlightCheck)", [&] { return sceneMirrorLamp(c); } },
 		{ "cameramove", "camera move with history (RtLampTraceMany)", [&] { return sceneCameraMove(c); } },
 		{ "sun", "sun shadows, half resolution, Penumbra blockers (RtSunShadow)", [&] { return sceneSun(c); } },

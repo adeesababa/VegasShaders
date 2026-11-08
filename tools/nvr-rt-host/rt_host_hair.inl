@@ -187,7 +187,7 @@ static bool sceneHairMirror(Ctx& c) {
 		if (ActorRecordFlags(a) & (NVR_RT_RECORD_TEXTURED | NVR_RT_RECORD_ALPHA_TESTED)) { bad++; say("    ActorRecordFlags (no texcoords) wrong\n"); }
 		if (ActorOpFlags(true, true) != (NVR_RT_OP_FLAG_DYNAMIC | NVR_RT_OP_FLAG_TEXCOORDS | NVR_RT_OP_FLAG_ALPHA) || ActorOpFlags(false, true) != NVR_RT_OP_FLAG_DYNAMIC ||
 			ActorOpFlags(true, false) != (NVR_RT_OP_FLAG_DYNAMIC | NVR_RT_OP_FLAG_TEXCOORDS)) { bad++; say("    ActorOpFlags wrong\n"); }
-		// no static record is ever both (RtScenePick::RecordFlags): only actors' hair is tinted
+		// a static record is both only when tinted (2026-11-08 perf-reflfix4: the rigid hair; scene hairtint): not a plain cut-out
 		Record r; r.alphaTested = true; r.textured = true; r.slot = 3;
 		if (IsTinted(RecordFlags(r))) { bad++; say("    a static record came out tinted\n"); }
 	}

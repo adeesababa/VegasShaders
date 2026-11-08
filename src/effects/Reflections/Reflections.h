@@ -85,6 +85,8 @@ public:
 		int		RtDenoiserCore;		// 0 ours (ReBLUR-style), 1 AMD FidelityFX Reflections (ported; A/B)
 		float	RtDenoiserHistory;	// frames of history at most (rough surfaces)
 		float	RtDenoiserMirrorHistory;	// frames of history at the mirror limit (growing to History by roughness 0.25)
+		int		RtMirrorJitter;			// UNOFFICIAL 2026-11-08 (perf-reflfix4) 0 off, 1 with the denoiser, 2 also under DLSS RR
+		float	RtMirrorJitterHistory;	// ... frames of history on jittered mirror pixels
 		float	RtDenoiserBlur;		// ours: the blur's widest reach (grid pixels)
 		float	RtDenoiserAntiLag;	// ours: history further than this many sigmas from this frame's neighbourhood is cut
 		float	RtDenoiserClip;		// FFX: its temporal stability (history clip weight)
@@ -213,6 +215,7 @@ private:
 	float				rtWaterScaleX = 1.0f, rtWaterScaleY = 1.0f;	// UNOFFICIAL 2026-11-03 that frame's RenderScale rect (1: native)
 	bool				rtResolved = false;	// Resolve drew this frame (the blur passes read Rt.Spread)
 	bool				rtDenoiseFrame = false;	// UNOFFICIAL 2026-11-07: this frame's RT trace feeds the RT reflection denoiser (RayGen / Resolve: rt5.x)
+	float				mirrorJitterCode = 0.0f;	// UNOFFICIAL 2026-11-08 (perf-reflfix4) this frame's MirrorJitter code (0 off): RtMirrorJitter.glsl
 	bool				RunRtDenoiser(IDirect3DDevice9* Device, IDirect3DTexture9* signal, const D3DXMATRIX* reproject);	// false: not run (the old path then)
 	void				RtDenoiseIdle();
 	bool				RtWanted() const;	// RT on, nothing failed, the RT core up (its helper alive, RT on that GPU)

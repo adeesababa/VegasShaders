@@ -107,6 +107,8 @@ const uint RecordLand = 0x01u, RecordGlow = 0x04u, RecordAlbedoKnown = 0x10u;
 // The hit's colour (rtHitAlbedo: the texture's at the hit with RT_TEX and a textured record, else the record's average)
 #define RT_RECORDS_DECLARED
 #include "RtHit.glsl"
+#include "../ReflMetalF0.glsl"   // (2026-11-08 perf-reflfix4) MetalBounce's F0: neutral silver on a mirror-smooth metal
+#include "../RtMirrorJitter.glsl"   // (2026-11-08 perf-reflfix4) MirrorJitter
 // Every query's loop (a macro: a ray query cannot be passed to a function): alpha-tested candidates are confirmed where their texel
 // passes; opaque geometry commits by itself.
 #ifdef RT_ALPHA
@@ -305,6 +307,9 @@ void main() {
 
 	// The surface as RayGen read it: ReflectionsTrace's pixel centre in the block, ViewPosition() in scene axes.
 	vec2 uv = (vec2(pixel) + 0.5) * p.layout_.xy - 0.5 * (p.layout_.xy - p.layout_.zw);
+	// (2026-11-08 perf-reflfix4) MirrorJitter: a mirror pixel's ray leaves from this frame's point of its texel (the code in -frame.y;
+	// ../RtMirrorJitter.glsl, the same point RayGen read the surface at and Resolve rebuilds)
+	if (!weapon && p.frame.y < -0.5) uv += RtMirrorJitter(-p.frame.y, ray.y - 2.0) * p.layout_.xy;
 	// (the weapon: drawn with its own narrower field of view, so its sideways offsets shrink by right.w)
 	const float side = weapon && p.right.w > 0.0 ? p.right.w : 1.0;
 	vec3 surface = p.origin.xyz + (p.forward.xyz + (p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0)) * side) * ray.x;
@@ -379,9 +384,11 @@ void main() {
 	if (p.origin.w < 0.5 && (h.flags & 4u) != 0u && MetalBounce(hitInstance, hitRough)) {
 		// (2026-11-07 perf-reflfix2) the direction from the metal's GGX lobe (BounceDirection), not always the exact mirror direction
 		const vec3 d2 = BounceDirection(dir, h.normal, h.geo, hitRough, pixel);
-		// the metal's Fresnel (Schlick): F0 = its colour (the record's texture at the hit: gold, chrome)
+		// the metal's Fresnel (Schlick): F0 = its colour (the record's texture at the hit: gold, chrome); (2026-11-08 perf-reflfix4) a
+		// mirror-smooth metal in neutral silver whatever its texture (a mirror's is near black: a mirror seen in a mirror was black;
+		// ../ReflMetalF0.glsl, the composites' rule)
 		const float c = clamp(dot(h.normal, -dir), 0.0, 1.0);
-		const vec3 f0 = clamp(h.albedo, vec3(0.0), vec3(1.0));
+		const vec3 f0 = ReflMetalF0(h.albedo, hitRough);
 		const vec3 tint = f0 + (vec3(1.0) - f0) * pow(1.0 - c, 5.0);
 		const vec3 off = hitPos + h.geo * max(1.0, t * 0.001);
 		rayQueryEXT q2;

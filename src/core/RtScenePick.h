@@ -111,6 +111,8 @@ namespace RtScenePick {
 		bool		hidden = false;				// (2026-11-07) the player's body in first person: traced, not drawn (NVR_RT_CUSTOM_HIDDEN)
 		bool		decal = false;				// (2026-11-07) a decal (alpha-tested; NVR_RT_CUSTOM_DECAL)
 		uint32_t	kind = NVR_RT_KIND_PLAIN;	// (2026-11-07 ptaaa-materials) the path tracer's material kind (NvrRtProtocol.h NVR_RT_KIND_*)
+		bool		tinted = false;				// (2026-11-08 perf-reflfix4) the game's hair (rigid: hair, beards, brows), with alphaTested only:
+												// TINTED as the actors' hair (ActorRecordFlags), its albedo the tint's linear colour
 	};
 
 	// (2026-11-07) a decal's alpha reference for the traced test (D3DCMP_GREATER): its own with the alpha test on; blended only (most decals:
@@ -168,7 +170,8 @@ namespace RtScenePick {
 	// ALPHA-TESTED: its record carries NVR_RT_RECORD_ALPHA_TESTED + its reference + its atlas slot, its structure is built non-opaque
 	// (NVR_RT_OP_FLAG_ALPHA), and it keeps the actors' mask (0x20): every ray that tests alpha (RtAlpha.glsl rtAlphaPass) cuts it out; rays
 	// traced opaque see it solid, as before. Skin (SkinTexturePath: bodies, heads, hands) stays opaque whatever its alpha property says.
-	// Hair is tinted by the game (the hair shaders' HairTint, c2: the albedo x 2 x tint; Render.cpp notes it per geometry): such a record
+	// Hair is tinted by the game (the hair shaders' HairTint, c2: the albedo x 2 x tint; (2026-11-08 perf-reflfix4) read from the part's
+	// shader property, RtHairTint.h; the vanilla hair is rigid: RecordFlags' tinted, the same two bits): such a record
 	// is TINTED: ALPHA_TESTED and TEXTURED both set (never both otherwise), its albedo rgb the tint's LINEAR colour, which RtHit.glsl
 	// rtHitMap multiplies into the texture's colour (x kTintScale = 2^2.2: the game's x 2 in the stored curve); the albedo alone (no
 	// texture: the averages-only shaders) is the hair's colour.
@@ -258,6 +261,7 @@ namespace RtScenePick {
 		uint32_t flags = (r.land ? NVR_RT_RECORD_LAND : 0u) | (r.albedoKnown ? NVR_RT_RECORD_ALBEDO_KNOWN : 0u) | (r.glowMap ? NVR_RT_RECORD_GLOW : 0u);
 		if (r.alphaTested) flags |= NVR_RT_RECORD_ALPHA_TESTED | ((r.alphaRef & 0xFFu) << 8) | ((uint32_t)r.slot << 16);
 		else if (r.textured) flags |= NVR_RT_RECORD_TEXTURED | ((uint32_t)r.slot << 16);
+		if (r.alphaTested && r.tinted) flags |= NVR_RT_RECORD_TEXTURED;	// (2026-11-08 perf-reflfix4) TINTED (both bits): the rigid hair
 		if ((r.alphaTested || r.textured) && r.normalMap) flags |= NVR_RT_RECORD_NORMAL;
 		if ((r.alphaTested || r.textured) && r.materialRule) {	// the material rule's roughness / metal in bits 26-31 (NvrRtProtocol.h)
 			if (r.rough >= 0.0f) flags |= NvrRtRoughCode(r.rough) << NVR_RT_RECORD_ROUGH_SHIFT;	// (2026-11-07 perf-reflfix2: (k / 7)^2, finer near 0)

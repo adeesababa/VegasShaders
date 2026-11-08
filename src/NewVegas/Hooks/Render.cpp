@@ -3652,6 +3652,9 @@ namespace MaterialDraw {
 		ReflMaterial::DrawBegin(device, false, c.world, c.firstPerson, c.pass ? c.pass->passEnum : 0, c.pixelShader, s);
 		StillNext[Slot](renderer, edx, geometry);
 		ReflMaterial::DrawEnd(device, s);
+		// (2026-11-08 perf-reflfix4) the rigid hair, beards and brows draw HERE (the vanilla hair NIFs hold no skin instance): its c2, noted as
+		// a fallback and a cross-check of the property's tint (RtHairTint.h; RtCore reads the property itself)
+		if (c.world) RtHairTint::NoteHairDraw(geometry, c.pixelShader, device, false);
 	}
 }
 

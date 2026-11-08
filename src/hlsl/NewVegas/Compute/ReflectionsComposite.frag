@@ -4,6 +4,7 @@
 #extension GL_GOOGLE_include_directive : enable
 #include "Reflections.glsl"
 #include "ReflLampHighlight.glsl"   // (2026-11-08 perf-reflfix3) MirrorLampHighlight
+#include "ReflMetalF0.glsl"         // (2026-11-08 perf-reflfix4) metal's F0: neutral silver on a mirror
 
 // UNOFFICIAL 2026-11-08 (perf-reflfix3) MirrorLampHighlight: the ring round the pixel (8 taps at cb.mirrorLamp.y full-resolution pixels, the
 // same surface: depth within 5 % + 4 units) for ReflLampHighlightScale, and what to keep: the sun's glint (the reflected direction within
@@ -116,9 +117,11 @@ void main() {
     vec3 f0 = vec3(0.04);   // (2026-11-07 perf-reflfix2: the share's F0, for the flashlight's highlight)
     if (MaterialOn) {
         // MaterialAware: metal reflects in its own colour (F0 = its albedo, guessed from the lit colour's hue), the rest at the F0 above.
+        // (2026-11-08 perf-reflfix4) a mirror-smooth metal in neutral silver, not its lit colour's hue (that is the lamps': the mirror
+        // turned the reflected room orange under warm lamps): ReflMetalF0.glsl
         vec3 litColour = linearize(color.rgb);
         vec3 tint = saturate(litColour / max(max(litColour.r, max(litColour.g, litColour.b)), 1.0e-4));
-        f0 = mix(vec3(dielectricF0), tint, SurfaceMetal);
+        f0 = mix(vec3(dielectricF0), ReflMetalF0(tint, roughness), SurfaceMetal);
         share = saturate(amount * EnvironmentFresnelF0(roughness, saturate(dot(-V, N)), f0)) * saturate(reflection.a);
     }
     else if (SurfaceMirror > 0.0) { f0 = vec3(dielectricF0); share = saturate(amount * EnvironmentFresnelF0(roughness, saturate(dot(-V, N)), vec3(dielectricF0))) * saturate(reflection.a); }

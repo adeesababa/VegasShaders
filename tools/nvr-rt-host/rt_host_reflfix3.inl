@@ -4,8 +4,7 @@
 //                hits round its own origin (the orb round the reflected player's head): nothing within 24 units, full from 48
 //   reflshimmer  the gold sphere in the mirror: test 11's per-frame bounce sample vs the fixed 9-point lobe + Resolve's 3 x 3 mean
 //                (frame-to-frame shimmer of a still view, error vs the 64-ray truth)
-//   hairtint     the player's hair tint when the game never draws it (first person): RtHairTint::For (noted at any age, the player's
-//                TESNPC hair colour, its byte order checked against a drawn tint)
+//   (hairtint    moved to rt_host_reflfix4.inl, 2026-11-08 perf-reflfix4: the tint now from the hair's shader property)
 // Included by rt_host.cpp after rt_host_reflfix2.inl (gR2.lampCheck, LampCheckConstants, uvSphere, angleDeg, vndfReflect, gRF).
 
 // ---- reflnear -------------------------------------------------------------------------------------------------------------------
@@ -156,10 +155,14 @@ static bool sceneReflShimmer(Ctx& c) {
 		V3 total = colourAt(hit, shade, p);
 		const uint32_t cls = (fl & 256u) ? ((fl & 1u) | ((fl >> 1u) & 2u)) : 0u;
 		if (cls == 0u) return total;
-		float count = 1;
+		// (2026-11-08 perf-reflfix4) Resolve's 5 x 5 tent now (weights (3 - |dx|)(3 - |dy|); first hits within 25 % + 32): scene reflsmooth
+		total = total * 9.0f;
+		float count = 9;
+		int taken = 1;
 		const int x = int(p % S), y = int(p / S);
-		for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
+		for (int dy = -2; dy <= 2; dy++) for (int dx = -2; dx <= 2; dx++) {
 			if (!dx && !dy) continue;
+			const float wgt = float((3 - std::abs(dx)) * (3 - std::abs(dy)));
 			const int nx = x + dx, ny = y + dy;
 			if (nx < 0 || ny < 0 || nx >= int(S) || ny >= int(S)) continue;
 			const UINT q = UINT(ny) * S + UINT(nx);
@@ -169,10 +172,10 @@ static bool sceneReflShimmer(Ctx& c) {
 			if (hit[q * 4] <= 0 || !(nf & 256u) || ((nf & 1u) | ((nf >> 1u) & 2u)) != cls) { reject[2]++; continue; }
 			auto hitPoint = [&](UINT k) { const UINT kx = k % S, ky = k / S;
 				return cam.ray((kx + 0.5f) / S, (ky + 0.5f) / S) * ray[k * 2] + octDecode(dir[k * 2], dir[k * 2 + 1]) * hit[k * 4]; };
-			if (length(hitPoint(q) - hitPoint(p)) > hit[p * 4] * 0.1f + 16.0f) { reject[3]++; continue; }
-			total = total + colourAt(hit, shade, q); count += 1;
+			if (length(hitPoint(q) - hitPoint(p)) > hit[p * 4] * 0.25f + 32.0f) { reject[3]++; continue; }
+			total = total + colourAt(hit, shade, q) * wgt; count += wgt; taken++;
 		}
-		avgCount += count; avgCalls++;
+		avgCount += taken; avgCalls++;
 		return total * (1.0f / count);
 	};
 	auto lum = [](V3 v) { return 0.2126 * v.x + 0.7152 * v.y + 0.0722 * v.z; };
@@ -222,7 +225,7 @@ static bool sceneReflShimmer(Ctx& c) {
 	say("    test 11 (a new random sample each frame, no history on a mirror): shimmer %.4f, one frame vs the truth RMS %.4f, 16 frames' mean %.4f\n",
 		before.shimmer, before.errOne, before.errMean);
 	say("    one fixed sample, no average (what the 3 x 3 mean starts from):    shimmer %.4f, one frame %.4f\n", sharp.shimmer, sharp.errOne);
-	say("    now (the fixed 9-point lobe + Resolve's 3 x 3 mean):              shimmer %.4f, one frame vs the truth RMS %.4f (%.1f samples a pixel)\n", after.shimmer, after.errOne,
+	say("    now (the fixed 9-point lobe + Resolve's 5 x 5 tent, perf-reflfix4): shimmer %.4f, one frame vs the truth RMS %.4f (%.1f samples a pixel)\n", after.shimmer, after.errOne,
 		avgCalls ? avgCount / avgCalls : 0.0);
 	say("    (neighbours left out: no own ray %d, another surface %d, not the same bounce %d, another first hit %d)\n", reject[0], reject[1], reject[2], reject[3]);
 	const bool ok = after.n > 200 && after.shimmer < 1e-6 && after.errOne < 0.7 * before.errOne && before.shimmer > 0.01;
@@ -301,44 +304,3 @@ static bool sceneMirrorLamp(Ctx& c) {
 	return ok;
 }
 
-// ---- hairtint (CPU) -------------------------------------------------------------------------------------------------------------
-static bool sceneHairTint(Ctx&) {
-	int bad = 0;
-	auto near3 = [](const float* a, float r, float g, float b) { return std::fabs(a[0] - r) < 1e-4f && std::fabs(a[1] - g) < 1e-4f && std::fabs(a[2] - b) < 1e-4f; };
-	RtHairTint::Clear(); RtHairTint::ColorOrder = 0; RtHairTint::OrderCalibrated = false;
-	const int playerGeo = 1, npcGeo = 2;
-	// Sunny Smiles' HCLR (66, 28, 15) as 0x00RRGGBB (kNVSE GetHairColor's order)
-	const uint32_t packed = (66u << 16) | (28u << 8) | 15u;
-	float rgb[3];
-	// 1. first person, never drawn: the player's Hair-flagged part takes the TESNPC colour; a non-hair alpha part (eyes, fringe) nothing
-	int how = RtHairTint::For(&playerGeo, true, true, packed, rgb);
-	if (how != 2 || !near3(rgb, 66 / 255.0f, 28 / 255.0f, 15 / 255.0f)) { bad++; say("    player hair, not drawn: %d %.3f %.3f %.3f\n", how, rgb[0], rgb[1], rgb[2]); }
-	if (RtHairTint::For(&playerGeo, false, true, packed, rgb) != 0) { bad++; say("    a non-hair player part got a tint\n"); }
-	if (RtHairTint::For(&npcGeo, true, false, 0, rgb) != 0) { bad++; say("    an NPC's undrawn hair got a tint\n"); }
-	// 2. a draw noted long ago (test 11 dropped it after 600 frames): still used
-	RtHairTint::Frame = 100;
-	RtHairTint::Wanted = true;
-	{ RtHairTint::Tint t; t.rgb[0] = 0.5f; t.rgb[1] = 0.25f; t.rgb[2] = 0.125f; t.frame = 100; RtHairTint::Tints[&npcGeo] = t; }
-	RtHairTint::Frame = 100 + 5000;
-	float old[3];
-	const bool oldFind = RtHairTint::Find(&npcGeo, old);   // (test 11's lookup)
-	if (RtHairTint::For(&npcGeo, true, false, 0, rgb) != 1 || !near3(rgb, 0.5f, 0.25f, 0.125f) || oldFind) { bad++; say("    an old noted tint: lost (test 11's Find: %d)\n", oldFind ? 1 : 0); }
-	// 3. the byte order: a drawn tint of the player in the other order (R in the low byte) flips it
-	RtHairTint::ColorOrder = 0; RtHairTint::OrderCalibrated = false;
-	const uint32_t lowR = 66u | (28u << 8) | (15u << 16);
-	{ RtHairTint::Tint t; t.rgb[0] = 66 / 255.0f; t.rgb[1] = 28 / 255.0f; t.rgb[2] = 15 / 255.0f; t.frame = RtHairTint::Frame; RtHairTint::Tints[&playerGeo] = t; }
-	RtHairTint::For(&playerGeo, true, true, lowR, rgb);
-	const int otherGeo = 3;
-	how = RtHairTint::For(&otherGeo, true, true, lowR, rgb);   // (another of the player's hair parts, never drawn)
-	if (!RtHairTint::OrderCalibrated || RtHairTint::ColorOrder != 1 || how != 2 || !near3(rgb, 66 / 255.0f, 28 / 255.0f, 15 / 255.0f)) {
-		bad++; say("    byte order: calibrated %d order %d -> %.3f %.3f %.3f\n", RtHairTint::OrderCalibrated ? 1 : 0, RtHairTint::ColorOrder, rgb[0], rgb[1], rgb[2]);
-	}
-	RtHairTint::Clear(); RtHairTint::Wanted = false; RtHairTint::ColorOrder = 0; RtHairTint::OrderCalibrated = false;
-	// the record's colour then: the tint's linear colour (RtScenePick::TintLinear), what RtHit.glsl multiplies the grey texture by
-	const float lin[3] = { RtScenePick::TintLinear(66 / 255.0f), RtScenePick::TintLinear(28 / 255.0f), RtScenePick::TintLinear(15 / 255.0f) };
-	say("  the player's hair not drawn (first person): the TESNPC colour (66, 28, 15) -> the record's tint %.4f %.4f %.4f (linear; test 11: none, "
-		"grey hair); a tint noted 5000 frames ago still used (test 11: dropped after 600); a drawn tint fixes the colour's byte order; %d wrong -> %s\n",
-		lin[0], lin[1], lin[2], bad, bad ? "BAD" : "ok");
-	say("  (the tinted record's colour on the GPU: scene hairmirror, a grey hair card x a known tint)\n");
-	return bad == 0;
-}

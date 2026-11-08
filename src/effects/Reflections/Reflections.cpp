@@ -20,6 +20,10 @@
 #include "RtReflLamps.h"	// UNOFFICIAL 2026-11-07 (perf-reflfix2)
 #include "../../core/FlashlightDeferred.h"	// UNOFFICIAL 2026-11-07 (perf-reflfix2) the flashlight lights RT hits and keeps its highlight in the composite
 #include "../../core/RtFlashlightCode.h"
+#include "../../core/Paths.h"	// UNOFFICIAL 2026-11-08 (perf-reflfix4) the shader files' check (LogReflShaderFiles)
+#include <fstream>
+#include <iterator>
+#include <string>
 
 void ReflectionsEffect::UpdateSettings() {
 	// UNOFFICIAL 2026-10-18: the frames drawn with the settings that are about to be replaced. 2026-10-19: only while the F10
@@ -113,6 +117,8 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.RtDenoiserAntiLag = std::clamp(TheSettingManager->GetSettingF(rt, "DenoiserAntiLag"), 0.5f, 16.0f);
 	Settings.RtDenoiserClip = std::clamp(TheSettingManager->GetSettingF(rt, "DenoiserClip"), 0.1f, 4.0f);
 	Settings.RtDenoiserDebugView = std::clamp(TheSettingManager->GetSettingI(rt, "DenoiserDebugView"), 0, 6);
+	Settings.RtMirrorJitter = std::clamp(TheSettingManager->GetSettingI(rt, "MirrorJitter"), 0, 2);	// UNOFFICIAL 2026-11-08 (perf-reflfix4)
+	Settings.RtMirrorJitterHistory = std::clamp(TheSettingManager->GetSettingF(rt, "MirrorJitterHistory"), 2.0f, 32.0f);
 }
 
 // --- UNOFFICIAL 2026-10-28 RT reflections (docs/next/FORK-RT-REFLECTIONS.md; Compute\ReflectionsRT.glsl has the whole frame) -----------
@@ -249,6 +255,15 @@ namespace {
 		if (glow) images[count++] = glowAtlas;
 		images[count++] = RtImageBounce;	// (2026-11-07 perf-reflfix) always last: ReflectionsRTBody.glsl RT_BOUNCE_BINDING
 		const int shader = alpha ? (glow ? RtShaderAlphaTexGlow : tex ? RtShaderAlphaTex : RtShaderAlpha) : (glow ? RtShaderTexGlow : tex ? RtShaderTex : RtShader);
+		{	// (2026-11-08 perf-reflfix4) which trace variant runs, once a change (the lead's in-game check)
+			static int toldShader = -2;
+			if (toldShader != shader) {
+				toldShader = shader;
+				Logger::Log("UNOFFICIAL RT reflections (perf-reflfix4): trace variant %s (alpha-tested casters %d, hit textures %d, glow maps %d)",
+					alpha ? (glow ? "ReflectionsRTAlphaTexGlow" : tex ? "ReflectionsRTAlphaTex" : "ReflectionsRTAlpha") : (glow ? "ReflectionsRTTexGlow" : tex ? "ReflectionsRTTex" : "ReflectionsRT"),
+					alpha ? 1 : 0, tex ? 1 : 0, glow ? 1 : 0);
+			}
+		}
 		const UINT gridW = RtTraceWidth ? RtTraceWidth : RtWidth(), gridH = RtTraceHeight ? RtTraceHeight : RtHeight();	// (2026-11-03: the rect in rect frames)
 		if (!RtCore::AddPass(shader, images, count, 0xC, &RtPending, sizeof(RtPending), (gridW + 7) / 8, (gridH + 7) / 8)) return;
 		RtRecorded = RtCore::CopyOut(RtImageHit, rt.HitSurface) && RtCore::CopyOut(RtImageShade, rt.ShadeSurface) && RtCore::CopyOut(RtImageBounce, rt.BounceSurface);
@@ -267,8 +282,58 @@ float ReflectionsEffect::WeaponFovScale() const {
 	return tanf(world * toRad) / tanf(first * toRad);
 }
 
+// UNOFFICIAL 2026-11-08 (perf-reflfix4) one log line that says whether the installed shader files are this build's: the fixes of test 12's
+// mirror (ReflectionsComposite.spv: a mirror-smooth metal's F0 neutral silver; ReflectionsRTResolve.spv: the rough metal's 5 x 5 tent, no
+// blocks; Rt\ReflectionsRT*.spv: MetalBounce's silver F0) live in shader files the user copies by hand, and a stale one keeps the old look.
+// FNV-1a of each file's bytes vs the build's (kept in step with the committed .spv); Effects\Reflections.fx.hlsl (the D3D9 composite,
+// compiled at run time; line endings may differ) by its marker.
+static UInt32 ReflFileHash(const char* path, bool& found) {
+	found = false;
+	FILE* f = nullptr;
+	if (fopen_s(&f, path, "rb") || !f) return 0;
+	found = true;
+	UInt32 h = 2166136261u;
+	unsigned char buffer[4096];
+	size_t n;
+	while ((n = fread(buffer, 1, sizeof(buffer), f)) > 0) for (size_t i = 0; i < n; i++) { h ^= buffer[i]; h *= 16777619u; }
+	fclose(f);
+	return h;
+}
+static void LogReflShaderFiles() {
+	struct Want { const char* name; UInt32 hash; };
+	static const Want wants[] = {	// (perf-reflfix4: tools\nvr-dxvk\compile-compute.sh output, committed)
+		{ "ReflectionsComposite", 0x7814C70Fu }, { "ReflectionsRTResolve", 0xE62AE144u }, { "ReflectionsRayGen", 0xC023A81Eu },	// (+ MirrorJitter: RayGen, the denoiser's reproject)
+		{ "RtReflDenoiseOursReproject", 0x78BCC94Du }, { "Rt\\ReflectionsRT", 0x3641D1CCu },
+		{ "Rt\\ReflectionsRTAlpha", 0x05B1BA2Cu }, { "Rt\\ReflectionsRTTex", 0x2D3057FCu }, { "Rt\\ReflectionsRTTexGlow", 0x336E2B80u },
+		{ "Rt\\ReflectionsRTAlphaTex", 0x4C556DF2u }, { "Rt\\ReflectionsRTAlphaTexGlow", 0x61957805u },
+	};
+	char line[1024];
+	int n = sprintf_s(line, "UNOFFICIAL Reflections shader files (perf-reflfix4: silver mirror F0, rough metal's 5 x 5 tent, MirrorJitter):");
+	int stale = 0;
+	for (const Want& w : wants) {
+		char path[MAX_PATH];
+		_snprintf_s(path, sizeof(path), _TRUNCATE, "%s%s.spv", Paths::ComputeDir(), w.name);
+		bool found;
+		const UInt32 h = ReflFileHash(path, found);
+		const bool ok = found && h == w.hash;
+		if (!ok) stale++;
+		if (n > 0 && n < (int)sizeof(line) - 96) n += sprintf_s(line + n, sizeof(line) - n, " %s %s;", w.name, !found ? "MISSING" : ok ? "this build's" : "OLD (copy the new one)");
+	}
+	{
+		char path[MAX_PATH];
+		_snprintf_s(path, sizeof(path), _TRUNCATE, "%sReflections.fx.hlsl", Paths::EffectsDir());
+		std::ifstream file(path, std::ios::binary);
+		std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+		const bool has = text.find("perf-reflfix4") != std::string::npos;
+		if (!has) stale++;
+		if (n > 0 && n < (int)sizeof(line) - 96) n += sprintf_s(line + n, sizeof(line) - n, " Effects\\Reflections.fx.hlsl %s", !file ? "MISSING" : has ? "this build's" : "OLD (copy the new one)");
+	}
+	Logger::Log("%s%s", line, stale ? " -> some are not this build's: the old look stays where they are used" : " -> all this build's");
+}
+
 // Once, before the RT core's first frame (ShaderManager, with the other RT users).
 void ReflectionsEffect::RtRegister() {
+	LogReflShaderFiles();	// UNOFFICIAL 2026-11-08 (perf-reflfix4)
 	RtEffect = this;
 	RtShader = RtCore::AddShader("ReflectionsRT");
 	RtShaderAlpha = RtCore::AddShader("ReflectionsRTAlpha");	// UNOFFICIAL 2026-10-29
@@ -389,7 +454,7 @@ bool ReflectionsEffect::RtTrace(IDirect3DDevice9* Device, IDirect3DSurface9* tar
 		// frame) because something averages the frames: the RT reflection denoiser, or DLSS RR (the raw resolve); without either the bounce
 		// stays the exact mirror direction (a mirror pixel keeps no Temporal history: the samples' noise would show as it is)
 		RtPending.frame = D3DXVECTOR4((float)(TheFrameRateManager->FrameNumber & 0xFFFFu),
-			0.0f, (float)(RtFlashIndex + 1), RtFlashCode);	// zw: the flashlight (perf-reflfix2); y 0 (2026-11-08 perf-reflfix3: the bounce's lobe sample is fixed per pixel, ReflectionsRTBody.glsl; 2 = test 11's per-frame sample, the host's test only)
+			-mirrorJitterCode, (float)(RtFlashIndex + 1), RtFlashCode);	// (2026-11-08 perf-reflfix4) y: -MirrorJitter's code (0 off)	// zw: the flashlight (perf-reflfix2); y 0 (2026-11-08 perf-reflfix3: the bounce's lobe sample is fixed per pixel, ReflectionsRTBody.glsl; 2 = test 11's per-frame sample, the host's test only)
 		static GpuTimer exchangeTimer("  Reflections RT (exchange)");
 		GpuProfileScope gpu(exchangeTimer, Device);
 		traced = RtCoreClient::Exchange(Device, RtUser) && RtRecorded;
@@ -604,6 +669,29 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 	// UNOFFICIAL 2026-11-07 the RT reflection denoiser (core/RtReflDenoise.h): on frames the RT trace runs, native (rect frames keep the
 	// old chain: their passes are D3D9), not under DLSS RR (it wants the raw signal). Decided before RayGen (it changes RayGen's noise).
 	rtDenoiseFrame = Settings.RtDenoiser && RtWanted() && RtCoreClient::Ready() && !rrRaw && !RenderRect::Active() && !Settings.RtSplitTest;
+	// UNOFFICIAL 2026-11-08 (perf-reflfix4, "fix blocky mirrors") MirrorJitter: this frame's point of the texel for mirror pixels' rays
+	// (Compute/RtMirrorJitter.glsl): 8 Halton (2, 3) points, only while the denoiser keeps a history for them (1), or also under DLSS RR (2,
+	// RR averages the raw rays itself). Elsewhere (no denoiser, rect frames, RR with 1) the old fixed centre ray.
+	{
+		const bool on = Settings.RtMirrorJitter > 0 && RtWanted() && RtCoreClient::Ready() && (rtDenoiseFrame || (Settings.RtMirrorJitter > 1 && rrRaw));
+		mirrorJitterCode = 0.0f;
+		if (on) {
+			auto halton = [](UInt32 i, UInt32 b) { float f = 1.0f, r = 0.0f; for (i += 1; i > 0; i /= b) { f /= (float)b; r += f * (float)(i % b); } return r; };
+			const UInt32 k = TheFrameRateManager->FrameNumber & 7u;
+			const int qx = std::clamp((int)(halton(k, 2) * 64.0f), 0, 63), qy = std::clamp((int)(halton(k, 3) * 64.0f), 0, 63);
+			mirrorJitterCode = (float)(1 + qx + 64 * qy);
+		}
+		const int state = !Settings.RtMirrorJitter ? 0 : on ? (rrRaw ? 2 : 1) : rrRaw ? 3 : RenderRect::Active() ? 4 : !Settings.RtDenoiser ? 5 : 6;
+		static int toldState = -1, toldCount = 0;
+		if (RtWanted() && RtCoreClient::Ready() && state != toldState && toldCount < 16) {
+			toldCount++;
+			toldState = state;
+			static const char* const why[7] = { "off (the setting)", "on: mirror rays jittered over 8 points of their texel, the reflection denoiser keeps a short history on mirrors",
+				"on under DLSS RR (RR averages the jittered rays)", "off this frame: DLSS RR (MirrorJitter 2 jitters under RR)", "off this frame: RenderScale < 1 (no denoiser history there)",
+				"off: the reflection denoiser is off ([Shaders.Reflections.RT] Denoiser)", "off this frame (the denoiser does not run)" };
+			Logger::Log("UNOFFICIAL RT reflections MirrorJitter (perf-reflfix4): %s (history %.0f frames)", why[state], Settings.RtMirrorJitterHistory);
+		}
+	}
 	const D3DXMATRIX& view = TheRenderManager->viewMatrix;
 	const D3DXMATRIX& invView = TheRenderManager->InvViewMatrix;
 
@@ -1218,7 +1306,7 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 		rtu.rt3 = D3DXVECTOR4(Settings.RtVndf ? 1.0f : 0.0f, Settings.RtRoughShare, Settings.RtContactSpread, Settings.RtGlowBrightness);
 		rtu.rt4 = D3DXVECTOR4(Settings.RtHitAmbientGrid ? 1.0f : 0.0f, Settings.RtRayReuse ? 1.0f : 0.0f, Settings.RtReuseRoughness, Settings.RtShadeOffscreen ? 1.0f : 0.0f);	// UNOFFICIAL 2026-10-30 / 31; w 2026-11-05 ShadeOffscreen
 		memcpy(rtu.lamps, RtLampData, sizeof(RtLampData));
-		rtu.rt5 = D3DXVECTOR4(rtDenoiseFrame ? 1.0f : 0.0f, (float)(RtFlashIndex + 1), RtFlashCode, 0.0f);	// (perf-reflfix2: yz the flashlight)	// UNOFFICIAL 2026-11-07 the RT reflection denoiser
+		rtu.rt5 = D3DXVECTOR4(rtDenoiseFrame ? 1.0f : 0.0f, (float)(RtFlashIndex + 1), RtFlashCode, mirrorJitterCode);	// (2026-11-08 perf-reflfix4) w MirrorJitter	// (perf-reflfix2: yz the flashlight)	// UNOFFICIAL 2026-11-07 the RT reflection denoiser
 		ID3D9NvrExtBuffer* rtBuffer = extRtUniforms.Buffer;
 		if (!rtBuffer || memcmp(&rtu, &RtUploaded, sizeof(rtu))) {
 			rtBuffer = ExtUniforms(extRtUniforms, &rtu, sizeof(rtu));
@@ -1317,6 +1405,9 @@ bool ReflectionsEffect::RunRtDenoiser(IDirect3DDevice9* Device, IDirect3DTexture
 	const RtHistoryTime::Clock historyClock = RtDenoise::HistoryClock();
 	s.MaxSamples = RtHistoryTime::Frames(Settings.RtDenoiserHistory, historyClock);
 	s.MirrorHistory = RtHistoryTime::Frames(Settings.RtDenoiserMirrorHistory, historyClock);
+	// (2026-11-08 perf-reflfix4) MirrorJitter: mirror pixels are jittered this frame: they keep a history too (MirrorJitterHistory frames,
+	// virtual reprojection + anti-lag as glossy pixels); without it they pass through as before
+	if (mirrorJitterCode > 0.0f) { s.MirrorRoughness = 0.0f; s.MirrorHistory = RtHistoryTime::Frames(Settings.RtMirrorJitterHistory, historyClock); }
 	s.BlurRadius = Settings.RtDenoiserBlur;
 	s.AntiLag = Settings.RtDenoiserAntiLag;
 	s.ClipWeight = Settings.RtDenoiserClip;
