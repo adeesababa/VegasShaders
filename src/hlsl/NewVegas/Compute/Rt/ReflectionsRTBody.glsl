@@ -31,7 +31,11 @@ layout(set = 0, binding = 1, std140) uniform Pass {
 	                    // (2026-10-29: size.z Distance is the mirror's reach; a rough ray reaches less, down to RoughReach x it at roughness 1)
 	vec4 layout_;       // xy one half-resolution texel in screen uv, zw one full-resolution texel (RayGen's pixel centre rule)
 	vec4 lamps[24];     // 2026-10-29: [2i] xyz the lamp in scene space, w its reach; [2i + 1] rgb its colour x dimmer (TESR gamma), w unused
+	                    // (2026-11-07 perf-reflfix2: [2i + 1] rgb the game's colour, LINEAR, w its falloff: RtLampLight.glsl)
+	vec4 frame;         // (2026-11-07 perf-reflfix2) x a frame number (0..65535, wraps): MetalBounce's GGX sample changes every frame;
+	                    // y 1 = that sample is wanted (a denoiser averages the frames); z the flashlight's lamp index + 1 (0: none), w its cone
 } p;
+#include "RtLampLight.glsl"   // (2026-11-07 perf-reflfix2) the lamps as the game's shaders light them (Resolve's RtShadeHit uses the same)
 layout(set = 0, binding = 2, rg32f) uniform readonly image2D dirImage;      // RayGen: the reflected direction, octahedral (world = scene axes)
 layout(set = 0, binding = 3, rg32f) uniform readonly image2D rayImage;      // RayGen: x the surface's view z (0: nothing), y roughness (+2: cast)
 layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D hitImage;
@@ -174,11 +178,9 @@ HitShade ShadeHit(uint instance, uint prim, vec2 bary, mat3 toScene, vec3 hitPos
 		int key = -1;
 		float best = 0.0;
 		int count = int(floor(p.forward.w));
-		for (int i = 0; i < count; i++) {
-			vec3 toLamp = p.lamps[2 * i].xyz - hitPos;
-			float d = length(toLamp), reach = p.lamps[2 * i].w;
-			float fall = clamp(1.0 - (d * d) / (reach * reach), 0.0, 1.0);
-			float c = fall * fall * max(dot(h.normal, toLamp / max(d, 1.0e-3)), 0.0) * dot(p.lamps[2 * i + 1].rgb, vec3(0.2126, 0.7152, 0.0722));
+		for (int i = 0; i < count; i++) {   // (2026-11-07 perf-reflfix2: the light Resolve gives it, RtLampLight.glsl)
+			if (i == int(p.frame.z + 0.5) - 1) continue;   // (perf-reflfix2) the flashlight: never the key lamp (no shadow ray: the player stands at it)
+			const float c = dot(RtLampLight(p.lamps[2 * i], p.lamps[2 * i + 1], hitPos, h.normal), vec3(0.2126, 0.7152, 0.0722));
 			if (c > best) { best = c; key = i; }
 		}
 		// (The shadow ray only where the reflection is sharp enough to show it: roughness below LampShadowRoughness; rougher hits keep
@@ -224,16 +226,52 @@ HitShade ShadeHit(uint instance, uint prim, vec2 bary, mat3 toScene, vec3 hitPos
 	return h;
 }
 
-// (2026-11-07 perf-reflfix) MetalBounce: the record's material rule (bits 26-31 of a textured / alpha-tested record: roughness k / 7,
-// metal (k - 1) / 6) says smooth metal: metal >= 0.75 and roughness <= the setting (Pass up.w; 0 = off). Out: its roughness.
+// (2026-11-07 perf-reflfix) MetalBounce: the record's material rule (bits 26-31 of a textured / alpha-tested record: roughness (k / 7)^2
+// (2026-11-07 perf-reflfix2; was k / 7), metal (k - 1) / 6) says smooth metal: metal >= 0.75 and roughness <= the setting (Pass up.w;
+// 0 = off). Out: its roughness.
 bool MetalBounce(uint instance, out float hitRough) {
 	hitRough = 1.0;
 	const uint f = records[instance].flags;
 	if (!(p.up.w > 0.0) || (f & 0x60u) == 0u) return false;
 	const uint rk = (f >> 26u) & 7u, mk = (f >> 29u) & 7u;
 	if (rk == 0u || mk == 0u) return false;
-	hitRough = float(rk) / 7.0;
+	hitRough = float(rk * rk) / 49.0;   // (NvrRtProtocol.h NVR_RT_RECORD_ROUGH_SHIFT: 0.02, 0.08, 0.18, 0.33, 0.51, 0.73, 1)
 	return float(mk - 1u) / 6.0 >= 0.75 && hitRough <= p.up.w + 1.0e-4;
+}
+
+// (2026-11-07 perf-reflfix2) MetalBounce's direction: a GGX microfacet normal of the metal's roughness (alpha = roughness^2), sampled from
+// the distribution of VISIBLE normals (Heitz 2018, as RayGen samples the first ray), the reflected ray about it. A new sample every frame
+// and pixel (Pass frame.x) while something averages the frames (frame.y: the RT reflection denoiser, DLSS RR); else the plain mirror
+// direction (as perf-reflfix: gold then shows as sharp as chrome). Before, every bouncing metal reflected along the exact mirror direction:
+// gold (0.33) in a mirror was as sharp as chrome (0.08), while seen directly its reflection is blurred by its roughness.
+uint RtHash(uint v) { v = v * 747796405u + 2891336453u; v = ((v >> ((v >> 28u) + 4u)) ^ v) * 277803737u; return (v >> 22u) ^ v; }
+vec3 BounceDirection(vec3 dir, vec3 n, vec3 geo, float rough, ivec2 pixel) {
+	vec3 d2 = reflect(dir, n);
+	const float a = rough * rough;
+	if (p.frame.y > 0.5 && a > 1.0e-4) {
+		const uint h1 = RtHash(uint(pixel.x) ^ RtHash(uint(pixel.y) ^ RtHash(uint(p.frame.x) + 0x9E3779B9u)));
+		const uint h2 = RtHash(h1 + 0x68E31DA4u);
+		const float u1 = float(h1 >> 8u) * (1.0 / 16777216.0), u2 = float(h2 >> 8u) * (1.0 / 16777216.0);
+		const vec3 t = normalize(abs(n.z) < 0.999 ? cross(n, vec3(0.0, 0.0, 1.0)) : cross(n, vec3(1.0, 0.0, 0.0)));
+		const vec3 b = cross(n, t);
+		const vec3 v = -dir;
+		const vec3 vt = vec3(dot(v, t), dot(v, b), dot(v, n));
+		const vec3 vh = normalize(vec3(a * vt.x, a * vt.y, max(vt.z, 1.0e-4)));
+		const float lensq = vh.x * vh.x + vh.y * vh.y;
+		const vec3 t1 = lensq > 0.0 ? vec3(-vh.y, vh.x, 0.0) * inversesqrt(lensq) : vec3(1.0, 0.0, 0.0);
+		const vec3 t2 = cross(vh, t1);
+		const float r = sqrt(u1), ph = 6.2831853 * u2;
+		const float p1 = r * cos(ph);
+		const float s = 0.5 * (1.0 + vh.z);
+		const float p2 = (1.0 - s) * sqrt(max(0.0, 1.0 - p1 * p1)) + s * r * sin(ph);
+		const vec3 nh = p1 * t1 + p2 * t2 + sqrt(max(0.0, 1.0 - p1 * p1 - p2 * p2)) * vh;
+		const vec3 ht = normalize(vec3(a * nh.x, a * nh.y, max(0.0, nh.z)));
+		const vec3 m = normalize(t * ht.x + b * ht.y + n * ht.z);
+		const vec3 sampled = reflect(dir, m);
+		if (dot(sampled, geo) > 0.0) d2 = sampled;   // (below the surface: the mirror direction)
+	}
+	if (dot(d2, geo) <= 0.0) d2 = reflect(dir, geo);   // (a bent normal at a grazing angle: the triangle's mirror direction)
+	return d2;
 }
 
 void main() {
@@ -316,13 +354,14 @@ void main() {
 	const float cone = (length(surface - p.origin.xyz) + t) * pixelAngle + t * roughness * roughness * 0.5;	// (the lobe's width goes with GGX alpha = roughness^2: a 0.02 mirror is sharp)
 	const HitShade h = ShadeHit(hitInstance, hitPrim, hitBary, hitToScene, hitPos, dir, t, roughness, cone);
 
-	// (2026-11-07 perf-reflfix) MetalBounce: smooth metal reflects. ONE more ray along the mirror direction about its shading normal (depth
-	// 1: what that ray meets is shaded, never reflected again: a mirror -> chrome -> chrome path ends on the second chrome's estimate). The
+	// (2026-11-07 perf-reflfix) MetalBounce: smooth metal reflects. ONE more ray along the mirror direction about its shading normal
+	// (2026-11-07 perf-reflfix2: about a GGX microfacet normal of its roughness, a new one each frame, while a denoiser averages the frames)
+	// (depth 1: what that ray meets is shaded, never reflected again: a mirror -> chrome -> chrome path ends on the second chrome's estimate). The
 	// pixel is then the metal's Fresnel tint x what the bounce sees (ReflectionsRTResolve.frag: the screen there, else its estimate).
 	float hitRough;
 	if (p.origin.w < 0.5 && (h.flags & 4u) != 0u && MetalBounce(hitInstance, hitRough)) {
-		vec3 d2 = reflect(dir, h.normal);
-		if (dot(d2, h.geo) <= 0.0) d2 = reflect(dir, h.geo);   // (a bent normal at a grazing angle: the triangle's mirror direction)
+		// (2026-11-07 perf-reflfix2) the direction from the metal's GGX lobe (BounceDirection), not always the exact mirror direction
+		const vec3 d2 = BounceDirection(dir, h.normal, h.geo, hitRough, pixel);
 		// the metal's Fresnel (Schlick): F0 = its colour (the record's texture at the hit: gold, chrome)
 		const float c = clamp(dot(h.normal, -dir), 0.0, 1.0);
 		const vec3 f0 = clamp(h.albedo, vec3(0.0), vec3(1.0));

@@ -181,7 +181,38 @@ namespace RtScenePick {
 		bool		alphaTested = false;	// ActorAlphaTested's answer AND the structure was built non-opaque (the entry's last build)
 		uint32_t	alphaRef = 0;
 		bool		tinted = false;			// a hair tint was noted for it (with alphaTested only)
+		uint32_t	skinGain = 0;			// (perf-mirrorfix2) a FaceGen face's colour gain code (SkinGainCode; skin, not alpha-tested only)
 	};
+	// (2026-11-07 perf-mirrorfix2, test 10: the face dark in mirrors) the game's FaceGen face is NOT its base texture: the face pass
+	// multiplies the frame by 2((2(fg0 - 0.5) + base) 2 fg1) (NewVegas/Hooks/Shaders.cpp: SLS1005, the two FaceGen maps; with neutral
+	// maps 2 x base in the stored curve), the traced scene took the base alone. A FaceGen face's record carries the face's colour gain
+	// (linear, scalar: FaceGenGain from the three textures' averages, or 2^2.2 where the maps cannot be read) in bits 8-15, free on a
+	// record that has no glow and is not alpha-tested (PTEmissive and the alpha reference use them only there): k / 32, k = 1..255.
+	// RtHit.glsl rtHitMap multiplies the skin texture's colour by it (record kind skin, flag 0x40, bits 8-15 non-zero).
+	constexpr uint32_t kSkinGainShift = 8u;
+	constexpr float kSkinGainUnit = 32.0f;
+	inline uint32_t SkinGainCode(float gainLinear) {
+		if (!(gainLinear > 0.0f)) return 0u;
+		int k = (int)(gainLinear * kSkinGainUnit + 0.5f);
+		return (uint32_t)(k < 1 ? 1 : k > 255 ? 255 : k);
+	}
+	inline float SkinGainOf(uint32_t flags) { return float((flags >> kSkinGainShift) & 0xFFu) / kSkinGainUnit; }
+	inline float SrgbEncode(float l) { l = l < 0.0f ? 0.0f : l > 1.0f ? 1.0f : l; return l <= 0.0031308f ? l * 12.92f : 1.055f * powf(l, 1.0f / 2.4f) - 0.055f; }
+	inline float SrgbDecode(float c) { c = c < 0.0f ? 0.0f : c > 1.0f ? 1.0f : c; return c <= 0.04045f ? c / 12.92f : powf((c + 0.055f) / 1.055f, 2.4f); }
+	// The face's gain from the LINEAR averages of its base texture and the two FaceGen maps (rgb each; null: unknown -> 2^2.2, the neutral
+	// maps' x 2): the face's colour by the game's formula on the stored averages, its luminance over the base's
+	inline float FaceGenGain(const float* base, const float* fg0, const float* fg1) {
+		if (!base || !fg0 || !fg1) return 4.5947934f;
+		static const float w[3] = { 0.2126f, 0.7152f, 0.0722f };
+		float num = 0.0f, den = 0.0f;
+		for (int c = 0; c < 3; c++) {
+			const float b = SrgbEncode(base[c]), a0 = SrgbEncode(fg0[c]), a1 = SrgbEncode(fg1[c]);
+			num += w[c] * SrgbDecode(2.0f * ((2.0f * (a0 - 0.5f) + b) * 2.0f * a1));
+			den += w[c] * base[c];
+		}
+		const float g = den > 1.0e-4f ? num / den : 4.5947934f;
+		return g < 1.0f / kSkinGainUnit ? 1.0f / kSkinGainUnit : g > 255.0f / kSkinGainUnit ? 255.0f / kSkinGainUnit : g;
+	}
 	constexpr float kTintScale = 4.5947934f;	// 2^2.2: the hair shaders' albedo x 2 (stored curve) in linear light
 
 	// The partition goes in alpha-tested: its alpha property tests, it is not skin, [Main.Main.RayTracing] AlphaTested is on
@@ -205,6 +236,7 @@ namespace RtScenePick {
 			if (a.normalMap) flags |= NVR_RT_RECORD_NORMAL;
 		}
 		if (a.skin) flags |= NvrRtKindBits(NVR_RT_KIND_SKIN);
+		if (a.skin && a.textured && !a.alphaTested && a.skinGain) flags |= (a.skinGain & 0xFFu) << kSkinGainShift;	// (perf-mirrorfix2)
 		return flags;
 	}
 	// The pose's build: dynamic, its texcoords, non-opaque when alpha-tested (only with texcoords: without them no ray could test it)
@@ -228,7 +260,7 @@ namespace RtScenePick {
 		else if (r.textured) flags |= NVR_RT_RECORD_TEXTURED | ((uint32_t)r.slot << 16);
 		if ((r.alphaTested || r.textured) && r.normalMap) flags |= NVR_RT_RECORD_NORMAL;
 		if ((r.alphaTested || r.textured) && r.materialRule) {	// the material rule's roughness / metal in bits 26-31 (NvrRtProtocol.h)
-			if (r.rough >= 0.0f) { int k = (int)(r.rough * 7.0f + 0.5f); k = k < 1 ? 1 : k > 7 ? 7 : k; flags |= (uint32_t)k << NVR_RT_RECORD_ROUGH_SHIFT; }
+			if (r.rough >= 0.0f) flags |= NvrRtRoughCode(r.rough) << NVR_RT_RECORD_ROUGH_SHIFT;	// (2026-11-07 perf-reflfix2: (k / 7)^2, finer near 0)
 			if (r.metal >= 0.0f) { int k = (int)(r.metal * 6.0f + 0.5f) + 1; k = k > 7 ? 7 : k; flags |= (uint32_t)k << NVR_RT_RECORD_METAL_SHIFT; }
 		}
 		flags |= NvrRtKindBits(r.kind & 3u);	// (2026-11-07 ptaaa-materials) bits 0x02 / 0x08

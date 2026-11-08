@@ -55,6 +55,11 @@ and depth-first replays, and the first-person scene):
 Log (every 1800 frames): `MaterialAware reflections: per frame N other passes wrote their own alpha (no material), M blended skinned
 passes covered it`. Correct: `DebugView 7` (the material buffer) shows the mirror panels only, with every person / post / gun in front
 of them black (no material); wrong: a person's outline filled with the mirror's colour in DebugView 7.
+(2026-11-07 perf-mirrorfix2, test 10: her head and hair still took the mirror) the same rule also runs at DRAW time from the device's
+state (Render.cpp MaterialDraw round the skinned partition and still-object draws: the sorted blended list, which holds actors with a
+blend property and hair, never came through the pass hooks; ReflMaterialRule::DecideDraw). The log lists each distinct kind of draw
+once a session (`MaterialAware reflections draw (session list N)`): a `KEEPS the alpha under it` line for an opaque or skinned draw is
+the one to look at if something still shows the mirror. RT-PATH-TRACING.md section 68.
 Known gap: the path tracer's G-buffer (CapturedNormals MaterialBuffer / AlbedoBuffer) keeps the same leak for draws that write no
 G-buffer (the game's own shaders, hair, blended draws): docs/next/RT-PATH-TRACING.md section 67.
 
@@ -102,3 +107,25 @@ the gold one banded orange, neither reflecting anything. docs/next/RT-PATH-TRACI
   Bumpy floors reflect as if flat until the material pass also writes the mapped normal (CapturedNormals target 3 or the material
   buffer's free g / a, DEFERRED-RENDERING-PLAN.md); then RayGen can lerp toward it by (1 - roughness) for mirrors.
 - RT test host scene `reflfix` (`tools/nvr-rt-host/run.ps1 -Scene reflfix`).
+
+## Lamps as the game lights them, glossy metal bounces, the flashlight (2026-11-07, perf-reflfix2)
+Tester (RTX 4090, test 10, the RT test room) and the flashlight team. docs/next/RT-PATH-TRACING.md "Team perf-reflfix2" has the numbers.
+- **Lamps at hits the screen cannot show** (Resolve `RtShadeHit`, the helper's key-lamp pick): `RtGatherLamps` packs each lamp through
+  `RtReflLamps.h` as the game lights it: diffuse x Dimmer at most 1 without HDR x the LOD dimmer x LightingScale, decoded on the CPU
+  (linear), the game's falloff `(1 - (d/r)^2)^2.2` or LampFalloff's shape; `Rt/RtLampLight.glsl` evaluates it in both passes. Before:
+  the dimmer unclamped and decoded with the colour (the room's lamps have fade 1.8-2: 4.4-8.9x the game's light): white discs on the
+  ceiling near each lamp in the mirror ("orbs"), discs on the chrome and gold spheres.
+- **MetalBounce's direction**: a GGX sample of the metal's roughness about its normal (visible normals), a new one each frame while the
+  RT reflection denoiser (or DLSS RR) averages the frames (Pass `frame.y`); without one the exact mirror direction. Gold (0.33) is now
+  as blurred in the mirror as seen directly; chrome (0.08) stays sharp. The RT records' roughness code is `(k / 7)^2` (finer near 0).
+- **HitFlashlight** (`[Shaders.Reflections.RT]`, default true, live): the flashlight (FlashlightDeferred::LightParams) is lamp 0 of the
+  hits' lamps, with its cone and its pass's falloff, never the key lamp (no shadow ray). Its beam's spot shows in mirrors and on metal.
+- **KeepFlashlight** (`[Shaders.Reflections.Main]`, default true, live; the Vulkan composite only): the composite adds back the share of
+  the flashlight's GGX highlight that mixing the reflection over the lit colour took away (no reflection ray sees the light itself).
+  Lamps' highlights are not kept (the composite has no lamp list).
+- What correct looks like: in the RT test room's mirror the ceiling over a lamp as bright as on screen, no white dots; gold in the mirror
+  blurred like gold seen directly (a little grain that settles in a few frames with the denoiser on), chrome sharp; the flashlight's spot
+  on the walls seen in the mirror, and its small highlight on a mirror / chrome / gold surface it shines on. Wrong: a speckled gold
+  sphere (the denoiser off: the bounce then stays sharp, report it), the beam's spot on screen but not in the mirror (HitFlashlight off,
+  or HitLamps off).
+- RT test host scenes `reflorbs`, `reflbounce` (`tools/nvr-rt-host/run.ps1 -Scene reflorbs`).

@@ -15,6 +15,7 @@ public:
 		float	InteriorFloors;	// indoors: how much floors reflect
 		float	Roughness;		// dry surfaces (0 mirror .. 1 matte)
 		bool	MirrorSmoothOnly;	// 2026-11-06: Mirror only on surfaces whose own roughness is under 0.05 (the test room's mirror panels)
+		bool	KeepFlashlight;		// 2026-11-07 (perf-reflfix2): the Vulkan composite keeps the flashlight's highlight under the reflection
 		float	Mirror;			// 2026-11-05: 0 real stone/tile (F0 0.04) .. 1 a true mirror (F0 1): how much of the reflection shows at any angle
 		float	WetRoughness;	// wet surfaces
 		float	MaxDistance;	// ray length, game units
@@ -59,6 +60,7 @@ public:
 		bool	RtSplitTest;		// test only: RayGen + Resolve without rays (no helper needed): must be the normal trace's picture
 		bool	RtVndf;				// 2026-10-29: glossy rays from the GGX distribution of visible normals (Heitz 2018)
 		bool	RtHitLamps;			// 2026-10-29: the 12 nearest scene lamps light the hits the screen cannot show (one shadow ray to the key lamp)
+		bool	RtHitFlashlight;	// 2026-11-07 (perf-reflfix2): the flashlight lights them too (lamp 0, its cone; no shadow ray)
 		float	RtRoughReach;		// 2026-10-29: a ray's reach at roughness 1, as a share of Distance (0 = full reach)
 		float	RtRoughShare;		// 2026-10-29: above this roughness, 1 ray per 2x2 pixels a frame (0 = every pixel)
 		float	RtContactSharpness;	// 2026-10-29: the blur radius share at contact (1 = off: the blur as before)

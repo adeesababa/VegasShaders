@@ -32,6 +32,21 @@ namespace RtHairTint {
 		}
 	}
 
+	// UNOFFICIAL 2026-11-07 (perf-mirrorfix2, test 10: the RT hair stayed white) at DRAW time (Render.cpp MaterialDraw, the skinned partition
+	// draws): the hair is drawn by the sorted blended list, which never comes through RenderPassSkinnedHook, so NoteDraw above never saw it.
+	// pixelShader: the bound pass's pixel shader name; geometry: the game's current render pass's geometry.
+	inline unsigned DrawNotes = 0;
+	inline void NoteHairDraw(const void* geometry, const char* pixelShader, IDirect3DDevice9* device) {
+		if (!Wanted || !geometry || !device) return;
+		const bool hair = pixelShader && (!strcmp(pixelShader, "SM3003.pso") || !strcmp(pixelShader, "SM3002.pso"));
+		if (!hair) return;
+		const bool saved = BoundHair;
+		BoundHair = true;
+		NoteDraw(geometry, device);
+		BoundHair = saved;
+		DrawNotes++;
+	}
+
 	// The tint noted for this geometry within the last `maxAge` frames
 	inline bool Find(const void* geometry, float rgb[3], unsigned maxAge = 600u) {
 		auto it = Tints.find(geometry);

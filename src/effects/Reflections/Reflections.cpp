@@ -16,6 +16,10 @@
 #include "../../core/RtReflDenoise.h"	// UNOFFICIAL 2026-11-07 the RT reflection denoiser
 #include "../../core/RtDenoise.h"	// UNOFFICIAL 2026-11-07 (perf-history) HistoryClock
 #include "../../core/Upscaler.h"	// UNOFFICIAL 2026-10-30 DLSS RR (RayReconstructionWantsRaw: the RT resolve unblurred, no history)
+#include "../PBR/PBR.h"	// UNOFFICIAL 2026-11-07 (perf-reflfix2) the game's light scale and LampFalloff's shape for the RT lamps
+#include "RtReflLamps.h"	// UNOFFICIAL 2026-11-07 (perf-reflfix2)
+#include "../../core/FlashlightDeferred.h"	// UNOFFICIAL 2026-11-07 (perf-reflfix2) the flashlight lights RT hits and keeps its highlight in the composite
+#include "../../core/RtFlashlightCode.h"
 
 void ReflectionsEffect::UpdateSettings() {
 	// UNOFFICIAL 2026-10-18: the frames drawn with the settings that are about to be replaced. 2026-10-19: only while the F10
@@ -28,6 +32,7 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.Roughness = std::clamp(TheSettingManager->GetSettingF(section, "Roughness"), 0.02f, 1.0f);
 	Settings.Mirror = std::clamp(TheSettingManager->GetSettingF(section, "Mirror"), 0.0f, 1.0f);	// UNOFFICIAL 2026-11-05
 	Settings.MirrorSmoothOnly = TheSettingManager->GetSettingI(section, "MirrorSmoothOnly") != 0;	// UNOFFICIAL 2026-11-06	// UNOFFICIAL 2026-11-05
+	Settings.KeepFlashlight = TheSettingManager->GetSettingI(section, "KeepFlashlight") != 0;	// UNOFFICIAL 2026-11-07 (perf-reflfix2)
 	Settings.WetRoughness = std::clamp(TheSettingManager->GetSettingF(section, "WetRoughness"), 0.02f, 1.0f);
 	Settings.MaxDistance = std::clamp(TheSettingManager->GetSettingF(section, "MaxDistance"), 200.0f, 20000.0f);
 	Settings.Steps = std::clamp(TheSettingManager->GetSettingI(section, "Steps"), 8, 64);
@@ -78,6 +83,7 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.RtSplitTest = TheSettingManager->GetSettingI(rt, "SplitTest") != 0;	// test only
 	Settings.RtVndf = TheSettingManager->GetSettingI(rt, "VisibleNormals") != 0;	// UNOFFICIAL 2026-10-29 glossy rays
 	Settings.RtHitLamps = TheSettingManager->GetSettingI(rt, "HitLamps") != 0;
+	Settings.RtHitFlashlight = TheSettingManager->GetSettingI(rt, "HitFlashlight") != 0;	// UNOFFICIAL 2026-11-07 (perf-reflfix2)
 	Settings.RtRoughReach = std::clamp(TheSettingManager->GetSettingF(rt, "RoughReach"), 0.0f, 0.99f);
 	Settings.RtRoughShare = std::clamp(TheSettingManager->GetSettingF(rt, "RoughShare"), 0.0f, 1.0f);	// 0 off
 	Settings.RtContactSharpness = std::clamp(TheSettingManager->GetSettingF(rt, "ContactSharpness"), 0.05f, 1.0f);
@@ -116,7 +122,7 @@ namespace {
 	int RtShaderAlpha = -1;	// UNOFFICIAL 2026-10-29: Compute\Rt\ReflectionsRTAlpha.spv (with the core's alpha-tested casters)
 	int RtShaderTex = -1, RtShaderAlphaTex = -1;	// UNOFFICIAL 2026-10-29: the same with hit textures (ReflectionsRTTex / ReflectionsRTAlphaTex)
 	int RtShaderTexGlow = -1, RtShaderAlphaTexGlow = -1;	// UNOFFICIAL 2026-10-30: and the glow maps (ReflectionsRTTexGlow / ReflectionsRTAlphaTexGlow)
-	struct RtPassConstants { D3DXVECTOR4 size, forward, right, up, origin, sun, layout, lamps[24]; };	// Rt/ReflectionsRT.comp's Pass block (std140, 496 bytes)
+	struct RtPassConstants { D3DXVECTOR4 size, forward, right, up, origin, sun, layout, lamps[24], frame; };	// Rt/ReflectionsRT.comp's Pass block (std140, 512 bytes: full; frame 2026-11-07 perf-reflfix2)
 	static_assert(sizeof(RtPassConstants) <= 512, "the RT core's pass constants limit");
 
 	// UNOFFICIAL 2026-10-29: the 12 scene lamps nearest the camera that reach within Distance of it ([2i] position relative to the
@@ -124,15 +130,19 @@ namespace {
 	const int RtMaxLamps = 12;
 	D3DXVECTOR4 RtLampData[RtMaxLamps * 2] = {};
 	int RtLampCount = 0;
+	int RtFlashIndex = -1;		// UNOFFICIAL 2026-11-07 (perf-reflfix2) the flashlight's lamp (0) or -1
+	float RtFlashCode = 0.0f;	// its cone (RtFlashlightCode.h)
 	void RtGatherLamps(float distance) {
 		RtLampCount = 0;
+		RtFlashIndex = -1; RtFlashCode = 0.0f;
 		if (!SceneNode) return;
-		struct Candidate { float key; NiPointLight* light; };
+		struct Candidate { float key; NiPointLight* light; float lod; };
 		Candidate best[RtMaxLamps];
 		int n = 0;
 		const D3DXVECTOR4 eye = TheRenderManager->CameraPosition;
 		for (auto* e = SceneNode->lights.start; e; e = e->next) {
 			NiPointLight* light = e->data ? e->data->sourceLight : nullptr;
+			const float lod = e->data ? e->data->fLODDimmer : 1.0f;	// (2026-11-07 perf-reflfix2: the game's colour has it)
 			if (!light || light->Spec.r <= 0.0f || (light->Diff.r + light->Diff.g + light->Diff.b) * light->Dimmer <= 5.0f / 255.0f) continue;
 			if (FlashlightLamp::Is(light)) continue;	// UNOFFICIAL 2026-11-04: the flashlight's game lamp (core/FlashlightLamp.h)
 			const NiPoint3& p = light->m_worldTransform.pos;
@@ -142,15 +152,55 @@ namespace {
 			int at = n < RtMaxLamps ? n++ : RtMaxLamps;
 			if (at == RtMaxLamps) { if (key >= best[RtMaxLamps - 1].key) continue; at = RtMaxLamps - 1; }
 			while (at > 0 && best[at - 1].key > key) { best[at] = best[at - 1]; at--; }
-			best[at] = { key, light };
+			best[at] = { key, light, lod };
 		}
+		// UNOFFICIAL 2026-11-07 (perf-reflfix2, RtReflLamps.h) the colour and falloff as the game's shaders light the lamp: the dimmer at most 1
+		// without HDR, the LOD dimmer, LightingScale, decoded here (linear), the game's falloff or LampFalloff's shape (Rt/RtLampLight.glsl).
+		// Before: diffuse x Dimmer unclamped, decoded in the shaders: the RT test room's lamps (dimmer 1.8-1.9) lit an out-of-view ceiling
+		// 4.5x the game's light, the "orbs" in its mirror.
+		RtReflLamps::Frame frame;
+		frame.hdr = *(const bool*)0x011F941E;	// BSShaderManager::bHDR (as ManyLamps.h BuildTable)
+		if (PBRShaders* pbr = TheShaderManager->Shaders.PBR) {
+			frame.lightScale = pbr->Constants.Data.z;
+			frame.shaped = pbr->Constants.LampFalloff.x > 0.0f;
+			frame.shapeY = pbr->Constants.LampFalloff.y;
+			frame.shapeStrength = pbr->Constants.LampFalloff.z;
+		}
+		const float eyeF[3] = { eye.x, eye.y, eye.z };
+		// UNOFFICIAL 2026-11-07 (perf-reflfix2; the flashlight team: the beam's spot faded on mirrors and metal, RT hits out of view were lit
+		// without it) the flashlight as its own pass draws it (FlashlightDeferred::LightParams) is lamp 0, its cone in RtFlashCode (Resolve
+		// rt5.z, the helper's frame.w); then the 11 nearest scene lamps
+		RtFlashIndex = -1; RtFlashCode = 0.0f;
+		int first = 0;
+		{
+			D3DXVECTOR4 fl[3];
+			if (RtEffect && RtEffect->Settings.RtHitFlashlight && FlashlightDeferred::LightParams(fl) && (fl[2].x + fl[2].y + fl[2].z) > 0.0f) {
+				const float rel[3] = { fl[0].x, fl[0].y, fl[0].z }, colour[3] = { fl[2].x, fl[2].y, fl[2].z };
+				const float gamma = LinearScene::Gamma > 1.0f ? LinearScene::Gamma : 2.2f;	// (as FlashlightDeferred::Apply)
+				float packed[8];
+				RtReflLamps::PackFlashlight(rel, fl[0].w, colour, TheShaderManager->Effects.Flashlight->Deferred.Falloff, gamma, packed);
+				RtLampData[0] = D3DXVECTOR4(packed[0], packed[1], packed[2], packed[3]);
+				RtLampData[1] = D3DXVECTOR4(packed[4], packed[5], packed[6], packed[7]);
+				RtFlashCode = RtFlashlightCode::Encode(fl[1].x, fl[1].y, fl[1].z, fl[1].w);
+				RtFlashIndex = 0;
+				first = 1;
+			}
+		}
+		n = (std::min)(n, RtMaxLamps - first);
 		for (int i = 0; i < n; i++) {
 			NiPointLight* light = best[i].light;
 			const NiPoint3& p = light->m_worldTransform.pos;
-			RtLampData[2 * i] = D3DXVECTOR4(p.x - eye.x, p.y - eye.y, p.z - eye.z, light->Spec.r);
-			RtLampData[2 * i + 1] = D3DXVECTOR4(light->Diff.r * light->Dimmer, light->Diff.g * light->Dimmer, light->Diff.b * light->Dimmer, 0.0f);
+			RtReflLamps::Raw raw;
+			raw.pos[0] = p.x; raw.pos[1] = p.y; raw.pos[2] = p.z; raw.reach = light->Spec.r;
+			raw.diffuse[0] = light->Diff.r; raw.diffuse[1] = light->Diff.g; raw.diffuse[2] = light->Diff.b;
+			raw.dimmer = light->Dimmer;
+			raw.lodDimmer = best[i].lod;
+			float packed[8];
+			RtReflLamps::Pack(raw, frame, eyeF, packed);
+			RtLampData[2 * (first + i)] = D3DXVECTOR4(packed[0], packed[1], packed[2], packed[3]);
+			RtLampData[2 * (first + i) + 1] = D3DXVECTOR4(packed[4], packed[5], packed[6], packed[7]);
 		}
-		RtLampCount = n;
+		RtLampCount = first + n;
 	}
 	RtPassConstants RtPending = {};
 	bool RtRecorded = false;
@@ -276,7 +326,7 @@ bool ReflectionsEffect::RtTrace(IDirect3DDevice9* Device, IDirect3DSurface9* tar
 	// weapon (its reflection would only be traced and blurred into its surroundings).
 	if (RenderRect::Active()) weaponFrame = false;
 	waterFrame = rtRays && Settings.RtWater && !TheShaderManager->GameState.isUnderwater;	// UNOFFICIAL 2026-10-31 (the same)
-	if (rtRays && Settings.RtHitLamps) RtGatherLamps(Settings.RtDistance); else RtLampCount = 0;	// UNOFFICIAL 2026-10-29 (before RayGen: both passes read them)
+	if (rtRays && Settings.RtHitLamps) RtGatherLamps(Settings.RtDistance); else { RtLampCount = 0; RtFlashIndex = -1; RtFlashCode = 0.0f; }	// UNOFFICIAL 2026-10-29 (before RayGen: both passes read them)
 	if (!ExtRender(Device, Rt.MarchSurface, Rt.MarchSurface, 8, false, Rt.MarchSurface)) return false;
 	bool traced = !rtRays;	// SplitTest: nothing to trace
 	if (rtRays) {
@@ -308,7 +358,7 @@ bool ReflectionsEffect::RtTrace(IDirect3DDevice9* Device, IDirect3DSurface9* tar
 			// UNOFFICIAL 2026-11-03 RenderScale < 1: the helper rebuilds each surface at uv = (pixel + 0.5) x layout.xy - 0.5 x (layout.xy -
 			// layout.zw), RayGen's pixel centre as a texture coordinate; divided by the rect's scale, that is the screen point it shows
 			// (rectToScreen), what its camera rays want. Plus the depth's jitter (TAAEffect::DepthJitterUV, screen uv: a depth texel lies on
-			// the ray through uv + jitter; 1 / scale bigger on screen than at RenderScale 1). The constants are full (496 of 512 bytes, up.w
+			// the ray through uv + jitter; 1 / scale bigger on screen than at RenderScale 1). The constants are full (then 496 of 512 bytes, up.w
 			// alone free), so it rides in forward as a shear: the helper's point is forward + right (2u - 1) - up (2v - 1), and u + jx, v + jy
 			// add 2 jx right - 2 jy up. Rect frames only (RenderScale 1 untouched, as RT AO's).
 			RtPending.layout.x /= RenderRect::ScaleX;
@@ -332,6 +382,11 @@ bool ReflectionsEffect::RtTrace(IDirect3DDevice9* Device, IDirect3DSurface9* tar
 		// RoughReach (fraction part, below 1: a rough ray's reach share at roughness 1).
 		RtPending.forward.w = (float)RtLampCount + std::clamp(Settings.RtRoughReach, 0.0f, 0.99f);
 		memcpy(RtPending.lamps, RtLampData, sizeof(RtLampData));
+		// UNOFFICIAL 2026-11-07 (perf-reflfix2) frame: x a frame number, y 1 = MetalBounce samples its metal's GGX lobe (a new direction every
+		// frame) because something averages the frames: the RT reflection denoiser, or DLSS RR (the raw resolve); without either the bounce
+		// stays the exact mirror direction (a mirror pixel keeps no Temporal history: the samples' noise would show as it is)
+		RtPending.frame = D3DXVECTOR4((float)(TheFrameRateManager->FrameNumber & 0xFFFFu),
+			rtDenoiseFrame || Upscaler::RayReconstructionWantsRaw() ? 1.0f : 0.0f, (float)(RtFlashIndex + 1), RtFlashCode);	// zw: the flashlight (perf-reflfix2)
 		static GpuTimer exchangeTimer("  Reflections RT (exchange)");
 		GpuProfileScope gpu(exchangeTimer, Device);
 		traced = RtCoreClient::Exchange(Device, RtUser) && RtRecorded;
@@ -833,6 +888,7 @@ namespace {
 		D3DXVECTOR4	material2;	// UNOFFICIAL 2026-10-30 x 1: TESR_MaterialBuffer's roughness for the floor guess
 		D3DXVECTOR4	weapon;		// UNOFFICIAL 2026-10-30 x on, y WeaponFovScale, z strength, w roughness without material data
 		D3DXVECTOR4	renderScale;	// UNOFFICIAL 2026-11-03 TESR_RenderScale: xy the rect frame's scale, zw 1 / xy; 1 in a native frame
+		D3DXVECTOR4	flashPos, flashDir, flashColor, flashLook;	// UNOFFICIAL 2026-11-07 (perf-reflfix2) KeepFlashlight (ReflectionsComposite.frag)
 	};
 	ReflUniforms ReflUploaded;	// what the uniform buffer holds (one effect instance)
 	struct ReflPush { D3DXVECTOR4 cube; UInt32 linearIndex, pointIndex, mipIndex, pass; };
@@ -1093,6 +1149,20 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	// keep to its top-left part, as the .fx's techniques do with TESR_RenderScale.
 	uniforms.renderScale = RenderRect::Active() ? D3DXVECTOR4(RenderRect::ScaleX, RenderRect::ScaleY, 1.0f / RenderRect::ScaleX, 1.0f / RenderRect::ScaleY) :
 		D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
+	// UNOFFICIAL 2026-11-07 (perf-reflfix2, the flashlight team: the beam's spot faded on mirrors and metal) KeepFlashlight: the composite
+	// mixes the reflection over a share of the surface's lit colour, the flashlight's highlight on it included, while no ray ever sees the
+	// flashlight itself; the composite adds that share of its highlight back (ReflectionsComposite.frag FlashlightHighlight)
+	uniforms.flashPos = uniforms.flashDir = uniforms.flashColor = uniforms.flashLook = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
+	if (Settings.KeepFlashlight) {
+		D3DXVECTOR4 fl[3];
+		if (FlashlightDeferred::LightParams(fl)) {
+			const float gamma = LinearScene::Gamma > 1.0f ? LinearScene::Gamma : 2.2f, e = 2.2f / gamma;	// (to the composite's linear space)
+			uniforms.flashPos = fl[0];
+			uniforms.flashDir = fl[1];
+			uniforms.flashColor = D3DXVECTOR4(powf((std::max)(fl[2].x, 0.0f), e), powf((std::max)(fl[2].y, 0.0f), e), powf((std::max)(fl[2].z, 0.0f), e), fl[2].w);
+			uniforms.flashLook = D3DXVECTOR4(TheShaderManager->Effects.Flashlight->Deferred.Falloff, 8.0f, 0.0f, 0.0f);
+		}
+	}
 	ID3D9NvrExtBuffer* buffer = extUniforms.Buffer;
 	if (!buffer || memcmp(&uniforms, &ReflUploaded, sizeof(uniforms))) {
 		buffer = ExtUniforms(extUniforms, &uniforms, sizeof(uniforms));
@@ -1135,7 +1205,7 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 		rtu.rt3 = D3DXVECTOR4(Settings.RtVndf ? 1.0f : 0.0f, Settings.RtRoughShare, Settings.RtContactSpread, Settings.RtGlowBrightness);
 		rtu.rt4 = D3DXVECTOR4(Settings.RtHitAmbientGrid ? 1.0f : 0.0f, Settings.RtRayReuse ? 1.0f : 0.0f, Settings.RtReuseRoughness, Settings.RtShadeOffscreen ? 1.0f : 0.0f);	// UNOFFICIAL 2026-10-30 / 31; w 2026-11-05 ShadeOffscreen
 		memcpy(rtu.lamps, RtLampData, sizeof(RtLampData));
-		rtu.rt5 = D3DXVECTOR4(rtDenoiseFrame ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);	// UNOFFICIAL 2026-11-07 the RT reflection denoiser
+		rtu.rt5 = D3DXVECTOR4(rtDenoiseFrame ? 1.0f : 0.0f, (float)(RtFlashIndex + 1), RtFlashCode, 0.0f);	// (perf-reflfix2: yz the flashlight)	// UNOFFICIAL 2026-11-07 the RT reflection denoiser
 		ID3D9NvrExtBuffer* rtBuffer = extRtUniforms.Buffer;
 		if (!rtBuffer || memcmp(&rtu, &RtUploaded, sizeof(rtu))) {
 			rtBuffer = ExtUniforms(extRtUniforms, &rtu, sizeof(rtu));

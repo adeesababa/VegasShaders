@@ -347,6 +347,8 @@ namespace {
 		UInt32		actorUpdates[4] = {};				// since the last line: posed, still (not posed), between poses (ActorUpdateInterval), rebuilds
 		UInt32		actorPartitions = 0;				// skinned partitions staged (exchanges 1-60)
 		UInt32		actorAlphaParts = 0, actorTintedParts = 0;	// (2026-11-07 perf-mirrorfix) poses built alpha-tested, of them tinted (hair)
+		UInt32		faceGains[2] = { 0, 0 };				// (perf-mirrorfix2) FaceGen face records: [0] gain from the maps, [1] the x 2 fallback
+		int			faceGainLogs = 0;
 		UInt32		partitionFate[5] = {};
 		UInt32		skinTex[6] = {};	// hit textures on actors: not PPLighting, no diffuse, texcoords elsewhere, no slot, staged without texcoords, textured				// skipped: no buffer data, too many bones, not described, streams / half positions, palette
 		std::vector<ID3D9NvrExtSharedImage*> images;	// [0] = the arena
@@ -1566,6 +1568,29 @@ namespace {
 		const UInt32 actorAlphaRef = alphaPart ? RtScenePick::ActorAlphaRef(alpha->flags, alpha->alphaTestRef) : 0u;
 		float hairTint[3] = { 1.0f, 1.0f, 1.0f };
 		const bool tinted = alphaPart && RtHairTint::Find(geo, hairTint);
+		// (2026-11-07 perf-mirrorfix2) a FaceGen face: the game's face colour is 2((2(fg0 - 0.5) + base) 2 fg1), not the base texture (the
+		// face dark in mirrors): its gain from the three textures' averages (RtScenePick::FaceGenGain; 2^2.2 where the maps cannot be read)
+		float faceGain = 0.0f;
+		if (ppLighting && skinKind && hitTextures && (shaderProperty->ulFlags[0] & BSShaderProperty::FaceGen)) {
+			BSShaderPPLightingProperty* pp = (BSShaderPPLightingProperty*)shaderProperty;
+			auto averageOf = [&](int set, int index) -> const Albedo* {
+				NiSourceTexture** t = pp->ppTextures[set];
+				NiTexture* texture = t ? t[index] : nullptr;
+				if (!texture || !texture->rendererData || !texture->rendererData->dTexture) return nullptr;
+				const Albedo& a = AlbedoOfTexture(texture->rendererData->dTexture);
+				return a.known ? &a : nullptr;
+			};
+			const Albedo* base = averageOf(0, 0);
+			const Albedo* fg0 = pp->ppTextures[0] && pp->ppTextures[0][0] ? averageOf(0, 1) : nullptr;
+			const Albedo* fg1 = pp->ppTextures[1] && pp->ppTextures[1][0] ? averageOf(1, 1) : nullptr;
+			faceGain = RtScenePick::FaceGenGain(base ? base->rgb : nullptr, fg0 ? fg0->rgb : nullptr, fg1 ? fg1->rgb : nullptr);
+			faceGains[base && fg0 && fg1 ? 0 : 1]++;
+			if (faceGainLogs < 8) {
+				faceGainLogs++;
+				Logger::Log("RT CORE face colour (perf-mirrorfix2): FaceGen head '%s': gain %.2f (linear; %s)", geo->m_pcName ? geo->m_pcName : "",
+					faceGain, base && fg0 && fg1 ? "from its base texture and FaceGen maps" : "a FaceGen map could not be read: x 2 in the stored curve");
+			}
+		}
 		const float cx = TheRenderManager->CameraPosition.x, cy = TheRenderManager->CameraPosition.y, cz = TheRenderManager->CameraPosition.z;
 		static std::vector<NVR_EXT_RT_RANGE> ranges;
 		static std::vector<float> palette;
@@ -1746,6 +1771,10 @@ namespace {
 				for (int k = 0; k < 3; k++) extra.albedo[k] = RtScenePick::TintLinear(hairTint[k]);
 			}
 			else { extra.albedo[0] = albedo.rgb[0]; extra.albedo[1] = albedo.rgb[1]; extra.albedo[2] = albedo.rgb[2]; }
+			// (perf-mirrorfix2) a FaceGen face: its gain on the texture (RtHit.glsl), and on the average (the colour without the texture)
+			actorPart.skinGain = actorPart.textured && !actorPart.alphaTested ? RtScenePick::SkinGainCode(faceGain) : 0u;
+			if (faceGain > 0.0f && !actorPart.tinted)
+				for (int k = 0; k < 3; k++) extra.albedo[k] = (std::min)(1.0f, extra.albedo[k] * faceGain);
 			extra.albedo[3] = 1.0f;
 			extra.flags = RtScenePick::ActorRecordFlags(actorPart);
 			if (skinKind) skinParts++;
@@ -3307,7 +3336,9 @@ namespace {
 					c.skinTex[0], c.skinTex[1], c.skinTex[2], c.skinTex[3], c.skinTex[4], c.skinTex[5]);
 			if (n == 60 && c.actorsOn)	// (2026-11-07 perf-mirrorfix)
 				Logger::Log("RT CORE: actors: %u poses built as cut-outs (alpha-tested hair, brows, eye cards, fringes: AlphaTested %s), %u of them with "
-					"the hair's tint (%u tints noted from the hair draws)", c.actorAlphaParts, c.alphaOn ? "on" : "off", c.actorTintedParts, (unsigned)RtHairTint::Tints.size());
+					"the hair's tint (%u tints noted from the hair draws, %u hair draws seen at draw time); FaceGen face records: %u with the gain from "
+					"their maps, %u with the x 2 fallback (perf-mirrorfix2)", c.actorAlphaParts, c.alphaOn ? "on" : "off", c.actorTintedParts,
+					(unsigned)RtHairTint::Tints.size(), RtHairTint::DrawNotes, c.faceGains[0], c.faceGains[1]);
 			if (n == 60) {
 				const UInt32* a = c.alphaFate;
 				Logger::Log("RT CORE: alpha-tested meshes met (exchanges 1-60): taken %u, atlas %u slots; left out: blended only %u, AlphaTested off %u, "
