@@ -11,7 +11,7 @@ static bool loadFragRaw(Host& h, const char* name, UINT images, UINT push, UINT 
 	std::vector<char> spirv; char buf[65536]; size_t n;
 	while ((n = fread(buf, 1, sizeof(buf), f)) > 0) spirv.insert(spirv.end(), buf, buf + n);
 	fclose(f);
-	NVR_EXT_BINDING_DESC bindings[8] = {};
+	NVR_EXT_BINDING_DESC bindings[12] = {};	// (2026-11-07 ptaaa-denoiser: 12, the show pass has 10 images)
 	for (UINT i = 0; i < images; i++) bindings[i] = { 1, i, NVR_EXT_BIND_SAMPLED_IMAGE, i, NVR_EXT_VIEW_2D, FALSE, 0 };
 	bindings[images] = { 0, 0, NVR_EXT_BIND_SAMPLER, 0, NVR_EXT_VIEW_2D, FALSE, push == 48 && targets == 1 ? 4u : push - 16 };
 	NVR_EXT_GRAPHICS_PIPELINE_DESC desc = {};
@@ -25,7 +25,7 @@ static bool loadFragRaw(Host& h, const char* name, UINT images, UINT push, UINT 
 	return true;
 }
 static bool drawRaw(Host& h, const FragPass& p, IDirect3DSurface9* t0, IDirect3DSurface9* t1, IUnknown* const* images, const void* push) {
-	NVR_EXT_RESOURCE_BINDING b[8] = {};
+	NVR_EXT_RESOURCE_BINDING b[12] = {};
 	for (UINT i = 0; i < p.images; i++) { b[i].Slot = i; b[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; b[i].pResource = images[i]; }
 	b[p.images].Slot = 0; b[p.images].Type = NVR_EXT_BIND_SAMPLER; b[p.images].pResource = gPointClamp;
 	NVR_EXT_DRAW_DESC d = {};
@@ -41,7 +41,7 @@ static bool scenePtDetail(Ctx& c) {
 	// ---- (1) the show pass
 	{
 		FragPass show;
-		if (!loadFragRaw(h, "RtPathTraceShow", 6, 48, 1, show)) return false;
+		if (!loadFragRaw(h, "RtPathTraceShow", 10, 48, 1, show)) return false;	// (2026-11-07 ptaaa-denoiser: + the specular images 6-9, stand-ins here)
 		Tex traced, albedo, raw, viewModel, frame, depth, out;
 		if (!makeTex(h, S, S, D3DFMT_A16B16G16R16F, false, traced) || !makeTex(h, S, S, D3DFMT_A16B16G16R16F, false, albedo) ||
 			!makeTex(h, S, S, D3DFMT_A16B16G16R16F, false, raw) || !makeTex(h, S, S, D3DFMT_R32F, false, viewModel) ||
@@ -60,7 +60,7 @@ static bool scenePtDetail(Ctx& c) {
 		struct { float exposure; uint32_t samplerIndex; float split, gamma; uint32_t modulate; float uvx, uvy; uint32_t keep; float detail, radius, texel[2]; } push =
 			{ 1.0f, 0, 0.0f, 1.0f / 2.2f, 1u | 2u, 1.0f, 1.0f, 0u, 1.0f, 4.0f, { 1.0f / S, 1.0f / S } };
 		static_assert(sizeof(push) == 48, "RtPathTraceShow's push block");
-		IUnknown* imgs[6] = { traced.t, albedo.t, raw.t, viewModel.t, frame.t, depth.t };
+		IUnknown* imgs[10] = { traced.t, albedo.t, raw.t, viewModel.t, frame.t, depth.t, traced.t, traced.t, traced.t, traced.t };
 		for (int on = 1; on >= 0; on--) {
 			push.detail = on ? 1.0f : 0.0f;
 			if (!drawRaw(h, show, out.s, nullptr, imgs, &push)) return false;

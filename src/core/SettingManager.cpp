@@ -56,7 +56,7 @@ template <> std::string SettingManager::ToString<int>(const int number) {
 }
 
 // The user config's [_Unofficial] SettingsVersion this build brings it up to (UpdateOldDefaults, below).
-static const int UnofficialSettingsVersion = 76;  // 53 was an enhanced-water step, since removed
+static const int UnofficialSettingsVersion = 77;  // (77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
 
 // UNOFFICIAL 2026-10-30: a setting is read only when the defaults file lists it (FillNode), so a line in the user's toml that
 // this build does not know (a key from a newer or an older build, a typo) silently did nothing. Each one is logged once per
@@ -607,6 +607,16 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 		if (saved && saved->contains("FirstPersonBody") && saved->at("FirstPersonBody").is_boolean() && saved->at("FirstPersonBody").as_boolean()) {
 			(*saved)["FirstPersonBody"] = false;
 			changed += std::string(changed.empty() ? "" : ", ") + "Main.Main.RayTracing.FirstPersonBody true -> false";
+		}
+	}
+	// 2026-11-07 (ptaaa-firstperson, RT-PATH-TRACING.md "ptaaa-firstperson"): FirstPersonBody on again: the camera rays pass over it, and every
+	// ray that starts or ends within arm's reach of the eye passes over it too (Compute/Rt/RtHidden.glsl: the reverse shadow, the gun shadowed
+	// by the head). A saved false (version 76's, or the default of the hours between) goes on once.
+	if (version < 77) {
+		tomlValue* saved = UserSection("Main.Main.RayTracing");
+		if (saved && saved->contains("FirstPersonBody") && saved->at("FirstPersonBody").is_boolean() && !saved->at("FirstPersonBody").as_boolean()) {
+			(*saved)["FirstPersonBody"] = true;
+			changed += std::string(changed.empty() ? "" : ", ") + "Main.Main.RayTracing.FirstPersonBody false -> true";
 		}
 	}
 	if (!changed.empty())

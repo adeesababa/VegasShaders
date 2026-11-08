@@ -315,7 +315,7 @@ static bool decalPT(Ctx& c, int& bad, int& same, int& shadedByPlain) {
 	std::vector<uint32_t> ids;
 	if (!stageWorld(h, w, ids)) return false;
 	const Camera cam = Camera::lookDir({ 0, 0, 2400 }, { 0, 0, -1 }, { 0, 1, 0 }, 1.6f, 1.6f);
-	std::vector<float> image(size_t(kLightTexels) * (2 + kGridRows) * 2, 0.0f);
+	std::vector<float> image(size_t(kLightTexels) * (3 + kGridRows) * 2, 0.0f);
 	const int lamps = 64;
 	for (int y = 0, i = 0; y < 8; y++) for (int x = 0; x < 8; x++, i++) {
 		const V3 q = V3(-1400 + x * 400.0f, -1400 + y * 400.0f, 150.0f + 10.0f * ((x + y) % 3)) - cam.eye;

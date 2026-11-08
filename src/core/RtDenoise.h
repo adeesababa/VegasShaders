@@ -32,6 +32,9 @@ namespace RtDenoise {
 										// TESR_CapturedNormalsBuffer alpha > 1.5) keep at most this many frames of history (0 = no cap). A talking
 										// face changes shape with no motion the reprojection knows of (lip-sync, expressions): 32 frames of the
 										// path tracer's light there left a second mouth and the hat's old shadow trailing (PTDenoisePeopleHistory)
+		IDirect3DBaseTexture9* People = nullptr;	// UNOFFICIAL 2026-11-07 (ptaaa-firstperson; RGB mode, with PeopleHistory): the people mask in its
+										// alpha instead of TESR_CapturedNormalsBuffer: > 1.5 people, > 3.5 the first-person view model, whose history
+										// stays at the same screen point (it moves with the camera; RtPathTrace.cpp ViewModelPrep's normals)
 		IDirect3DBaseTexture9* Guide = nullptr;			// UNOFFICIAL 2026-11-07 (RGB mode): the game's lit frame (the scene as stored) and the
 		IDirect3DBaseTexture9* GuideAlbedo = nullptr;	// first surface's colour: the a-trous passes stop at the game's own shading edges
 		float	GuideSigma = 0.0f;						// (their ratio; this relative difference weighs a tap down by 1 / e; 0 = off)
@@ -40,6 +43,26 @@ namespace RtDenoise {
 										// at 6 frames: trails clear in a few frames (NRD ReBLUR's anti-lag; PTDenoiseAntiLag)
 		int		MovingHistory = 0;		// UNOFFICIAL 2026-10-31 (RGB mode, with DenoiseBackbone and B1's object motion): pixels whose surface moves
 										// itself (> 0.25 units a frame) keep at most this many frames of history (0 = no cap; RT GI: GIMovingHistory)
+		// UNOFFICIAL 2026-11-07 (ptaaa-denoiser, docs/next/RT-PATH-TRACING.md "ptaaa-denoiser"):
+		bool	ObjectMotion = false;	// (RGB mode) B1's object motion ([Main.Main.Quality] ObjectMotion) subtracted before reprojecting also
+										// without DenoiseBackbone: a walking NPC's history follows him instead of trailing behind (MovingHistory then
+										// applies too). The path tracer's denoiser (PTDenoiseObjectMotion)
+		bool	Specular = false;		// (RGB mode) a SPECULAR signal (the path tracer's PTDenoiseSplit): Noisy .a = the specular hit distance
+										// (0 unknown, 60000 a miss); Compute\RtDenoiseTemporalSpec.frag reprojects by the reflected (virtual) point
+										// mixed with the surface by roughness, the a-trous passes keep smooth surfaces sharp
+		IDirect3DBaseTexture9* Roughness = nullptr;	// (Specular) .g = roughness (required)
+		float	MirrorHistory = 12.0f;	// (Specular) the history a mirror keeps (frames); MaxHistory from roughness 0.4 up
+		bool	Virtual = true;			// (Specular) the hit-distance (virtual) reprojection; false = the surface's only (the A/B)
+		float	MeanVariance = 0.0f;	// (RGB mode) the a-trous brightness test with the variance of the accumulated mean of up to this many
+										// frames (per-path variance / min(history, this); 0 / 1 = one path's, as before): converged fine shadows (a
+										// chain-link wire's) stay edges instead of noise to smooth away. PTDenoiseMeanVariance (2)
+		float	AntiFirefly = 0.0f;		// (RGB mode) k > 0: a new sample brighter than its 3 x 3 neighbours (the brightest, the centre left out)
+										// and its own fast history's mean + k deviations is clamped to that, and the excess is spread over the 5 x 5
+										// round into the history (Compute\RtDenoiseFirefly.frag): no white dots, the light kept. 0 = off.
+										// The path tracer: PTDenoiseAntiFirefly / PTDenoiseFireflyK
+		float	HistoryFix = 0.0f;		// (RGB mode) pixels with this many frames of history or fewer are smoothed by geometry only in the a-trous
+										// passes, more the newer (NRD ReLAX's history fix; 0 off): a newly seen pixel's single noisy path is not kept
+										// as a speckle by the brightness test (trails behind a moving lamp / object). The path tracer: PTDenoiseHistoryFix
 	};
 	struct Denoiser;
 

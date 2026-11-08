@@ -312,6 +312,7 @@ namespace RealTex {
 			copies.push_back(std::move(c));
 			infos.push_back({ VK_NULL_HANDLE, x.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL });
 			infoIds.push_back(op.id);
+			x.serial = ++t.serials;	// (2026-11-07, ptaaa-omm) micromaps made from the old texture under this id are stale (NvrRtOmm.inl)
 			t.textures[op.id] = x;
 			t.alive++;
 			t.aliveBytes += x.bytes;

@@ -6,6 +6,7 @@
 #include "EffectSelfTestCore.h"	// SelfTestCore::ConvertRow / SavePng (WIC, no device) for the report burst
 #include "RtCore.h"					// UNOFFICIAL 2026-11-01 the REPORT block's ray tracing line
 #include "RtSunShadows.h"
+#include "RtFogVisibility.h"	// UNOFFICIAL 2026-11-07 (ptaaa-fog) the REPORT block's line
 #include "RtPathTrace.h"	// UNOFFICIAL 2026-11-02 the reference path tracer's state line
 #include "../effects/Reflections/Reflections.h"
 #include "../effects/AmbientOcclusion/AmbientOcclusion.h"
@@ -2140,6 +2141,7 @@ namespace {
 		Logger::Log("REPORT %u ray tracing: core: %s | %s | %s | %s", n, RtCore::StatusText() ? RtCore::StatusText() : "?", RtSunShadows::StatusText().c_str(),
 			TheShaderManager->Effects.Reflections ? TheShaderManager->Effects.Reflections->RtStatusText().c_str() : "no Reflections effect", AmbientOcclusionEffect::RtStatusText().c_str());
 		Logger::Log("REPORT %u ray tracing: %s", n, RtPathTrace::StatusText().c_str());	// UNOFFICIAL 2026-11-02
+		Logger::Log("REPORT %u ray tracing: %s", n, RtFogVisibility::StatusText().c_str());	// UNOFFICIAL 2026-11-07 (ptaaa-fog)
 		{	// what the rays found: the traced outputs' means (a waiting 8x8 read-back of each, only here)
 			IDirect3DDevice9* device = TheRenderManager->device;
 			auto meanText = [&](const char* what, IDirect3DSurface9* surface, bool luma, const char* reading) {

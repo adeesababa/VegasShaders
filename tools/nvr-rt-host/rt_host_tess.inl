@@ -115,7 +115,7 @@ static bool tessPt(Ctx& c, const World& tlas, const std::vector<uint32_t>& ids, 
 	std::vector<float> albedo(S * S * 4, 0.0f);
 	for (UINT p = 0; p < S * S; p++) if (px[p].valid) { albedo[p * 4] = albedo[p * 4 + 1] = albedo[p * 4 + 2] = 0.5f; albedo[p * 4 + 3] = 1.0f; }
 	if (!h.Upload(c.aux16, albedo)) return false;
-	std::vector<float> image(size_t(kLightTexels) * (2 + kGridRows) * 2, 0.0f);
+	std::vector<float> image(size_t(kLightTexels) * (3 + kGridRows) * 2, 0.0f);
 	if (lampOn) { const V3 q = lampPos - cam.eye; const float v[8] = { q.x, q.y, q.z, 3000.0f, 1.0f, 1.0f, 1.0f, 0.0f }; std::memcpy(image.data(), v, sizeof(v)); }
 	RtTessContact::PackRow(&image[size_t(kLightTexels) * (1 + kGridRows) * 2], slack, contact);   // the frame row (49)
 	if (!h.Upload(gM.ptLamps, image)) return false;

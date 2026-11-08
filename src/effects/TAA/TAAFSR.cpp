@@ -28,6 +28,7 @@
 #include "../../core/ReactiveMask.h"	// UNOFFICIAL 2026-10-30 ReactiveMask: FSR's reactive mask from the world's alpha draws
 #include "../../core/ObjectMotion.h"	// UNOFFICIAL 2026-10-29 ObjectMotion: FSR's motion vectors for what moved itself
 #include "../../core/RenderRect.h"	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction (no RR in rect frames)
+#include "../../core/RtPathTrace.h"	// UNOFFICIAL 2026-11-07 (ptaaa-denoiser) RR's guides from the path tracer
 
 namespace {
 	// Constants of FSRPrep.comp (std140).
@@ -51,7 +52,8 @@ namespace {
 	const NVR_EXT_BINDING_DESC CompositeBindings[] = { IMG(0), IMG(1), IMG(2), IMG(3), IMG(4), POINTS };
 	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction: DlssRRGuides.comp (colour, normals, depth, material; the five guides; the constants)
 	// and DlssRRComposite.frag (RR's output, the frame before RR, the weapon's depth). Same conventions as above.
-	const NVR_EXT_BINDING_DESC RRGuidesBindings[] = { IMG(0), IMG(1), IMG(2), IMG(3), UAV(4), UAV(5), UAV(6), UAV(7), UAV(8), CB(2, 0), POINTS, IMG(9) };	// IMG(9): UNOFFICIAL 2026-10-31 TESR_AlbedoBuffer (RRAlbedo 2)
+	const NVR_EXT_BINDING_DESC RRGuidesBindings[] = { IMG(0), IMG(1), IMG(2), IMG(3), UAV(4), UAV(5), UAV(6), UAV(7), UAV(8), CB(2, 0), POINTS, IMG(9),
+		IMG(10), IMG(11), IMG(12) };	// IMG(9): UNOFFICIAL 2026-10-31 TESR_AlbedoBuffer (RRAlbedo 2); IMG(10-12): 2026-11-07 (ptaaa-denoiser) the path tracer's albedos
 	const NVR_EXT_BINDING_DESC RRCompositeBindings[] = { IMG(0), IMG(1), IMG(2), POINTS };
 #undef IMG
 #undef UAV
@@ -517,7 +519,18 @@ bool TAAEffect::RayReconstruct(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 	guides.up = D3DXVECTOR4(viewMatrix._12, viewMatrix._22, viewMatrix._32, 0.0f);
 	guides.forward = D3DXVECTOR4(viewMatrix._13, viewMatrix._23, viewMatrix._33, 0.0f);
 	guides.view = D3DXVECTOR4(1.0f / proj._11, 1.0f / proj._22, linearization, RRSettings.Roughness);
-	guides.options = D3DXVECTOR4(albedoOn ? 2.0f : RRSettings.Albedo >= 1 ? 1.0f : 0.0f, RRSettings.Normals == 1 ? 1.0f : 0.0f, materialOn ? 1.0f : 0.0f, 0.0f);	// x 2: the albedo buffer (2026-10-31)
+	// UNOFFICIAL 2026-11-07 (ptaaa-denoiser) the path traced picture is the scene (PTRealtime): RR's albedos and roughness are the path
+	// tracer's own (what it divided its light by), w 1 diffuse only, 2 + specular and roughness (PTDenoiseSplit)
+	IDirect3DTexture9 *ptAlbedo = nullptr, *ptSpecRG = nullptr, *ptSpecB = nullptr;
+	const bool ptGuides = RtPathTrace::RrGuides(&ptAlbedo, &ptSpecRG, &ptSpecB);
+	const float ptMode = ptGuides ? (ptSpecRG && ptSpecB ? 2.0f : 1.0f) : 0.0f;
+	static UInt32 ptGuideLogs = 0;
+	if (ptMode != rrPtGuideMode) {
+		rrPtGuideMode = ptMode;
+		if (++ptGuideLogs <= 40) Logger::Log("UNOFFICIAL DLSS RR: the guides' albedo %s", ptMode > 1.5f ? "and roughness are the path tracer's (diffuse + specular, PTDenoiseSplit)" :
+			ptMode > 0.5f ? "is the path tracer's diffuse one (the specular albedo and roughness: the G-buffer's)" : "and roughness are the G-buffer's (no path traced picture)");
+	}
+	guides.options = D3DXVECTOR4(albedoOn ? 2.0f : RRSettings.Albedo >= 1 ? 1.0f : 0.0f, RRSettings.Normals == 1 ? 1.0f : 0.0f, materialOn ? 1.0f : 0.0f, ptMode);	// x 2: the albedo buffer (2026-10-31)
 	guides.size = D3DXVECTOR4((float)width, (float)height, 0.0f, 0.0f);
 	ID3D9NvrExtBuffer* guidesBuffer = ExtUniforms(rrGuidesUniforms, &guides, sizeof(guides));
 	if (!guidesBuffer) return fail("its constant buffers could not be written");
@@ -525,7 +538,9 @@ bool TAAEffect::RayReconstruct(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 		NVR_EXT_RESOURCE_BINDING b[] = { Image(0, color), Image(1, normals), Image(2, depth), Image(3, materialOn ? (IUnknown*)material : (IUnknown*)depth),
 			Image(4, rrColor.Texture, true), Image(5, rrDiffuse.Texture, true), Image(6, rrSpecular.Texture, true), Image(7, rrNormals.Texture, true),
 			Image(8, rrRoughness.Texture, true), Buffer(0, NVR_EXT_BIND_UNIFORM_BUFFER, guidesBuffer), Sampler(0, point),
-			Image(9, albedoOn ? (IUnknown*)albedo : (IUnknown*)depth) };	// UNOFFICIAL 2026-10-31 AlbedoBuffer (a placeholder the shader never reads below RRAlbedo 2)
+			Image(9, albedoOn ? (IUnknown*)albedo : (IUnknown*)depth),	// UNOFFICIAL 2026-10-31 AlbedoBuffer (a placeholder the shader never reads below RRAlbedo 2)
+			Image(10, ptAlbedo ? (IUnknown*)ptAlbedo : (IUnknown*)depth), Image(11, ptSpecRG ? (IUnknown*)ptSpecRG : (IUnknown*)depth),	// (2026-11-07 ptaaa-denoiser)
+			Image(12, ptSpecB ? (IUnknown*)ptSpecB : (IUnknown*)depth) };
 		static GpuTimer guidesTimer("  RR guides");
 		GpuProfileScope gpuGuides(guidesTimer, Device);
 		if (!RRDispatch(rrGuides, b, _countof(b), (width + 7) / 8, (height + 7) / 8)) return fail("DlssRRGuides failed to dispatch");

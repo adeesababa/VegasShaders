@@ -7,6 +7,10 @@
 // rtConeWidth: the width of the ray's footprint at the hit in world units (set it before calling rtHit*: the camera's pixel spread times
 // the distance travelled, widened by rough reflections). 0 (the default) = the finest mip (exact alpha tests, shadow rays).
 // A shader built before protocol 7 never declares set 1 and keeps the atlases; RT_NO_REAL_TEXTURES leaves this out on purpose.
+// (2026-11-07, ptaaa-omm) rtConeWidth also sets the mip of the alpha tests during traversal (rtAlphaPass): the helper's opacity micromaps
+// use lod-0 states only in frames whose passes are all on NvrRtOmm.inl FinestMipShader's list (shaders that never set rtConeWidth). A
+// shader that sets it must not be put on that list. (No shipped shader defines RT_NO_REAL_TEXTURES: the micromaps of a slot with a real
+// texture are built from it, not from the atlas.)
 
 #ifndef RT_TEXTURES_INCLUDED
 #define RT_TEXTURES_INCLUDED

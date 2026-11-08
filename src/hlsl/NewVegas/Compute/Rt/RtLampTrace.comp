@@ -70,6 +70,7 @@ layout(set = 0, binding = 5, rg32f) uniform readonly image2D lampTable;
 layout(set = 0, binding = 12, r16f) uniform readonly image2D alphaAtlas;
 #define RT_ALPHA_ATLAS alphaAtlas
 #include "RtAlpha.glsl"
+#include "RtHidden.glsl"   // (2026-11-07 ptaaa-firstperson)
 #define RT_CONTACT_DEPTH depthImage
 #include "RtContact.glsl"
 #ifdef SPLIT
@@ -127,10 +128,14 @@ bool blocked(vec3 origin, vec3 segment, float tMin, float tMax, uint mask) {
 	// (2026-11-03 rtalpha) jitter.z 1: alpha-tested casters (foliage cards, fences, chain link, wires: non-opaque, mask 0x10) come as
 	// candidates and their diffuse alpha decides (RtAlpha.glsl, as the sun's rays); 0: they are skipped (mask without 0x10), as before
 	const bool testAlpha = p.jitter.z > 0.5;
+	// (2026-11-07 ptaaa-firstperson) from (the view model, a counter you stand at) or toward (the Pip-Boy light, the flashlight moved
+	// onto the beam) a point within arm's reach of the eye: the hidden first-person body is passed over (RtHidden.glsl)
+	if (rtHiddenPassOver(origin, origin + segment, p.origin.xyz))
+		return rtBlockedPassHidden(origin, segment, tMin, tMax, testAlpha ? (mask | 0x10u) : mask, testAlpha, oneSided ? kRtOneSided : kRtAnyHit);
 	rayQueryInitializeEXT(q, scene, (oneSided ? 0u : gl_RayFlagsTerminateOnFirstHitEXT) | (testAlpha ? 0u : gl_RayFlagsOpaqueEXT),
 		testAlpha ? (mask | 0x10u) : mask, origin, tMin, segment, tMax);
 	// (2026-11-07 rtgap-decals) a shadow ray: decals (NVR_RT_CUSTOM_DECAL) never block it (RtAlpha.glsl rtAlphaPassShadow)
-	while (rayQueryProceedEXT(q))
+	for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else
 		if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
 			rtAlphaPassShadow(rayQueryGetIntersectionInstanceCustomIndexEXT(q, false), rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
 				rayQueryGetIntersectionBarycentricsEXT(q, false)))
@@ -147,9 +152,14 @@ float closestBlocker(vec3 origin, vec3 segment, float tMin, float tMax, uint mas
 	rayQueryEXT q;
 	bool oneSided = p.flags.x > 0.5;
 	const bool testAlpha = p.jitter.z > 0.5;
+	if (rtHiddenPassOver(origin, origin + segment, p.origin.xyz)) {   // (2026-11-07 ptaaa-firstperson, as blocked())
+		float t;
+		if (!rtBlockedPassHidden(origin, segment, tMin, tMax, testAlpha ? (mask | 0x10u) : mask, testAlpha, oneSided ? kRtOneSided : kRtClosest, t)) return -1.0;
+		return t;
+	}
 	rayQueryInitializeEXT(q, scene, testAlpha ? 0u : gl_RayFlagsOpaqueEXT, testAlpha ? (mask | 0x10u) : mask, origin, tMin, segment, tMax);
 	// (2026-11-07 rtgap-decals) a shadow ray: decals (NVR_RT_CUSTOM_DECAL) never block it (RtAlpha.glsl rtAlphaPassShadow)
-	while (rayQueryProceedEXT(q))
+	for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else
 		if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
 			rtAlphaPassShadow(rayQueryGetIntersectionInstanceCustomIndexEXT(q, false), rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
 				rayQueryGetIntersectionBarycentricsEXT(q, false)))

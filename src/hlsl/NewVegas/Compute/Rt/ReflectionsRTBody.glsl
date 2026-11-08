@@ -86,17 +86,17 @@ const uint RecordLand = 0x01u, RecordGlow = 0x04u, RecordAlbedoKnown = 0x10u;
 // Every query's loop (a macro: a ray query cannot be passed to a function): alpha-tested candidates are confirmed where their texel
 // passes; opaque geometry commits by itself.
 #ifdef RT_ALPHA
-#define RtProceed(q) while (rayQueryProceedEXT(q)) { 		if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT && 			rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false), 				rayQueryGetIntersectionBarycentricsEXT(q, false)) || p.size.w > 1.5) 			rayQueryConfirmIntersectionEXT(q); }
+#define RtProceed(q) for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else { 		if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT && 			rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false), 				rayQueryGetIntersectionBarycentricsEXT(q, false)) || p.size.w > 1.5) 			rayQueryConfirmIntersectionEXT(q); }
 // (2026-11-07 rtgap-decals) the shadow rays at the hit: decals (NVR_RT_CUSTOM_DECAL) never block them (RtAlpha.glsl rtAlphaPassShadow),
 // AlphaSolid's whole cards included
-#define RtProceedShadow(q) while (rayQueryProceedEXT(q)) { \
+#define RtProceedShadow(q) for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else { \
 		if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT && !rtIsDecal(rayQueryGetIntersectionInstanceCustomIndexEXT(q, false)) && \
 			(p.size.w > 1.5 || rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false), \
 				rayQueryGetIntersectionBarycentricsEXT(q, false)))) \
 			rayQueryConfirmIntersectionEXT(q); }
 #else
-#define RtProceed(q) while (rayQueryProceedEXT(q)) { }
-#define RtProceedShadow(q) while (rayQueryProceedEXT(q)) { }
+#define RtProceed(q) for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else { }
+#define RtProceedShadow(q) for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else { }
 #endif
 
 vec3 OctDecode(vec2 e) {

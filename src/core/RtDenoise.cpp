@@ -22,6 +22,8 @@ namespace RtDenoise {
 		IDirect3DTexture9*	historyB[2] = {};
 		IDirect3DTexture9*	chainB[2] = {};
 		IDirect3DTexture9*	scratchB = nullptr;		// the last a-trous pass' B output (not needed after)
+		IDirect3DTexture9*	historyC[2] = {};		// (2026-11-07 ptaaa-denoiser) Specular: (tracked hit distance, roughness, virtual share, 0)
+		bool				specular = false;
 		IDirect3DTexture9*	park = nullptr;			// 8 x 8: the device's render target while the passes run (a pass may not draw into it)
 		int					channels = 0;
 		GpuTimer*			timer = nullptr;			// "RT denoise: <name>" in the GPU profile
@@ -38,6 +40,9 @@ namespace RtDenoise {
 		ID3D9NvrExtPipeline* atrous = nullptr;
 		ID3D9NvrExtPipeline* temporalRgb = nullptr;
 		ID3D9NvrExtPipeline* atrousRgb = nullptr;
+		ID3D9NvrExtPipeline* temporalSpec = nullptr;	// (2026-11-07 ptaaa-denoiser) Settings.Specular
+		ID3D9NvrExtPipeline* fireflyPipe = nullptr;		// (2026-11-07 ptaaa-denoiser) Settings.AntiFirefly
+		bool specTried = false;
 		bool tried = false;
 		// UNOFFICIAL 2026-10-30 DLSS RR: counts the calls Run skipped for RR (0 while it never did). A denoiser that ran before it changed
 		// holds a history from before those frames, also one its caller did not call meanwhile (RtLampShadows stops at rank 0).
@@ -73,13 +78,14 @@ namespace RtDenoise {
 			return found == TheShaderManager->ConstantsTable.end() ? nullptr : found->second;
 		}
 
-		ID3D9NvrExtPipeline* Make(const char* name, UINT images, UINT pushSize, UINT targets = 1, UINT writeMask = 0xFu) {
+		// (2026-11-07 ptaaa-denoiser) samplerAt: the push block's byte of the sampler's heap index (default: its last 16 bytes' start)
+		ID3D9NvrExtPipeline* Make(const char* name, UINT images, UINT pushSize, UINT targets = 1, UINT writeMask = 0xFu, UINT samplerAt = 0xFFFFFFFFu) {
 			std::vector<char> spirv;
 			ID3D9NvrExt* ext = DxvkCompute::Extension();
 			if (!ext || !DxvkCompute::LoadSpirv(name, spirv)) return nullptr;
-			NVR_EXT_BINDING_DESC bindings[8] = {};	// images + the sampler
+			NVR_EXT_BINDING_DESC bindings[10] = {};	// images + the sampler
 			for (UINT i = 0; i < images; i++) bindings[i] = { 1, i, NVR_EXT_BIND_SAMPLED_IMAGE, i, NVR_EXT_VIEW_2D, FALSE, 0 };
-			bindings[images] = { 0, 0, NVR_EXT_BIND_SAMPLER, 0, NVR_EXT_VIEW_2D, FALSE, pushSize - 16 };	// samplerIndex: the last 16 bytes
+			bindings[images] = { 0, 0, NVR_EXT_BIND_SAMPLER, 0, NVR_EXT_VIEW_2D, FALSE, samplerAt != 0xFFFFFFFFu ? samplerAt : pushSize - 16 };	// samplerIndex: the last 16 bytes
 			NVR_EXT_GRAPHICS_PIPELINE_DESC desc = {};
 			desc.pFragmentSpirv = spirv.data();
 			desc.FragmentSpirvSize = (UINT)spirv.size();
@@ -100,21 +106,62 @@ namespace RtDenoise {
 		}
 
 		bool Draw(ID3D9NvrExtPipeline* pipeline, IDirect3DSurface9* target, IUnknown* const* images, UINT count, const void* push, UINT pushSize,
-			IDirect3DSurface9* target2 = nullptr) {
-			NVR_EXT_RESOURCE_BINDING bindings[8] = {};	// images + the sampler
+			IDirect3DSurface9* target2 = nullptr, IDirect3DSurface9* target3 = nullptr, IDirect3DSurface9* target4 = nullptr) {
+			NVR_EXT_RESOURCE_BINDING bindings[10] = {};	// images + the sampler
 			for (UINT i = 0; i < count; i++) { bindings[i].Slot = i; bindings[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[i].pResource = images[i]; }
 			bindings[count].Slot = 0; bindings[count].Type = NVR_EXT_BIND_SAMPLER; bindings[count].pResource = DxvkCompute::PointClamp();
 			NVR_EXT_DRAW_DESC draw = {};
 			draw.pPipeline = pipeline;
-			draw.TargetCount = target2 ? 2 : 1;
+			draw.TargetCount = target4 ? 4 : target3 ? 3 : target2 ? 2 : 1;
 			draw.Targets[0].pResource = target;
 			draw.Targets[1].pResource = target2;
+			draw.Targets[2].pResource = target3;
+			draw.Targets[3].pResource = target4;
 			draw.BindingCount = count + 1;
 			draw.pBindings = bindings;
 			draw.pPushData = push;
 			draw.PushDataSize = pushSize;
 			return SUCCEEDED(DxvkCompute::Extension()->Draw(&draw));
 		}
+
+		// The passes' push blocks (tools/nvr-rt-host/rt_layout_check.py checks them against the shaders' and the host's mirrors)
+		struct TemporalPush {	// RtDenoiseTemporal.frag / RtDenoiseTemporalRgb.frag
+			float prevViewProj[16];
+			float forward[4], right[4], up[4], move[4], params[4];
+			float backbone[4];	// 2026-10-31 DenoiseBackbone: x object motion, y the shared disocclusion mask
+			float rect[4];		// (2026-11-03) xy this frame's RenderRect scale, zw last frame's
+			UInt32 samplerIndex;
+			float clampK;		// (2026-11-06) RGB mode: HistoryClamp
+			float peopleCap;	// (2026-11-07) RGB mode: PeopleHistory (0 off)
+			float antiLag;		// (2026-11-07) RGB mode: AntiLag (0 off)
+			float fireflyK;		// (2026-11-07 ptaaa-denoiser) RGB mode: AntiFirefly (0 off; not in RtDenoiseTemporal.frag's block: it gets 192 bytes)
+		};
+		struct SpecPush {		// (2026-11-07 ptaaa-denoiser) RtDenoiseTemporalSpec.frag: TemporalPush + spec before the sampler
+			float prevViewProj[16];
+			float forward[4], right[4], up[4], move[4], params[4];
+			float backbone[4];
+			float rect[4];
+			float spec[4];		// x MirrorHistory, y 1: the virtual reprojection
+			UInt32 samplerIndex;
+			float clampK;
+			float peopleCap;
+			float antiLag;
+			float fireflyK;
+		};
+		struct AtrousPush {		// RtDenoiseAtrous.frag / RtDenoiseAtrousRgb.frag (guideSigma, specular: RGB mode only)
+			float params[4], size[4];
+			UInt32 samplerIndex;
+			float guideSigma;
+			UInt32 specular;
+			float historyFix;	// (2026-11-07 ptaaa-denoiser) RGB mode: Settings.HistoryFix
+		};
+		static_assert(sizeof(TemporalPush) == 196 && sizeof(SpecPush) == 212 && sizeof(AtrousPush) == 48, "the passes' push blocks");
+		struct FireflyPush {	// (2026-11-07 ptaaa-denoiser) RtDenoiseFirefly.frag
+			float size[4];
+			UInt32 samplerIndex;
+			UInt32 pad0, pad1, pad2;
+		};
+		static_assert(offsetof(SpecPush, spec) == offsetof(TemporalPush, samplerIndex), "SpecPush = TemporalPush's head + spec");
 
 		IDirect3DSurface9* Surface(IDirect3DTexture9* t) {
 			IDirect3DSurface9* s = nullptr;
@@ -240,14 +287,19 @@ namespace RtDenoise {
 		if (!d || !Noisy || !Output || !DxvkCompute::Extension() || !DxvkCompute::PointClamp()) return false;
 		if (!tried) {
 			tried = true;
-			temporal = Make("RtDenoiseTemporal", 5, 192);	// (2026-11-03: + rect)	// 2026-10-31: + motion, backbone (stand-ins when off)
+			temporal = Make("RtDenoiseTemporal", 5, 192, 1, 0xFu, offsetof(TemporalPush, samplerIndex));	// (2026-11-03: + rect)	// 2026-10-31: + motion, backbone (stand-ins when off)
 			atrous = Make("RtDenoiseAtrous", 3, 48);
-			temporalRgb = Make("RtDenoiseTemporalRgb", 7, 192, 2);	// (2026-11-07: + the captured normals, PeopleHistory)
+			temporalRgb = Make("RtDenoiseTemporalRgb", 7, sizeof(TemporalPush), 3, 0xFu, offsetof(TemporalPush, samplerIndex));	// (2026-11-07: + the captured normals, PeopleHistory; ptaaa-denoiser: + the firefly excess target)
+			fireflyPipe = Make("RtDenoiseFirefly", 3, sizeof(FireflyPush), 2);	// (2026-11-07 ptaaa-denoiser) AntiFirefly's spread (a missing .spv: AntiFirefly off)
 			backbonePipe = Make("RtBackbone", 3, 160);
 			atrousRgb = Make("RtDenoiseAtrousRgb", 5, 48, 2);	// (2026-11-07: + the guide frame and albedo)
 		}
+		// (2026-11-07 ptaaa-denoiser) the specular temporal pass, made on its first use (a missing .spv only turns the specular mode off)
+		if (S.Specular && !specTried) { specTried = true; temporalSpec = Make("RtDenoiseTemporalSpec", 9, sizeof(SpecPush), 4, 0xFu, offsetof(SpecPush, samplerIndex)); }
 		const bool rgb = S.Channels == 3;
 		if (rgb && (!temporalRgb || !atrousRgb)) return false;
+		const bool spec = rgb && S.Specular;	// (2026-11-07 ptaaa-denoiser)
+		if (spec && (!temporalSpec || !S.Roughness)) return false;
 		IDirect3DBaseTexture9* depth = Texture("TESR_DepthBuffer");
 		IDirect3DBaseTexture9* normals = Texture("TESR_NormalsBuffer");
 		const D3DXVECTOR4* cameraData = Constant("TESR_CameraData");
@@ -255,11 +307,12 @@ namespace RtDenoise {
 
 		const UINT scale = S.Downscale == 2 ? 2u : 1u;
 		const UINT w = (std::max)(1u, (UINT)TheRenderManager->width / scale), h = (std::max)(1u, (UINT)TheRenderManager->height / scale);
-		if (d->width != w || d->height != h || !d->history[0] || d->channels != S.Channels) {
+		if (d->width != w || d->height != h || !d->history[0] || d->channels != S.Channels || d->specular != spec) {
 			IDirect3DTexture9** all[] = { &d->history[0], &d->history[1], &d->chain[0], &d->chain[1], &d->historyB[0], &d->historyB[1],
-				&d->chainB[0], &d->chainB[1], &d->scratchB, &d->park };
+				&d->chainB[0], &d->chainB[1], &d->scratchB, &d->historyC[0], &d->historyC[1], &d->park };
 			for (IDirect3DTexture9** t : all) if (*t) { (*t)->Release(); *t = nullptr; }
-			const int count = rgb ? 9 : 4;
+			d->specular = spec;
+			const int count = spec ? 11 : rgb ? 9 : 4;
 			for (int i = 0; i < count; i++) Device->CreateTexture(w, h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, all[i], nullptr);
 			Device->CreateTexture(8, 8, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &d->park, nullptr);
 			d->width = w; d->height = h;
@@ -268,6 +321,7 @@ namespace RtDenoise {
 			for (int i = 0; i < count; i++) if (!*all[i]) return false;
 			if (!d->park) return false;
 		}
+		if (spec && (!d->historyC[0] || !d->historyC[1])) return false;
 
 		// The camera: this frame's basis (as RtSunShadows / SunShadows.glsl), last frame's view-projection and the camera's move since
 		const D3DXMATRIX& view = TheRenderManager->viewMatrix;
@@ -281,16 +335,7 @@ namespace RtDenoise {
 		const bool cut = !d->hasHistory || S.Reset || D3DXVec3Length(&move) > 512.0f || rescaled;	// a jump: a camera cut, a load, a teleport, a new RenderScale
 		if (cut) SessionLog::HistoryReset("RT denoiser", !d->hasHistory ? "no history" : S.Reset ? "reset asked (cut / mode / size)" : "camera moved over 512 units");	// UNOFFICIAL 2026-11-01
 
-		struct {
-			float prevViewProj[16];
-			float forward[4], right[4], up[4], move[4], params[4];
-			float backbone[4];	// 2026-10-31 DenoiseBackbone: x object motion, y the shared disocclusion mask
-			float rect[4];		// (2026-11-03) xy this frame's RenderRect scale, zw last frame's
-			UInt32 samplerIndex;
-			float clampK;		// (2026-11-06) RGB mode: HistoryClamp
-			float peopleCap;	// (2026-11-07) RGB mode: PeopleHistory (0 off)
-			float antiLag;		// (2026-11-07) RGB mode: AntiLag (0 off)
-		} t = {};
+		TemporalPush t = {};
 		t.rect[0] = scaleX; t.rect[1] = scaleY; t.rect[2] = rescaled ? scaleX : d->lastScale[0]; t.rect[3] = rescaled ? scaleY : d->lastScale[1];
 		d->lastScale[0] = scaleX; d->lastScale[1] = scaleY;
 		memcpy(t.prevViewProj, &d->prevViewProj, 64);
@@ -312,23 +357,24 @@ namespace RtDenoise {
 			const D3DXVECTOR4 basis[3] = { D3DXVECTOR4(t.forward), D3DXVECTOR4(t.right), D3DXVECTOR4(t.up) };
 			shared = BuildBackbone(Device, depth, cameraData->y, basis);
 		}
-		const bool motion = shared && ObjectMotion::Ready();
+		// (2026-11-07 ptaaa-denoiser) Settings.ObjectMotion: the object motion also without the shared backbone (RGB mode)
+		const bool motion = (shared || (rgb && S.ObjectMotion)) && ObjectMotion::Ready();
 		t.backbone[0] = motion ? 1.0f : 0.0f;
 		t.backbone[1] = shared ? 1.0f : 0.0f;
 		t.backbone[2] = motion && rgb ? (float)(std::max)(S.MovingHistory, 0) : 0.0f;	// 2026-10-31 (rt-ao-sky) RT GI: GIMovingHistory
 		t.backbone[3] = shared && scale == 2 ? 1.0f : 0.0f;	// 2026-10-31 (rt-ao-sky) half size: the mask over the pixel's 2 x 2 full-size ones
 		IUnknown* motionImage = motion ? (IUnknown*)ObjectMotion::Texture : (IUnknown*)depth;
 		IUnknown* sharedImage = shared ? (IUnknown*)shared : (IUnknown*)depth;
-		struct { float params[4], size[4]; UInt32 samplerIndex; float guideSigma; UInt32 pad[2]; } a = {};	// (guideSigma: RGB mode only)
+		AtrousPush a = {};
 		a.params[1] = S.DepthSigma; a.params[2] = S.NormalPower; a.params[3] = S.ValueSigma;
-		a.size[0] = 1.0f / w; a.size[1] = 1.0f / h; a.size[2] = S.Ids ? 1.0f : 0.0f; a.size[3] = S.Kernel == 3 ? 1.0f : 0.0f;
+		a.size[0] = 1.0f / w; a.size[1] = 1.0f / h; a.size[2] = S.Ids ? 1.0f : rgb && S.MeanVariance > 1.0f ? S.MeanVariance : 0.0f; a.size[3] = S.Kernel == 3 ? 1.0f : 0.0f;	// (2026-11-07 ptaaa-denoiser: size.z >= 2 = MeanVariance, RGB mode)
 		const int iterations = (std::max)(0, (std::min)(S.Iterations, 5));
 		const UInt32 last = d->frame & 1, now = (d->frame + 1) & 1;
 		bool ok = true;
 		if (!rgb) {
 			IDirect3DSurface9* nowSurface = Surface(d->history[now]);
 			IUnknown* temporalImages[5] = { Noisy, d->history[last], depth, motionImage, sharedImage };
-			ok = nowSurface && Draw(temporal, nowSurface, temporalImages, 5, &t, sizeof(t));
+			ok = nowSurface && Draw(temporal, nowSurface, temporalImages, 5, &t, 192);	// (its block ends before fireflyK)
 			if (nowSurface) nowSurface->Release();
 			// a-trous: history -> chain[0] -> chain[1] -> ... ; the last one into Output (no iterations: a copy, step 0)
 			IDirect3DTexture9* source = d->history[now];
@@ -343,16 +389,45 @@ namespace RtDenoise {
 			}
 		}
 		else {
-			IDirect3DSurface9* nowA = Surface(d->history[now]);
-			IDirect3DSurface9* nowB = Surface(d->historyB[now]);
+			// (2026-11-07 ptaaa-denoiser) AntiFirefly: the temporal pass writes A / B into chain[0] / chainB[0] and the clamped excess into
+			// scratchB, then RtDenoiseFirefly.frag spreads the excess into history[now] / historyB[now]; off: A / B straight into the history
+			// (the excess target: scratchB, 0)
+			const bool firefly = S.AntiFirefly > 0.0f && fireflyPipe;
+			t.fireflyK = firefly ? S.AntiFirefly : 0.0f;
+			IDirect3DSurface9* nowA = Surface(firefly ? d->chain[0] : d->history[now]);
+			IDirect3DSurface9* nowB = Surface(firefly ? d->chainB[0] : d->historyB[now]);
+			IDirect3DSurface9* excess = Surface(d->scratchB);
 			// (2026-11-07) PeopleHistory: the captured normals mark people's pixels (alpha > 1.5); without them (CapturedNormals off) no cap
-			IDirect3DBaseTexture9* captured = S.PeopleHistory > 0.0f ? Texture("TESR_CapturedNormalsBuffer") : nullptr;
+			// (2026-11-07 ptaaa-firstperson) or the caller's mask (Settings.People: also the view model, > 3.5)
+			IDirect3DBaseTexture9* captured = S.PeopleHistory > 0.0f ? (S.People ? S.People : Texture("TESR_CapturedNormalsBuffer")) : nullptr;
 			t.peopleCap = captured ? S.PeopleHistory : 0.0f;
 			t.antiLag = (std::max)(S.AntiLag, 0.0f);
 			IUnknown* temporalImages[7] = { Noisy, d->history[last], depth, d->historyB[last], motionImage, sharedImage, captured ? (IUnknown*)captured : (IUnknown*)depth };
-			ok = nowA && nowB && Draw(temporalRgb, nowA, temporalImages, 7, &t, sizeof(t), nowB);
+			if (!spec) ok = nowA && nowB && excess && Draw(temporalRgb, nowA, temporalImages, 7, &t, sizeof(t), nowB, excess);
+			else {	// (2026-11-07 ptaaa-denoiser) the specular temporal pass: + the roughness and history C; its push = t's head + spec before the sampler
+				IDirect3DSurface9* nowC = Surface(d->historyC[now]);
+				SpecPush ts = {};
+				memcpy(&ts, &t, offsetof(TemporalPush, samplerIndex));	// prevViewProj .. rect
+				ts.spec[0] = (std::max)(S.MirrorHistory, 1.0f); ts.spec[1] = S.Virtual ? 1.0f : 0.0f;
+				ts.clampK = t.clampK; ts.peopleCap = t.peopleCap; ts.antiLag = t.antiLag; ts.fireflyK = t.fireflyK;
+				IUnknown* specImages[9] = { temporalImages[0], temporalImages[1], temporalImages[2], temporalImages[3], temporalImages[4], temporalImages[5],
+					temporalImages[6], S.Roughness, d->historyC[last] };
+				ok = nowA && nowB && nowC && excess && Draw(temporalSpec, nowA, specImages, 9, &ts, sizeof(ts), nowB, nowC, excess);
+				if (nowC) nowC->Release();
+			}
 			if (nowA) nowA->Release();
 			if (nowB) nowB->Release();
+			if (excess) excess->Release();
+			if (ok && firefly) {	// (2026-11-07 ptaaa-denoiser) the excess spread over the 5 x 5 round, into the history
+				IDirect3DSurface9* history = Surface(d->history[now]);
+				IDirect3DSurface9* historyB = Surface(d->historyB[now]);
+				FireflyPush f = {};
+				f.size[0] = 1.0f / w; f.size[1] = 1.0f / h;
+				IUnknown* images[3] = { d->chain[0], d->scratchB, d->chainB[0] };
+				ok = history && historyB && Draw(fireflyPipe, history, images, 3, &f, sizeof(f), historyB);
+				if (history) history->Release();
+				if (historyB) historyB->Release();
+			}
 			IDirect3DTexture9* sourceA = d->history[now];
 			IDirect3DTexture9* sourceB = d->historyB[now];
 			IDirect3DSurface9* scratch = Surface(d->scratchB);
@@ -362,9 +437,12 @@ namespace RtDenoise {
 				IDirect3DSurface9* targetB = lastPass ? nullptr : Surface(d->chainB[i & 1]);
 				a.params[0] = iterations ? (float)(1 << i) : 0.0f;
 				// (2026-11-07) the guide: the game's frame and the first surface's colour (stand-ins and sigma 0 when not given)
-				const bool guide = rgb && S.Guide && S.GuideAlbedo && S.GuideSigma > 0.0f;
+				const bool guide = rgb && !spec && S.Guide && S.GuideAlbedo && S.GuideSigma > 0.0f;
 				a.guideSigma = guide ? S.GuideSigma : 0.0f;
-				IUnknown* images[5] = { sourceA, normals, sourceB, guide ? (IUnknown*)S.Guide : (IUnknown*)sourceA, guide ? (IUnknown*)S.GuideAlbedo : (IUnknown*)sourceA };
+				a.specular = (spec ? 1u : 0u) | (rgb && S.AntiFirefly > 0.0f && fireflyPipe ? 2u : 0u);	// (2026-11-07 ptaaa-denoiser) bit 0 specular mode (the roughness in the guide frame's slot), bit 1 the symmetric test (AntiFirefly)
+				a.historyFix = (std::max)(S.HistoryFix, 0.0f);	// (2026-11-07 ptaaa-denoiser)
+				IUnknown* images[5] = { sourceA, normals, sourceB, spec ? (IUnknown*)S.Roughness : guide ? (IUnknown*)S.Guide : (IUnknown*)sourceA,
+					guide ? (IUnknown*)S.GuideAlbedo : (IUnknown*)sourceA };
 				ok = Draw(atrousRgb, lastPass ? Output : targetA, images, 5, &a, sizeof(a), lastPass ? scratch : targetB);
 				if (targetA) targetA->Release();
 				if (targetB) targetB->Release();

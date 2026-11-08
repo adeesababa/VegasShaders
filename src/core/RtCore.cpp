@@ -10,6 +10,7 @@
 
 #include "RtCore.h"
 bool RtMaterialRuleOf(NiGeometry* geometry, float* roughness, float* metal);	// UNOFFICIAL 2026-11-03 (NewVegas/Hooks/Render.cpp)
+const char* RtMaterialClassOf(NiGeometry* geometry);	// UNOFFICIAL 2026-11-07 ptaaa-materials (NewVegas/Hooks/Render.cpp)
 #include "DxvkCompute.h"
 #include "GpuProfiler.h"
 #include "PlantWind.h"	// (2026-10-30) PlantSway: a wind-bent plant's traced instance leans with it
@@ -180,6 +181,7 @@ namespace {
 		// 2 the source op sent (its instances are flagged), 3 never (no texcoords, no textures, a vertex layout the data cannot take)
 		UInt32	dispData[3] = { 0, 0, 0 };
 		UInt8	dispState = 0;
+		UInt32	triangles = 0;		// (2026-11-07 ptaaa-emissive) its triangle count when built (PTEmissive's list; 0: unknown)
 	};
 
 	// A diffuse texture's average colour (linear rgb), from its smallest mip, once per texture (protocol v2's instance records).
@@ -325,7 +327,7 @@ namespace {
 		bool		actorsOn = false;					// [Main.Main.RayTracing] Actors (read at each helper start)
 		bool		walkingPlayer = false;				// Gather's walk of the player's own node (NVR_RT_MASK_PLAYER on its rigid parts)
 		bool		playerHidden = false;				// (2026-11-07) ... in first person: its instances get NVR_RT_CUSTOM_HIDDEN (not drawn)
-		bool		firstPersonBody = false;			// UNOFFICIAL 2026-11-05 [Main.Main.RayTracing] FirstPersonBody: the body is traced in first person too (2026-11-07: off by default)
+		bool		firstPersonBody = false;			// UNOFFICIAL 2026-11-05 [Main.Main.RayTracing] FirstPersonBody: the body is traced in first person too (off 2026-11-07, on again with ptaaa-firstperson: RtHidden.glsl)
 		bool		walkingFar = false;					// UNOFFICIAL 2026-10-31: Gather's walk of the far object LOD (FarObjectLOD; NVR_RT_MASK_FAR)
 		bool		farLodOn = false;					// [Main.Main.RayTracing] FarObjectLOD (live)
 		bool		farLandOn = false;					// UNOFFICIAL 2026-10-31 [Main.Main.RayTracing] FarLandLOD (live): LOD land in the same ring
@@ -397,6 +399,8 @@ namespace {
 		// every 600): [0] met, [1] taken (instances), [2] lifted, [3] taken without a normal (not lifted), [4] rebuilt (a new decal at a
 		// dropped one's addresses), [5] left out (Decals or AlphaTested off). The rest of [0] took an alpha-tested fate (alphaFate, LogLeftOut).
 		bool		decalsOn = false;
+		bool		glassOn = false;	// (2026-11-07 ptaaa-materials) PTGlass with the path tracer on (ReferencePT / PTRealtime), AlphaTested + the atlas
+		UInt32		glassTaken = 0, skinParts = 0, foliageCards = 0;	// (ptaaa-materials) this frame's glass panes, skin partitions, foliage cards (logged)
 		UInt32		decalFate[6] = {};
 		int			atlasImage = -1;
 		UInt32		atlasUsed = 0, atlasThisFrame = 0, glowSlots = 0;	// glowSlots: slots with a glow map (GlowTextures)
@@ -950,7 +954,9 @@ namespace {
 		UINT64 done = 0;
 		c->outputReady->GetCompletedValue(&done);
 		const UINT64 recorded = (UINT64)InterlockedCompareExchange64(&c->lastRecorded, 0, 0);
-		c->outputReady->SignalFromHost((std::max)(done, recorded) + kReleaseMargin);
+		// (2026-11-07 rt-shutdown) once the helper process is gone the shared semaphore can read 2^64 - 1 (RT host shutdown scene, AMD iGPU):
+		// every wait is released then, and max(done, recorded) + margin would wrap to a value below the current one
+		if (done < recorded + kReleaseMargin) c->outputReady->SignalFromHost((std::max)(done, recorded) + kReleaseMargin);
 		InterlockedExchange(&c->tripped, 1);
 		return 0;
 	}
@@ -1255,22 +1261,89 @@ namespace {
 			CloseHandle(watchdog);
 			watchdog = nullptr;
 		}
+		// (2026-11-07 rt-shutdown) THE SHUTDOWN, in order (as the RT playground's PgHost::Stop). The old one only waited for the helper to
+		// SUBMIT the last frame, asked it to quit and dropped everything: DXVK's queue could still hold a wait for an "output ready" value
+		// the helper never signalled (it left on quit before running the last frames), and on the AMD iGPU the driver then reset the display
+		// (System event 4101). Now, with nothing new recorded (the caller stops exchanging):
+		//   1. the helper, still running, finishes every recorded frame: a CPU wait until outputReady >= recorded. A helper gone or hung
+		//      (no progress within the time) is terminated (logged), then SignalFromHost releases our queue's waits;
+		//   2. DXVK drained: SignalShared(inputsReady, recorded + 1) submits everything recorded so far, polled on the CPU until done (the
+		//      helper never waits for that value; a D3D9 EVENT query never reported done under the fork, playground 2026-11-07);
+		//   3. quit: the helper releases anything left (nothing, normally), waits for its GPU and exits; TerminateProcess only when hung;
+		//   4. the shared objects dropped (below).
+		// Bounded: ~5 s in all (the game's exit calls this: RtCore::Shutdown), each step at least 250 ms.
 		const UInt64 recorded = (UInt64)InterlockedCompareExchange64(&lastRecorded, 0, 0);
-		if (process) {
-			if (shared && WaitForSingleObject(process, 0) != WAIT_OBJECT_0) {
-				for (int i = 0; i < 200 && (UInt64)shared->submittedFrame < recorded; i++) Sleep(5);
+		const ULONGLONG t0 = GetTickCount64();
+		const DWORD budget = 5000;
+		auto within = [&](DWORD cap) -> DWORD {
+			const ULONGLONG used = GetTickCount64() - t0;
+			const DWORD rest = used >= budget ? 0 : DWORD(budget - used);
+			return (std::min)(cap, (std::max)(rest, (DWORD)250));
+		};
+		auto alive = [&]() { return process && WaitForSingleObject(process, 0) != WAIT_OBJECT_0; };
+		bool forced = false;
+		const bool hadHelper = process != nullptr;
+		UINT64 done = 0;
+		if (outputReady && recorded) {	// 1.
+			const DWORD cap = within(3000);
+			const ULONGLONG s = GetTickCount64();
+			while (SUCCEEDED(outputReady->GetCompletedValue(&done)) && done < recorded && GetTickCount64() - s < cap && alive()) Sleep(1);
+			outputReady->GetCompletedValue(&done);
+			if (done < recorded) {
+				if (alive()) {
+					Logger::Log("[ERROR] UNOFFICIAL Vegas Shaders DXVK: RT helper shutdown: the helper did not finish frame %llu within %lu ms (output ready at %llu): "
+						"hung, terminated.", (unsigned long long)recorded, cap, (unsigned long long)done);
+					TerminateProcess(process, 1);
+					WaitForSingleObject(process, 1000);
+				}
+				else Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT helper shutdown: the helper is gone with output ready at %llu of %llu: released from here.",
+					(unsigned long long)done, (unsigned long long)recorded);
+				outputReady->SignalFromHost(recorded + kReleaseMargin);
+				forced = true;
+			}
+		}
+		if (share && inputsReady && recorded) {	// 2.
+			const UInt64 target = recorded + 1;
+			const DWORD cap = within(2000);
+			UINT64 v = 0;
+			if (FAILED(share->SignalShared(inputsReady, target))) { Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT helper shutdown: SignalShared for the drain failed."); forced = true; }
+			else {
+				const ULONGLONG s = GetTickCount64();
+				while (SUCCEEDED(inputsReady->GetCompletedValue(&v)) && v < target && GetTickCount64() - s < cap) Sleep(1);
+				inputsReady->GetCompletedValue(&v);
+				if (v < target) {
+					Logger::Log("[ERROR] UNOFFICIAL Vegas Shaders DXVK: RT helper shutdown: the game's GPU queue did not drain within %lu ms (fence at %llu of %llu).",
+						cap, (unsigned long long)v, (unsigned long long)target);
+					forced = true;
+				}
+			}
+		}
+		if (process) {	// 3.
+			if (shared && alive()) {
+				const bool starting = state == Starting;
 				shared->quit = 1;
+				MemoryBarrier();
 				SetEvent(frameEvent);
-				if (WaitForSingleObject(process, 3000) != WAIT_OBJECT_0) TerminateProcess(process, 1);
+				const DWORD cap = within(3000);
+				if (WaitForSingleObject(process, cap) != WAIT_OBJECT_0) {
+					Logger::Log("%sUNOFFICIAL Vegas Shaders DXVK: RT helper shutdown: the helper did not exit within %lu ms%s: terminated.", starting ? "" : "[ERROR] ", cap,
+						starting ? " (it was still starting: it reads quit only once ready)" : " (hung)");
+					TerminateProcess(process, 1);
+					WaitForSingleObject(process, 1000);
+					if (!starting) forced = true;
+				}
 			}
 			CloseHandle(process);
 			process = nullptr;
 		}
-		if (outputReady) {
-			UINT64 done = 0;
+		LogHelperMessage();	// the helper's last status line ("exit: output ready ... clean")
+		if (outputReady) {	// (the helper is gone now: nothing else signals it)
 			outputReady->GetCompletedValue(&done);
-			if (done < recorded) outputReady->SignalFromHost(recorded + kReleaseMargin);
+			if (done < recorded) { outputReady->SignalFromHost(recorded + kReleaseMargin); forced = true; }
 		}
+		if (hadHelper)
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT helper shutdown %s in %llu ms (%llu frames recorded, output ready at %llu).", forced ? "FORCED (see above)" : "clean",
+				(unsigned long long)(GetTickCount64() - t0), (unsigned long long)recorded, (unsigned long long)done);
 		for (ID3D9NvrExtSharedImage*& image : images) DxvkCompute::Drop(image);
 		images.clear();
 		DxvkCompute::Drop(inputsReady);
@@ -1462,6 +1535,13 @@ namespace {
 			if (texture && texture->rendererData) diffuse = texture->rendererData->dTexture;
 			if (!diffuse) skinTex[1]++;
 		}
+		// (2026-11-07 ptaaa-materials) skin for the path tracer (its scattering, PTSkin): the part's diffuse texture under textures\characters (RtScenePick::SkinTexturePath)
+		bool skinKind = false;
+		if (ppLighting) {
+			NiSourceTexture** textures = ((BSShaderPPLightingProperty*)shaderProperty)->ppTextures[0];
+			const NiSourceTexture* source = textures ? *textures : nullptr;
+			skinKind = source && RtScenePick::SkinTexturePath(source->ddsPath1);
+		}
 		const float cx = TheRenderManager->CameraPosition.x, cy = TheRenderManager->CameraPosition.y, cz = TheRenderManager->CameraPosition.z;
 		static std::vector<NVR_EXT_RT_RANGE> ranges;
 		static std::vector<float> palette;
@@ -1620,7 +1700,9 @@ namespace {
 			NvrRtInstanceRecord& extra = record->records[record->instanceCount];
 			extra.albedo[0] = albedo.rgb[0]; extra.albedo[1] = albedo.rgb[1]; extra.albedo[2] = albedo.rgb[2]; extra.albedo[3] = 1.0f;
 			extra.flags = (albedo.known ? NVR_RT_RECORD_ALBEDO_KNOWN : 0u) | (hasUv && slot >= 0 ? NVR_RT_RECORD_TEXTURED | ((UInt32)slot << 16) : 0u) |
-				(hasUv && slot >= 0 && skinNormal ? NVR_RT_RECORD_NORMAL : 0u);	// (2026-11-07) RealNormalMaps
+				(hasUv && slot >= 0 && skinNormal ? NVR_RT_RECORD_NORMAL : 0u) |	// (2026-11-07) RealNormalMaps
+				(skinKind ? NvrRtKindBits(NVR_RT_KIND_SKIN) : 0u);	// (2026-11-07 ptaaa-materials)
+			if (skinKind) skinParts++;
 			extra.geometryId = entry.id;
 			extra.vertexOffset = extra.indexOffset = 0;
 			NvrRtInstance& instance = record->instances[record->instanceCount++];
@@ -2041,7 +2123,9 @@ namespace {
 		const Albedo& albedo = AlbedoOfTexture(texture);
 		NvrRtInstanceRecord& extra = record->records[record->instanceCount];
 		extra.albedo[0] = albedo.rgb[0]; extra.albedo[1] = albedo.rgb[1]; extra.albedo[2] = albedo.rgb[2]; extra.albedo[3] = 1.0f;
-		extra.flags = (albedo.known ? NVR_RT_RECORD_ALBEDO_KNOWN : 0u) | (leafOpaque ? NVR_RT_RECORD_TEXTURED : NVR_RT_RECORD_ALPHA_TESTED | (alphaRef << 8)) | ((UInt32)slot << 16);
+		extra.flags = (albedo.known ? NVR_RT_RECORD_ALBEDO_KNOWN : 0u) | (leafOpaque ? NVR_RT_RECORD_TEXTURED : NVR_RT_RECORD_ALPHA_TESTED | (alphaRef << 8)) | ((UInt32)slot << 16) |
+			NvrRtKindBits(NVR_RT_KIND_FOLIAGE);	// (2026-11-07 ptaaa-materials) leaves: light goes through them (the path tracer's PTFoliage)
+		foliageCards++;
 		extra.geometryId = entry.id;
 		extra.vertexOffset = extra.indexOffset = 0;
 		NvrRtInstance& instance = record->instances[record->instanceCount++];
@@ -2294,8 +2378,12 @@ namespace {
 		RtScenePick::Switches pickSwitches;
 		pickSwitches.cullAngle = cullAngle; pickSwitches.alphaTested = alphaOn; pickSwitches.leafCards = leafPlanes != 0;
 		pickSwitches.decals = decalsOn;
-		bool alphaTested = false;
-		switch (RtScenePick::Classify(pick, pickSwitches, alphaTested)) {
+		pickSwitches.glass = glassOn;
+		// (2026-11-07 ptaaa-materials) the glass rule is looked up only for what would otherwise stay out (refraction, blended only)
+		if (glassOn && shaderProperty && !land && (pick.refraction || (alpha && (pick.alphaFlags & RtScenePick::kAlphaBlend) && !(pick.alphaFlags & RtScenePick::kAlphaTest))))
+			pick.glassRule = !strcmp(RtMaterialClassOf(geo), "glass");
+		bool alphaTested = false, glass = false;
+		switch (RtScenePick::Classify(pick, pickSwitches, alphaTested, glass)) {
 		case RtScenePick::Taken: break;
 		case RtScenePick::Culled: culledSmall++; LogLeftOut(geo, "small at its distance (CullAngle)", -1); return;
 		case RtScenePick::NoShader: skip[kNoShader]++; LogLeftOut(geo, "no shader / buffer data", -1); return;
@@ -2397,7 +2485,9 @@ namespace {
 			op.vertexCount = info.VertexCount;
 			op.triangleCount = info.TriangleCount;
 			op.arenaTexel = arenaUsed;
+			entry.triangles = info.TriangleCount;	// (2026-11-07 ptaaa-emissive)
 			RtScenePick::Record po; po.alphaTested = alphaTested; po.textured = textured; po.compact = compactOn;
+			po.kind = glass ? NVR_RT_KIND_GLASS : NVR_RT_KIND_PLAIN;	// (2026-11-07 ptaaa-materials) glass: built non-opaque
 			op.flags = RtScenePick::OpFlags(po);	// (2026-11-06 RtScenePick.h)
 			arenaUsed += info.Texels;
 			entry.sent = true;
@@ -2437,13 +2527,18 @@ namespace {
 		if (alphaTested || textured) pr.materialRule = RtMaterialRuleOf(geo, &pr.rough, &pr.metal);	// UNOFFICIAL 2026-11-03 (bits 26-31)
 		pr.hookMask = MaskHook ? (int)(MaskHook(geo, land) & 0xFFu) : -1;
 		pr.player = walkingPlayer; pr.farLod = walkingFar;
+		// (2026-11-07 ptaaa-materials) the path tracer's material kind: glass panes; cut-out cards whose texture's rule is "plant" (leaves,
+		// bushes: thin, light goes through them; trunks are not cut out and stay plain)
+		if (glass) { pr.kind = NVR_RT_KIND_GLASS; glassTaken++; }
+		else if (alphaTested && !pick.decal && !land && !strcmp(RtMaterialClassOf(geo), "plant")) { pr.kind = NVR_RT_KIND_FOLIAGE; foliageCards++; }
 		extra.flags = RtScenePick::RecordFlags(pr);
 		LogAlphaTaken(geo, alphaTested ? alphaSlot : -1, alphaTested ? pr.alphaRef : 999u, alphaTested && alpha && (alpha->flags & NiAlphaProperty::AlphaFlags::ALPHA_BLEND_MASK) != 0);
 		LogBigTaken(geo);
 		if ((extra.flags & NVR_RT_RECORD_GLOW) && geo->m_kWorldBound && glows.size() < 4096) {	// (2026-10-30) GlowLights()
 			const NiBound* b = geo->m_kWorldBound;
 			glows.push_back({ { b->Center.x - TheRenderManager->CameraPosition.x, b->Center.y - TheRenderManager->CameraPosition.y,
-				b->Center.z - TheRenderManager->CameraPosition.z }, b->Radius, { albedo.rgb[0], albedo.rgb[1], albedo.rgb[2] } });
+				b->Center.z - TheRenderManager->CameraPosition.z }, b->Radius, { albedo.rgb[0], albedo.rgb[1], albedo.rgb[2] },
+				record->instanceCount, entry.id, entry.triangles });	// (2026-11-07 ptaaa-emissive) its record, geometry, triangles
 		}
 		extra.geometryId = entry.id;
 		extra.vertexOffset = extra.indexOffset = 0;	// the helper's
@@ -2476,7 +2571,7 @@ namespace {
 		instance.customIndex = RtScenePick::CustomIndex(pr);	// (2026-11-07) land, hidden (the first-person body), decal
 		instance.mask = RtScenePick::InstanceMask(pr);	// (2026-11-06 RtScenePick.h) 0x01 land / 0x02 objects or the hook's; 0x10 alpha-tested, 0x40 the player's, 0x80 far LOD
 		instance.flags = 0x1u;	// both faces (the game's two-sided and one-sided meshes alike: shadows need the back faces too)
-		if ((dispLand || dispObjects) && !walkingFar && !alphaTested) Displace(geo, entry, instance, land, shaderProperty, desc, textured);	// (2026-11-07 rtgap-tessblas)
+		if ((dispLand || dispObjects) && !walkingFar && !alphaTested && !glass) Displace(geo, entry, instance, land, shaderProperty, desc, textured);	// (2026-11-07 rtgap-tessblas)
 	}
 
 	// UNOFFICIAL 2026-10-30 grass (RtCore::NoteGrass): each grass model's first tuft built once (alpha-tested: its card texture's alpha in
@@ -2577,7 +2672,8 @@ namespace {
 				const float* t = &grassTufts[4 * (d.first + i)];
 				NvrRtInstanceRecord& extra = record->records[record->instanceCount];
 				extra.albedo[0] = albedo.rgb[0]; extra.albedo[1] = albedo.rgb[1]; extra.albedo[2] = albedo.rgb[2]; extra.albedo[3] = 1.0f;
-				extra.flags = (albedo.known ? NVR_RT_RECORD_ALBEDO_KNOWN : 0u) | NVR_RT_RECORD_ALPHA_TESTED | ((d.alphaRef & 0xFFu) << 8) | ((UInt32)slot << 16);
+				extra.flags = (albedo.known ? NVR_RT_RECORD_ALBEDO_KNOWN : 0u) | NVR_RT_RECORD_ALPHA_TESTED | ((d.alphaRef & 0xFFu) << 8) | ((UInt32)slot << 16) |
+					NvrRtKindBits(NVR_RT_KIND_FOLIAGE);	// (2026-11-07 ptaaa-materials) grass blades: thin, light goes through (PTFoliage)
 				extra.geometryId = entry.id;
 				extra.vertexOffset = extra.indexOffset = 0;
 				NvrRtInstance& instance = record->instances[record->instanceCount++];
@@ -2783,6 +2879,21 @@ namespace {
 		const int planes = TheSettingManager->GetSettingI("Main.Main.RayTracing", "LeafCards");
 		leafPlanes = planes <= 0 ? 0u : planes >= 3 ? 3u : 2u;
 		leafOpaque = TheSettingManager->GetSettingI("Main.Main.RayTracing", "LeafCardsOpaque") != 0;
+		// UNOFFICIAL 2026-11-07 (ptaaa-omm, protocol 9) [Main.Main.RayTracing] OpacityMicromaps (live): the helper gives alpha-tested geometry
+		// opacity micromaps (known-solid micro-triangles resolved by the GPU, the rest by the shaders' alpha test as before) where the GPU has
+		// VK_EXT_opacity_micromap; it needs the alpha atlas' image (tools/nvr-rt-helper/NvrRtOmm.inl). No such GPU: nothing changes.
+		if (shared) {
+			const bool omm = atlasImage >= 0 && TheSettingManager->GetSettingI("Main.Main.RayTracing", "OpacityMicromaps") != 0;
+			shared->opacityMicromaps = omm ? (NVR_RT_OMM_ON | ((uint32_t)(atlasImage + 1) & NVR_RT_OMM_ATLAS_MASK)) : 0u;
+			static UInt32 toldOmm = 0xFFFFFFFFu;
+			const UInt32 ommState = shared->ommState;
+			if (ommState != toldOmm && frame > 2) {
+				toldOmm = ommState;
+				static const char* names[] = { "off", "asked for, but this GPU has no VK_EXT_opacity_micromap (the shaders' alpha test as before)", "on",
+					"OFF for this session after a failed check (NvrRtHelper.log says why)", "self-test" };
+				Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT opacity micromaps: %s", ommState < 5 ? names[ommState] : "?");
+			}
+		}
 		trianglesThisFrame = 0;
 		radius = (std::max)(512.0f, TheSettingManager->GetSettingF("Main.Main.RayTracing", "SceneRadius"));
 		// UNOFFICIAL 2026-11-07 (rtgap, RT-DETAIL-GAPS.md 6 + 7) PTRealtime overrides, as it overrides the path tracer's own settings
@@ -2795,6 +2906,19 @@ namespace {
 		grassMax = (UInt32)(std::max)(0, TheSettingManager->GetSettingI("Main.Main.RayTracing", "GrassMaxTufts"));
 		// (2026-11-07, RT-DETAIL-GAPS.md 5) decals: live, with the alpha atlas (they are alpha-tested)
 		decalsOn = alphaOn && atlasImage >= 0 && TheSettingManager->GetSettingI("Main.Main.RayTracing", "Decals") != 0;
+		// UNOFFICIAL 2026-11-07 (ptaaa-materials, RT-PATH-TRACING.md "materials") glass panes in the scene: only for the path tracer (every other
+		// shader passes them, RtAlpha.glsl), live; non-opaque instances, so they need the alpha test (AlphaTested + the atlas)
+		glassOn = alphaOn && atlasImage >= 0 && TheSettingManager->GetSettingI("Main.Main.RayTracing", "PTGlass") > 0 &&
+			(ptRealtime || TheSettingManager->GetSettingI("Main.Main.RayTracing", "ReferencePT") != 0);
+		if (glassTaken || skinParts || foliageCards) {
+			static UInt32 told = 0;
+			if (told < 6 && (TheFrameRateManager->FrameNumber % 600u) == 0u) {
+				told++;
+				Logger::Log("RT CORE materials (path tracer): glass panes %u, skin partitions %u, foliage cards %u this frame (PTGlass %s)", glassTaken, skinParts,
+					foliageCards, glassOn ? "on" : "off");
+			}
+		}
+		glassTaken = skinParts = foliageCards = 0;
 		actorRadius = (std::max)(0.0f, TheSettingManager->GetSettingF("Main.Main.RayTracing", "ActorRadius"));
 		actorInterval = (UInt32)(std::max)(1, (std::min)(8, TheSettingManager->GetSettingI("Main.Main.RayTracing", "ActorUpdateInterval")));
 		farLodOn = TheSettingManager->GetSettingI("Main.Main.RayTracing", "FarObjectLOD") != 0;	// UNOFFICIAL 2026-10-31
@@ -2956,7 +3080,7 @@ namespace {
 		if (state == Core::Off) return false;
 		bool wanted = false;
 		for (const RtCore::User& user : users) wanted = wanted || (!Out(user) && user.Wants && user.Wants());
-		if (!wanted) return false;	// a running helper stays up (idle); it exits with the game
+		if (!wanted) return false;	// a running helper stays up (idle); the game's exit stops it (RtCore::Shutdown)
 		if (state == Core::Idle) { Start(); return false; }
 		Poll();
 		if (state != Core::Running) return false;
@@ -3185,6 +3309,11 @@ bool RtCore::ExchangeEarly(IDirect3DDevice9* Device, const User& user) {	// UNOF
 }
 
 bool RtCore::Running() { return TheCore.state == Core::Running; }
+bool RtCore::OthersWant(const char* Name) {	// UNOFFICIAL 2026-11-07 (ptaaa-fog; RtCore.h)
+	for (const User& user : TheCore.users)
+		if (user.Name != Name && !(user.Name && Name && !strcmp(user.Name, Name)) && !TheCore.Out(user) && user.Wants && user.Wants()) return true;
+	return false;
+}
 bool RtCore::LeftOut(const char* Name) { for (const char* n : TheCore.leftOut) if (n == Name || (n && Name && !strcmp(n, Name))) return true; return false; }
 void RtCore::Restart(const char* Why) {	// UNOFFICIAL 2026-11-02: as a screen-size change (Core::Ready)
 	Core& c = TheCore;
@@ -3192,10 +3321,33 @@ void RtCore::Restart(const char* Why) {	// UNOFFICIAL 2026-11-02: as a screen-si
 	c.Stop(Why);
 	c.state = Core::Idle;
 }
+void RtCore::Shutdown(const char* Why) {	// UNOFFICIAL 2026-11-07 (rt-shutdown; RtCore.h)
+	Core& c = TheCore;
+	if (c.state == Core::Off && !c.process && !c.shared) return;	// already off (TurnOff stopped it)
+	if (c.state != Core::Idle || c.process || c.shared) c.Stop(Why);
+	c.state = Core::Off;
+	_snprintf_s(c.status, sizeof(c.status), _TRUNCATE, "off: %s", Why);
+}
 const char* RtCore::StatusText() { return TheCore.status; }
 const NvrRtShared* RtCore::Helper() { return TheCore.state == Core::Running ? TheCore.shared : nullptr; }
 UInt32 RtCore::Instances() { return TheCore.instances; }
 const std::vector<RtCore::GlowLight>& RtCore::GlowLights() { return TheCore.frameGlows; }
+
+// UNOFFICIAL 2026-11-07 (ptaaa-emissive) PTEmissive: a glow instance of the frame being recorded (users' Record) as an emissive light
+bool RtCore::EmissiveTransform(UInt32 Record, float Transform[3][4]) {
+	const NvrRtFrame* f = TheCore.record;
+	if (!TheCore.recording || !f || Record >= f->instanceCount) return false;
+	if (!RtScenePick::CanBeEmissive(f->records[Record].flags)) return false;	// alpha-tested: bits 8-15 are taken
+	if (f->instances[Record].flags & NVR_RT_INSTANCE_DISPLACE) return false;	// traced through a displaced copy (other triangles)
+	memcpy(Transform, f->instances[Record].transform, sizeof(float) * 12);
+	return true;
+}
+bool RtCore::MarkEmissive(UInt32 Record, UInt32 Number) {
+	NvrRtFrame* f = TheCore.record;
+	if (!TheCore.recording || !f || Record >= f->instanceCount || !RtScenePick::CanBeEmissive(f->records[Record].flags)) return false;
+	f->records[Record].flags = RtScenePick::WithEmissive(f->records[Record].flags, Number);
+	return true;
+}
 UInt32 RtCore::Geometries() { return (UInt32)TheCore.geometries.size(); }
 UInt32 RtCore::Waiting() { return TheCore.waiting; }
 UInt32 RtCore::Released() { return TheCore.released; }

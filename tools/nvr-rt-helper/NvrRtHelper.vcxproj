@@ -68,6 +68,10 @@
     <ClInclude Include="NvrRtTextures.inl" />
     <ClInclude Include="NvrRtDisplace.inl" />
     <ClInclude Include="RtDisplace.h" />
+    <ClInclude Include="NvrRtOmm.inl" />
+    <ClInclude Include="NvrRtOmmMath.h" />
+    <ClInclude Include="RtOmm.h" />
+    <ClInclude Include="RtOmmProbe.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

@@ -1786,6 +1786,14 @@ bool RtMaterialRuleOf(NiGeometry* geometry, float* roughness, float* metal) {
 	return true;
 }
 
+// UNOFFICIAL 2026-11-07 (ptaaa-materials) the material rule's class name for a geometry's diffuse texture ("" when no rule covers it):
+// RtCore's glass panes ("glass") and foliage cards ("plant") for the path tracer
+const char* RtMaterialClassOf(NiGeometry* geometry) {
+	if (!MaterialRulesDraw::Loaded) MaterialRulesDraw::Load();
+	const int index = geometry ? MaterialRulesDraw::RuleFor(geometry, false) : 0;
+	return index ? MaterialRulesDraw::Table.Get(index).Name.c_str() : "";
+}
+
 // UNOFFICIAL 2026-10-14 _rmaos maps ([Shaders.PBR.Rmaos], Object.hlsl RMAOS): before each object, its diffuse texture's
 // <name>_rmaos.dds (beside it, or the same path under textures\pbr\; a diffuse named *_d.dds also tries the name without _d)
 // is bound on texture stage 2, and pixel c220 tells the object shader whether it has one. Loose files only (not BSAs). Each
@@ -3768,7 +3776,11 @@ void __fastcall RenderFirstPersonHook(Main* This, UInt32 edx, NiDX9Renderer* Ren
 		}
 	}
 	PbrPop::ActorPasses::FirstPersonNow = 1;	// UNOFFICIAL ActorsInOnePass: the first-person model's passes are built in here
+	// UNOFFICIAL 2026-11-07 (ptaaa-firstperson) PTViewModel: the model's colour, normals and material into the G-buffer, for the path
+	// tracer to light it (core/CapturedNormals.h BeginViewModelSpan; nothing unless the path tracer asked for it this frame)
+	CapturedNormals::BeginViewModelSpan(TheRenderManager->device);
 	RenderFirstPerson(This, Renderer, Geo, SkySun, RenderedTexture);
+	CapturedNormals::EndViewModelSpan(TheRenderManager->device, TheFrameRateManager->FrameNumber);
 	PbrPop::ActorPasses::FirstPersonNow = 0;
 	SkyCoverage::DrawViewModel(TheRenderManager->device);	// UNOFFICIAL 2026-11-04: the weapon out of the sky share (core/SkyCoverage.h)
 	if (viewModelShadows) {

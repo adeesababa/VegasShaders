@@ -45,51 +45,57 @@ vec2 rtHitTexcoord(uint instance, uint primitive, vec2 bary) {
 	return t0 * (1.0 - bary.x - bary.y) + t1 * bary.x + t2 * bary.y;
 }
 
-vec3 rtHitAlbedo(uint instance, uint primitive, vec2 bary) {
+// (2026-11-07, merge of the ptaaa branches) ONE function reads both colour maps: the glow map first (glow), then the diffuse (the glow's
+// fallback, or the albedo itself), as two passes of one loop with ONE real-texture sample and one atlas read each, not two copies of the
+// sampling code: the trace shaders' drivers inline every call, and the emissive lights' lookups call this many times (RtPathTrace.spv's
+// pipeline failed to build on the AMD iGPU with the copies). The answers are the old rtHitAlbedo / rtHitGlow's, step for step.
+vec3 rtHitMap(uint instance, uint primitive, vec2 bary, bool glow) {
+	const bool hasUv = rtHitHasTexcoords(instance);
+	const vec2 uv = hasUv ? rtHitTexcoord(instance, primitive, bary) : vec2(0.0);   // (once for every read below)
+	for (int pass = glow ? 0 : 1; pass < 2; pass++) {	// 0 the glow map, 1 the diffuse
 #ifndef RT_NO_REAL_TEXTURES
-	if (rtHitHasTexcoords(instance)) {	// (2026-11-07) the game's own texture, filtered, its mip by the footprint (rtConeWidth)
-		const uint id = rtSlotTextures(records[instance].flags).x;
-		if (id != 0u) return rtTexToLinear(rtTexSampleHit(id, rtHitTexcoord(instance, primitive, bary), instance, primitive).rgb);
-	}
+		if (hasUv) {	// (2026-11-07) the game's own texture, filtered, its mip by the footprint (rtConeWidth)
+			const uvec3 ids = rtSlotTextures(records[instance].flags);
+			const uint id = pass == 0 ? ids.z : ids.x;
+			if (id != 0u) return rtTexToLinear(rtTexSampleHit(id, uv, instance, primitive).rgb);
+		}
 #endif
+		if (hasUv) {
+			const uint slot = (records[instance].flags >> 16) & 0x3FFu;	// (2026-11-06) bits 16-25 (26-31: the material rule)
+			vec3 c = vec3(-1.0);
+			if (pass == 0) {
+#ifdef RT_GLOW_ATLAS
+				const ivec2 origin = ivec2(int(slot % 32u), int(slot / 32u)) * 64;
+				c = imageLoad(RT_GLOW_ATLAS, origin + clamp(ivec2(fract(uv) * 64.0), ivec2(0), ivec2(63))).rgb;
+#endif
+			}
+			else {
 #ifdef RT_ALBEDO_ATLAS
-	if (rtHitHasTexcoords(instance)) {
-		const uint slot = (records[instance].flags >> 16) & 0x3FFu;	// (2026-11-06) bits 16-25 (26-31: the material rule)
-		// (2026-11-06) the slot size off the image: [Main.Main.RayTracing] AlbedoDetail (64 / 128 / 256): what mirrors show of things
-		// off screen (people's skin, faces) was a 64 x 64 copy of their texture: smeared
-		const int slotSize = imageSize(RT_ALBEDO_ATLAS).x / 32;
-		const ivec2 origin = ivec2(int(slot % 32u), int(slot / 32u)) * slotSize;
-		const ivec2 texel = origin + clamp(ivec2(fract(rtHitTexcoord(instance, primitive, bary)) * float(slotSize)), ivec2(0), ivec2(slotSize - 1));
-		const vec3 c = imageLoad(RT_ALBEDO_ATLAS, texel).rgb;   // as the texture stores it (sRGB-encoded)
-		return mix(pow((c + 0.055) / 1.055, vec3(2.4)), c / 12.92, lessThanEqual(c, vec3(0.04045)));
-	}
+				// (2026-11-06) the slot size off the image: [Main.Main.RayTracing] AlbedoDetail (64 / 128 / 256): what mirrors show of things
+				// off screen (people's skin, faces) was a 64 x 64 copy of their texture: smeared
+				const int slotSize = imageSize(RT_ALBEDO_ATLAS).x / 32;
+				const ivec2 origin = ivec2(int(slot % 32u), int(slot / 32u)) * slotSize;
+				c = imageLoad(RT_ALBEDO_ATLAS, origin + clamp(ivec2(fract(uv) * float(slotSize)), ivec2(0), ivec2(slotSize - 1))).rgb;
 #endif
+			}
+			// as the map stores it (sRGB-encoded)
+			if (c.r >= 0.0) return mix(pow((c + 0.055) / 1.055, vec3(2.4)), c / 12.92, lessThanEqual(c, vec3(0.04045)));
+		}
+	}
 	return records[instance].albedo.rgb;
 }
+
+vec3 rtHitAlbedo(uint instance, uint primitive, vec2 bary) { return rtHitMap(instance, primitive, bary, false); }
 
 // UNOFFICIAL 2026-10-30 the hit's glow (emissive) colour, linear, before any brightness: 0 for meshes without a glow map (record flag
 // 0x04). With [Main.Main.RayTracing] GlowTextures (+ HitTextures) and #define RT_GLOW_ATLAS <the glow atlas: layout(rgba8) readonly
 // image2D> (RtCore::GlowAtlasImage() among the pass's images): the glow map's colour at the hit (same slot and texcoords as the albedo
 // atlas): coloured neon tubes, lit window panes, only the lit parts. Else the whole mesh glows in rtHitAlbedo's colour (the old way).
+// (2026-11-07) the real glow map first (protocol 7). Both through rtHitMap.
 #define RT_HIT_GLOW_FLAG 0x04u
 vec3 rtHitGlow(uint instance, uint primitive, vec2 bary) {
 	if ((records[instance].flags & RT_HIT_GLOW_FLAG) == 0u) return vec3(0.0);
-#ifndef RT_NO_REAL_TEXTURES
-	if (rtHitHasTexcoords(instance)) {	// (2026-11-07) the real glow map
-		const uint id = rtSlotTextures(records[instance].flags).z;
-		if (id != 0u) return rtTexToLinear(rtTexSampleHit(id, rtHitTexcoord(instance, primitive, bary), instance, primitive).rgb);
-	}
-#endif
-#ifdef RT_GLOW_ATLAS
-	if (rtHitHasTexcoords(instance)) {
-		const uint slot = (records[instance].flags >> 16) & 0x3FFu;	// (2026-11-06) bits 16-25 (26-31: the material rule)
-		const ivec2 origin = ivec2(int(slot % 32u), int(slot / 32u)) * 64;
-		const ivec2 texel = origin + clamp(ivec2(fract(rtHitTexcoord(instance, primitive, bary)) * 64.0), ivec2(0), ivec2(63));
-		const vec3 c = imageLoad(RT_GLOW_ATLAS, texel).rgb;   // as the glow map stores it (sRGB-encoded)
-		return mix(pow((c + 0.055) / 1.055, vec3(2.4)), c / 12.92, lessThanEqual(c, vec3(0.04045)));
-	}
-#endif
-	return rtHitAlbedo(instance, primitive, bary);
+	return rtHitMap(instance, primitive, bary, true);
 }
 
 // UNOFFICIAL 2026-11-02 the hit's normal with its normal map ([Main.Main.RayTracing] NormalTextures; record flag 0x80): n = the surface

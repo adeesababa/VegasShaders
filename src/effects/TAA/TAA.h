@@ -148,6 +148,7 @@ public:
 	};
 	RRSettingsStruct	RRSettings;
 	bool				rrAlbedoMissingLogged = false;	// UNOFFICIAL 2026-10-31 AlbedoBuffer: RRAlbedo 2 without the buffer, said once
+	float				rrPtGuideMode = 0.0f;	// UNOFFICIAL 2026-11-07 (ptaaa-denoiser) the guides from the path tracer: 0 none, 1 diffuse, 2 + specular (each change logged)
 	// True when this frame's RR point will try: RR wanted and ready, and the frame checks known at the start of the pre-tonemap chain pass
 	// (the frame chain by its setting: it begins later). Asked once a frame there, before the RT point (ShaderManager.cpp), and handed to
 	// the upscaler (Upscaler::RayReconstructionPlan) for the RT denoisers' WantsRaw; the RR point runs only in a frame this said yes to.

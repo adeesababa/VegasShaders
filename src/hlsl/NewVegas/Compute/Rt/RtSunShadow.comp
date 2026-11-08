@@ -43,6 +43,7 @@ layout(set = 0, binding = 6, rgba16f) uniform readonly image2D cloudImage;      
 layout(set = 0, binding = 7, r16f) uniform writeonly image2D hitImage;          // 2026-10-31 Penumbra: the blocker's distance (units), 0 = free / not traced
 #define RT_ALPHA_ATLAS alphaAtlas
 #include "RtAlpha.glsl"
+#include "RtHidden.glsl"   // (2026-11-07 ptaaa-firstperson)
 #define RT_CONTACT_DEPTH depthImage
 #include "RtContact.glsl"
 
@@ -89,7 +90,7 @@ void main() {
 		rayQueryEXT q;
 		const bool testAlpha = p.alpha.x > 0.5;
 		rayQueryInitializeEXT(q, scene, testAlpha ? 0u : gl_RayFlagsOpaqueEXT, testAlpha ? 0xFFu : 0xEFu, p.origin.xyz, 1.0, direction, 8192.0);
-		while (rayQueryProceedEXT(q))
+		for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else
 			if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
 				rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
 					rayQueryGetIntersectionBarycentricsEXT(q, false)))
@@ -131,19 +132,28 @@ void main() {
 			}
 			// Alpha-tested casters (non-opaque, mask 0x10) come as candidates: their diffuse alpha decides (RtAlpha.glsl)
 			const bool testAlpha = p.alpha.x > 0.5;
+			bool hit;
+			float hitT = 0.0;
+			// (2026-11-07 ptaaa-firstperson) a ray from within arm's reach of the eye (the first-person view model's pixels, a counter you
+			// stand at) passes over the hidden first-person body (RtHidden.glsl): the third-person head and arms round the eye shadowed the gun
+			if (rtHiddenNear(start, p.origin.xyz))
+				hit = rtBlockedPassHidden(start, toSun, 0.0, p.bias.w, uint(p.range.z) & (testAlpha ? 0xFFu : 0xEFu), testAlpha, kRtAnyHit, hitT);
+			else {
 			rayQueryInitializeEXT(q, scene, gl_RayFlagsTerminateOnFirstHitEXT | (testAlpha ? 0u : gl_RayFlagsOpaqueEXT),
 				uint(p.range.z) & (testAlpha ? 0xFFu : 0xEFu), start, 0.0, toSun, p.bias.w);
 			// (2026-11-07 rtgap-decals) a shadow ray: decals (NVR_RT_CUSTOM_DECAL) never block it (RtAlpha.glsl rtAlphaPassShadow)
-			while (rayQueryProceedEXT(q))
+			for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else
 				if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
 					rtAlphaPassShadow(rayQueryGetIntersectionInstanceCustomIndexEXT(q, false), rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
 						rayQueryGetIntersectionBarycentricsEXT(q, false)))
 					rayQueryConfirmIntersectionEXT(q);
-			bool hit = rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+			hit = rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+			if (hit) hitT = rayQueryGetIntersectionTEXT(q, true);
+			}
 			state = hit ? 0.6 : 0.8;
-			if (hit) blocker = max(rayQueryGetIntersectionTEXT(q, true), 1.0);
+			if (hit) blocker = max(hitT, 1.0);
 			if (debug == 1)
-				result = hit ? clamp(rayQueryGetIntersectionTEXT(q, true) / 4096.0, 0.0, 1.0) : 1.0;
+				result = hit ? clamp(hitT / 4096.0, 0.0, 1.0) : 1.0;
 			else
 				result = hit ? 0.0 : 1.0;
 			// (2026-11-07 rtgap-tess 1b) ContactShadows: what the depth buffer has and the RT scene lacks (the bumps, grass, small props)

@@ -23,9 +23,10 @@
 #pragma once
 
 #include <stdint.h>
+#include <stddef.h>   // offsetof (protocol 9's layout check)
 
 #define NVR_RT_MAGIC            0x54525256u   // 'VRRT'
-#define NVR_RT_PROTOCOL_VERSION 8u            // 8 (2026-11-07, one bump for two teams): rtgap-tessblas: displaced geometry (NVR_RT_OP_DISPLACE_PARAMS / _SOURCE / _DATA, instance flag bits 8-31: NvrRtDisplace below); rtgap-textures: real textures block-compressed on the GPU route (NvrRtShared::textureImage = up to 4 transfer images, a byte each, picked by the op's VkFormat; NVR_RT_TEX_SWIZZLE_GR in NvrRtTextureOp::levels); 7 (2026-11-07): real textures (set 1, NVR_RT_OP_TEXTURE / _SLOT_TEXTURES, the -tex staging block); 2 (2026-10-28): instance records + the geometry data (bindings 10, 11); 3 (2026-10-29): 32 shared images; 4 (2026-10-30): 32 shaders; 5 (2026-11-02): 48 shared images; 6 (2026-11-07): the scratch store (binding 20, NvrRtShared::scratchMB)
+#define NVR_RT_PROTOCOL_VERSION 9u            // 9 (2026-11-07, ptaaa-omm): opacity micromaps (NvrRtShared::opacityMicromaps, NVR -> helper, was pad4; the helper's omm* counters after it: NvrRtOmm.inl); 8 (2026-11-07, one bump for two teams): rtgap-tessblas: displaced geometry (NVR_RT_OP_DISPLACE_PARAMS / _SOURCE / _DATA, instance flag bits 8-31: NvrRtDisplace below); rtgap-textures: real textures block-compressed on the GPU route (NvrRtShared::textureImage = up to 4 transfer images, a byte each, picked by the op's VkFormat; NVR_RT_TEX_SWIZZLE_GR in NvrRtTextureOp::levels); 7 (2026-11-07): real textures (set 1, NVR_RT_OP_TEXTURE / _SLOT_TEXTURES, the -tex staging block); 2 (2026-10-28): instance records + the geometry data (bindings 10, 11); 3 (2026-10-29): 32 shared images; 4 (2026-10-30): 32 shaders; 5 (2026-11-02): 48 shared images; 6 (2026-11-07): the scratch store (binding 20, NvrRtShared::scratchMB)
 #define NVR_RT_FRAME_RING       4u            // frame records; NVR waits for consumedFrame before reusing one
 #define NVR_RT_MAX_IMAGES       64u           // (protocol 7: 64, was 48: 46 in use with every RT effect, the path tracer was left out)           // shared images, registered at setup (index 0 is the geometry arena); 16 was too few with all four RT effects (~20), 32 with the reference path tracer (31: every user's Setup registers, on or off; 2026-11-02)
 #define NVR_RT_MAX_SHADERS      32u           // trace shaders (.spv paths), registered any time (16 until 2026-10-30: the four RT strands used 15)
@@ -77,10 +78,25 @@
 #define NVR_RT_RECORD_GLOW          0x04u     // the draw has a glow / emissive map
 #define NVR_RT_RECORD_METAL         0x08u
 #define NVR_RT_RECORD_ALBEDO_KNOWN  0x10u     // albedo is the diffuse texture's average (else a neutral grey)
+// UNOFFICIAL 2026-11-07 (ptaaa-materials, RT-PATH-TRACING.md "materials") the record's MATERIAL KIND for the path tracer, two bits that
+// were defined but never set (WATER 0x02 = the low bit, METAL 0x08 = the high bit): 0 plain, 1 glass (a thin dielectric pane: Fresnel
+// reflection + tinted transmission; the instance is non-opaque with mask NVR_RT_MASK_ALPHA and every shader but the path tracer passes it,
+// RtAlpha.glsl), 2 foliage (thin: light through the leaf), 3 skin (softer, warmer diffuse, light through ears / fingers). Only
+// RtPathTrace.comp reads them; a value in the records only: the protocol's layout is unchanged.
+#define NVR_RT_RECORD_KIND_LO       0x02u
+#define NVR_RT_RECORD_KIND_HI       0x08u
+#define NVR_RT_KIND_PLAIN           0u
+#define NVR_RT_KIND_GLASS           1u
+#define NVR_RT_KIND_FOLIAGE         2u
+#define NVR_RT_KIND_SKIN            3u
+inline uint32_t NvrRtKindBits(uint32_t kind) { return ((kind & 1u) ? NVR_RT_RECORD_KIND_LO : 0u) | ((kind & 2u) ? NVR_RT_RECORD_KIND_HI : 0u); }
+inline uint32_t NvrRtKindOf(uint32_t flags) { return ((flags >> 1) & 1u) | ((flags >> 2) & 2u); }
 // UNOFFICIAL 2026-10-29 alpha-tested casters ([Main.Main.RayTracing] AlphaTested): the geometry is non-opaque (cull mask bit
 // NVR_RT_MASK_ALPHA), its texcoords follow the triangle list in binding 11 at the word offset floatBitsToUint(albedo.w), its
 // diffuse alpha is the alpha atlas' slot (flags >> 16) (RtCore::AlphaAtlasImage(): R16F 2048x2048, 64x64 texels a slot, 32 a row), and
 // a candidate hit counts where alpha >= ((flags >> 8) & 0xFF) / 255. src/hlsl/NewVegas/Compute/Rt/RtAlpha.glsl does it.
+// UNOFFICIAL 2026-11-07 (ptaaa-emissive; no version change: the helper never reads them) on a record that is NOT alpha-tested, bits 8-15
+// are the path tracer's emissive number + 1 (PTEmissive, src/core/RtEmissiveRow.h; 0 = none; only with NVR_RT_RECORD_GLOW)
 #define NVR_RT_RECORD_ALPHA_TESTED  0x20u
 // UNOFFICIAL 2026-10-29 hit textures ([Main.Main.RayTracing] HitTextures): the geometry's texcoords are in binding 11 at
 // floatBitsToUint(albedo.w) (as alpha-tested ones) and its diffuse colour is the albedo atlas' slot (flags >> 16) (RGBA8, the same
@@ -358,8 +374,36 @@ struct NvrRtShared {
 
 	// ---- written by NVR
 	volatile uint32_t	quit;                // 1: exit
-	uint32_t			pad4;
+	volatile uint32_t	opacityMicromaps;    // (protocol 9, was pad4; any time) NVR_RT_OMM_* below: [Main.Main.RayTracing] OpacityMicromaps and
+	                                         // the alpha atlas' image index (0 = no micromaps: what an older NVR leaves there)
+
+	// ---- (protocol 9) written by the helper: opacity micromaps (tools/nvr-rt-helper/NvrRtOmm.inl), for NVR's log and the RT test host
+	volatile uint32_t	ommState;            // NVR_RT_OMM_STATE_*
+	volatile uint32_t	ommVariants;         // alpha-tested geometries with a micromap structure ready (traced through it when eligible)
+	volatile uint64_t	ommBuilt;            // micromaps built (self-test: state sets made and checked) since start
+	volatile uint64_t	ommMicro;            // their micro-triangles
+	volatile uint64_t	ommOpaque;           // of which known opaque (resolved in hardware, no shader call)
+	volatile uint64_t	ommChecked;          // validation samples that fell on a known-opaque micro-triangle (each tested with rtAlphaPass)
+	volatile uint64_t	ommViolations;       // of which rtAlphaPass said "not solid" (any: micromaps off for the session)
+	volatile uint32_t	ommInstances;        // instances of the last scene traced through a micromap structure
+	volatile uint32_t	ommFlags;            // NVR_RT_OMM_FLAG_*
 };
+
+// (protocol 9) NvrRtShared::opacityMicromaps (NVR -> helper)
+#define NVR_RT_OMM_ATLAS_MASK       0xFFu         // the alpha atlas' image index + 1 (0: none: nothing is built)
+#define NVR_RT_OMM_ON               0x80000000u   // [Main.Main.RayTracing] OpacityMicromaps (used only where the GPU has VK_EXT_opacity_micromap)
+#define NVR_RT_OMM_SELF_TEST        0x40000000u   // the RT test host: build and check the states on any GPU (no micromaps without the extension)
+#define NVR_RT_OMM_BREAK_TEST       0x20000000u   // the RT test host's negative control: every micro-triangle marked opaque (the checks must catch it)
+// NvrRtShared::ommState (helper -> NVR)
+#define NVR_RT_OMM_STATE_OFF        0u            // not asked for, or no alpha atlas
+#define NVR_RT_OMM_STATE_NO_EXT     1u            // asked for, the GPU has no VK_EXT_opacity_micromap: the shaders' alpha test as before
+#define NVR_RT_OMM_STATE_ON         2u            // micromaps built and used
+#define NVR_RT_OMM_STATE_DISABLED   3u            // a check failed (the hardware self-test or a state set): off for the session, logged
+#define NVR_RT_OMM_STATE_SELF_TEST  4u            // NVR_RT_OMM_SELF_TEST without the extension: states built and checked, nothing traced
+// NvrRtShared::ommFlags
+#define NVR_RT_OMM_FLAG_EXTENSION   0x1u          // the device has VK_EXT_opacity_micromap (feature micromap) and it is enabled
+#define NVR_RT_OMM_FLAG_HW_TESTED   0x2u          // the startup hardware self-test passed (the micro-triangle order is the one written here)
+#define NVR_RT_OMM_FLAG_FINEST_MIP  0x4u          // the last frame's passes all test alpha at the finest mip (class A: RtAlpha.glsl's lod 0)
 
 #ifdef __cplusplus
 static_assert(sizeof(NvrRtImageDesc) == 56, "NvrRtImageDesc layout");
@@ -371,4 +415,5 @@ static_assert(sizeof(NvrRtPass) == 580, "NvrRtPass layout");	// (protocol 5: + e
 static_assert(sizeof(NvrRtInstanceRecord) == 32, "NvrRtInstanceRecord layout");
 static_assert(sizeof(NvrRtFrame) % 8 == 0, "NvrRtFrame layout");
 static_assert(sizeof(NvrRtShared) % 8 == 0, "NvrRtShared layout");
+static_assert(offsetof(NvrRtShared, ommBuilt) % 8 == 0, "NvrRtShared layout (protocol 9: the same offsets in the 32-bit game and the 64-bit helper)");
 #endif

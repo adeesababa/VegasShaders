@@ -12,6 +12,12 @@ layout(set = 1, binding = 2) uniform texture2D t_raw;      // (2026-11-03) PTDen
 layout(set = 1, binding = 3) uniform texture2D t_viewModel; // (2026-11-07) TESR_DepthBufferViewModel (a stand-in with keepViewModel 0)
 layout(set = 1, binding = 4) uniform texture2D t_frame;     // (2026-11-07) PTDetail: the game's frame before the replace (x^(1/2.2)), a stand-in when off
 layout(set = 1, binding = 5) uniform texture2D t_depth;     // (2026-11-07) TESR_DepthBuffer (view z / farZ): the detail's same-surface test
+// (2026-11-07 ptaaa-denoiser) PTDenoiseSplit (modulate bit 2): the specular light (denoised, and its raw trace) divided by its specular
+// albedo, and that albedo (r, g | b, roughness): the picture = the diffuse light x the colour + the specular light x its albedo
+layout(set = 1, binding = 6) uniform texture2D t_spec;
+layout(set = 1, binding = 7) uniform texture2D t_specRaw;
+layout(set = 1, binding = 8) uniform texture2D t_specAlbedoRG;
+layout(set = 1, binding = 9) uniform texture2D t_specAlbedoB;
 
 layout(push_constant) uniform Push {
     float exposure;      // 0
@@ -19,7 +25,7 @@ layout(push_constant) uniform Push {
     float split;         // 8: 0 = the whole screen; 0.5 = the right half only
     float gamma;         // 12: 1 / 2.2; 1 = the debug views (albedo, normals) as they are
     uint modulate;       // 16: bit 0 = x t_albedo (the traced light came demodulated through the denoiser); bit 1 = into the HDR scene
-                         // (PTReplace: not clamped above 1)
+                         // (PTReplace: not clamped above 1); bit 2 (2026-11-07 ptaaa-denoiser) + the specular light x its albedo
     float uvScaleX;      // 20: (2026-11-03) the trace covers the top-left uvScale part (RenderScale < 1, the overlay after the upscale)
     float uvScaleY;      // 24
     uint keepViewModel;  // 28: (2026-11-07) 1 = the first-person model's pixels (view-model depth < 0.9) keep the frame's own; 2 = the same
@@ -44,7 +50,14 @@ void main() {
     if ((pc.modulate & 1u) != 0u) {
         const vec4 a = textureLod(sampler2D(t_albedo, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0);
         const vec3 raw = textureLod(sampler2D(t_raw, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).rgb * pc.exposure;   // (demodulated by 1 there)
-        c = mix(raw, c * a.rgb, clamp(a.a, 0.0, 1.0));
+        vec3 lit = c * a.rgb, rawLit = raw;
+        if ((pc.modulate & 4u) != 0u) {   // (ptaaa-denoiser) the two signals back together
+            const vec3 sa = vec3(textureLod(sampler2D(t_specAlbedoRG, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).rg,
+                                 textureLod(sampler2D(t_specAlbedoB, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).r);
+            lit += textureLod(sampler2D(t_spec, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).rgb * pc.exposure * sa;
+            rawLit += textureLod(sampler2D(t_specRaw, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).rgb * pc.exposure * sa;   // (0 off surfaces)
+        }
+        c = mix(rawLit, lit, clamp(a.a, 0.0, 1.0));
     }
     // (2026-11-07, testers: "we're losing a lot of texture quality when RT is on") the path tracer shades the first surface with its
     // smooth vertex normals (the G-buffer has no normal maps) and its denoiser smooths the light over a few pixels, so a road lost its

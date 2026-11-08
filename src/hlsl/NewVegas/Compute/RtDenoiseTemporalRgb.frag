@@ -28,22 +28,71 @@ layout(push_constant) uniform Push {
     float clampK;        // (2026-11-06) HistoryClamp: the history clamped to the new frame's 3 x 3 mean +- clampK x its deviation (0 off)
     float peopleCap;     // (2026-11-07) PeopleHistory: people's pixels (captured normal alpha > 1.5) keep at most this many frames (0 off)
     float antiLag;       // (2026-11-07) AntiLag: k, the fast history's window in standard errors (0 off)
+    float fireflyK;      // (2026-11-07 ptaaa-denoiser) AntiFirefly: k (0 off; FireflyClamp below)
 } pc;
+
+// (2026-11-07 ptaaa-denoiser) AntiFirefly (Settings.AntiFirefly, PTDenoiseAntiFirefly), NRD-style: a new sample brighter than both its
+// 3 x 3 neighbours (the brightest, the centre left out) and k x its own recent past (the mean of its last ~4 RAW samples, kept in B.a while
+// AntiFirefly is on: a glint that is there every frame is its own support from the second frame on) is clamped to that; the clamped
+// excess is not thrown away: o_d carries it (x this frame's blend weight) and RtDenoiseFirefly.frag spreads it over the 5 x 5 round,
+// into the history. So the light of rare bright paths (a glow panel only bounces find) is kept as a soft spread instead of white dots.
+// The anti-lag's fast history then takes the clamped sample (fed the raw one, a firefly pulled the long history up to it: a dot).
+float FireflyLimit(vec2 at) {
+    float m = 0.0;
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++)
+            if (dx != 0 || dy != 0) m = max(m, luma(textureLod(sampler2D(t_noisy, NVR_SAMPLER(pc.samplerIndex)), at + vec2(dx, dy) * pc.params.zw, 0.0).rgb));
+    return m;
+}
+
+// (2026-11-07 ptaaa-denoiser) last frame's A and B at the screen point prevUv: 2 x 2 bilinear over the texels of the same surface (each
+// passes the depth test on its own; the weights renormalised). Was the nearest texel: under motion its half-texel rounding drifted the
+// history by up to half a pixel a frame, and the drift adds up over the history (a moving NPC's light smeared even with the object
+// motion right: host scene ptobjmotion). On a still camera prevUv sits on texel centres: one texel, weight 1, as before.
+bool HistoryAt(vec2 prevUv, float expectedZ, float tolerance, out vec4 ha, out vec4 hb) {
+    ha = vec4(0.0); hb = vec4(0.0);
+    float sum = 0.0;
+    const vec2 size = 1.0 / pc.params.zw;
+    const vec2 f = prevUv * pc.rect.zw * size - 0.5;
+    const vec2 t = floor(f), b = f - t;
+    for (int k = 0; k < 4; k++) {
+        const vec2 o = vec2(k & 1, k >> 1);
+        const float w = (o.x > 0.5 ? b.x : 1.0 - b.x) * (o.y > 0.5 ? b.y : 1.0 - b.y);
+        const vec2 q = t + o;
+        if (w <= 0.0 || any(lessThan(q, vec2(0.0))) || any(greaterThanEqual(q, size))) continue;
+        const vec2 quv = (q + 0.5) / size;
+        const vec4 tb = textureLod(sampler2D(t_historyB, NVR_SAMPLER(pc.samplerIndex)), quv, 0.0);
+        if (!(abs(tb.g - expectedZ) <= tolerance)) continue;
+        const vec4 ta = textureLod(sampler2D(t_historyA, NVR_SAMPLER(pc.samplerIndex)), quv, 0.0);
+        if (!(ta.a > 0.0)) continue;
+        ha += ta * w; hb += tb * w; sum += w;
+    }
+    if (sum < 1.0e-3) return false;
+    ha /= sum; hb /= sum;
+    return true;
+}
 
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 o_a;
 layout(location = 1) out vec4 o_b;
+layout(location = 2) out vec4 o_d;   // (ptaaa-denoiser) AntiFirefly: rgb the clamped excess x its blend weight, a its luma x the fast
+                                     // history's weight (RtDenoiseFirefly.frag spreads both: the anti-lag's fast mean must see the light too)
 
 void main() {
     // (2026-11-03) the screen point of this texel (the rect's uv / its scale); past the rect nothing (the a-trous passes skip it)
     const vec2 s = uv / pc.rect.xy;
-    if (s.x > 1.0 || s.y > 1.0) { o_a = vec4(0.0); o_b = vec4(0.0); return; }
+    if (s.x > 1.0 || s.y > 1.0) { o_a = vec4(0.0); o_b = vec4(0.0); o_d = vec4(0.0); return; }
     const vec3 value = textureLod(sampler2D(t_noisy, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).rgb;
     const float l = luma(value);
     const float viewZ = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).r * pc.forward.w;
-    vec4 a = vec4(value, 1.0);
-    // b: z / w (2026-11-07) the FAST history (AntiLag): its luminance mean and second moment over the last kFast frames
-    vec4 b = vec4(l * l, viewZ, l, l * l);
+    // (ptaaa-denoiser) AntiFirefly: the neighbours' support (a newly seen pixel has only that); c the sample used, its excess to o_d
+    const float spatialLimit = pc.fireflyK > 0.0 ? FireflyLimit(uv) : 1.0e30;
+    vec3 c = l > spatialLimit ? value * (spatialLimit / l) : value;
+    float excessWeight = 1.0, fastWeight = 1.0;
+    vec4 a = vec4(c, 1.0);
+    // b: z / w (2026-11-07) the FAST history (AntiLag): its luminance mean and second moment over the last kFast frames; with AntiFirefly
+    // (ptaaa-denoiser) z the mean of the clamped samples, w the mean of the raw ones (the firefly limit's own support)
+    vec4 b = vec4(luma(c) * luma(c), viewZ, pc.fireflyK > 0.0 ? luma(c) : l, pc.fireflyK > 0.0 ? l : l * l);
     // (2026-10-31, rt-ao-sky) at half size (backbone.w 1) the mask over this pixel's 2 x 2 full-size pixels (uv sits on their corner):
     // a thin newly seen edge is not missed by the one tap a point sample takes
     const bool fresh = pc.backbone.y > 0.5 && (pc.backbone.w > 0.5
@@ -62,14 +111,17 @@ void main() {
         // (2026-11-07) a face talks and changes expression with no motion the reprojection knows of: on people's pixels (the skin
         // templates write captured normal alpha 2: skin, skinned armour, clothes) a short history, so the old mouth and the hat's old
         // shadow do not trail behind (the path tracer's dialogue ghosting; PTDenoisePeopleHistory)
-        if (pc.peopleCap > 0.5 && textureLod(sampler2D(t_captured, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).a > 1.5) cap = min(cap, pc.peopleCap);
-        const vec4 clip = pc.prevViewProj * vec4(p, 1.0);
+        const float people = pc.peopleCap > 0.5 ? textureLod(sampler2D(t_captured, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).a : 0.0;
+        if (people > 1.5) cap = min(cap, pc.peopleCap);
+        vec4 clip = pc.prevViewProj * vec4(p, 1.0);
+        // (2026-11-07 ptaaa-firstperson) the first-person view model (the mask > 3.5: RtPathTrace.cpp ViewModelPrep, Settings.People) moves
+        // with the camera: its history is at the same screen point and depth, not where the camera's motion would carry a world point
+        vec2 prevUv = clip.w > 0.0 ? vec2(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5) : vec2(-1.0);
+        if (people > 3.5) { prevUv = s; clip.w = viewZ; }
         if (clip.w > 0.0) {
-            const vec2 prevUv = vec2(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
             if (all(greaterThanEqual(prevUv, vec2(0.0))) && all(lessThanEqual(prevUv, vec2(1.0)))) {
-                vec4 ha = textureLod(sampler2D(t_historyA, NVR_SAMPLER(pc.samplerIndex)), prevUv * pc.rect.zw, 0.0);
-                const vec4 hb = textureLod(sampler2D(t_historyB, NVR_SAMPLER(pc.samplerIndex)), prevUv * pc.rect.zw, 0.0);
-                if (abs(hb.g - clip.w) <= pc.params.y * max(clip.w, 1.0) && ha.a > 0.0) {
+                vec4 ha, hb;
+                if (HistoryAt(prevUv, clip.w, pc.params.y * max(clip.w, 1.0), ha, hb)) {
                     // (2026-11-06) HistoryClamp (PTDenoiseClamp): a moving camera / light leaves the history describing light that is no
                     // longer there (a trailing shadow, a lamp's pool lagging); clamp it to what this frame's 3 x 3 neighbourhood allows,
                     // wide (clampK deviations: one noisy path a pixel has a wide spread) so a still picture keeps accumulating.
@@ -77,8 +129,8 @@ void main() {
                         vec3 m1 = vec3(0.0), m2 = vec3(0.0);
                         for (int dy = -1; dy <= 1; dy++)
                             for (int dx = -1; dx <= 1; dx++) {
-                                const vec3 c = textureLod(sampler2D(t_noisy, NVR_SAMPLER(pc.samplerIndex)), uv + vec2(dx, dy) * pc.params.zw, 0.0).rgb;
-                                m1 += c; m2 += c * c;
+                                const vec3 q3 = textureLod(sampler2D(t_noisy, NVR_SAMPLER(pc.samplerIndex)), uv + vec2(dx, dy) * pc.params.zw, 0.0).rgb;
+                                m1 += q3; m2 += q3 * q3;
                             }
                         m1 /= 9.0; m2 /= 9.0;
                         const vec3 dev = sqrt(max(m2 - m1 * m1, vec3(0.0)));
@@ -92,8 +144,15 @@ void main() {
                     // Bernoulli 0.3 pixel keeps mean 0.3000 and the same noise. The fast history's OWN spread was 3x slower: a step inflates it.
                     // The old 3 x 3 clamp of the raw sample darkened the picture 5 %.)
                     const float kFast = 4.0;
+                    // (ptaaa-denoiser) AntiFirefly with a history: the limit is also k x this pixel's recent raw mean
+                    if (pc.fireflyK > 0.0) {
+                        const float limit = max(spatialLimit, pc.fireflyK * hb.a);
+                        c = l > limit ? value * (limit / l) : value;
+                    }
                     const float fastLen = min(ha.a, kFast - 1.0) + 1.0;
-                    const float fastL = mix(hb.b, l, 1.0 / fastLen), fastL2 = mix(hb.a, l * l, 1.0 / fastLen);
+                    fastWeight = 1.0 / fastLen;
+                    const float fastL = mix(hb.b, pc.fireflyK > 0.0 ? luma(c) : l, 1.0 / fastLen);
+                    const float fastL2 = mix(hb.a, pc.fireflyK > 0.0 ? l : l * l, 1.0 / fastLen);   // (AntiFirefly: the raw mean)
                     b.b = fastL; b.a = fastL2;
                     if (pc.antiLag > 0.0) {
                         const float hl = luma(ha.rgb);
@@ -107,12 +166,14 @@ void main() {
                     }
                     const float length = min(min(ha.a, cap) + 1.0, pc.params.x);
                     const float alpha = 1.0 / length;
-                    a = vec4(mix(ha.rgb, value, alpha), length);
-                    b.r = mix(hb.r, l * l, alpha);
+                    a = vec4(mix(ha.rgb, c, alpha), length);
+                    b.r = mix(hb.r, luma(c) * luma(c), alpha);
+                    excessWeight = alpha;
                 }
             }
         }
     }
     o_a = a;
     o_b = b;
+    o_d = vec4((value - c) * excessWeight, luma(value - c) * fastWeight);
 }

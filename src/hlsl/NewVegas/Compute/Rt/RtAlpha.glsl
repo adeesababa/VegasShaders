@@ -13,6 +13,11 @@
 //                     rayQueryGetIntersectionBarycentricsEXT(q, false)))
 //       rayQueryConfirmIntersectionEXT(q);
 // (Opaque geometry never shows up as a candidate: it commits by itself.)
+// (2026-11-07, ptaaa-omm) With VK_EXT_opacity_micromap the helper gives alpha-tested geometry opacity micromaps built from THIS function:
+// micro-triangles where rtAlphaPass is true everywhere (every dither, the mips it can read) commit by themselves in hardware too, the rest
+// still come here (tools/nvr-rt-helper/NvrRtOmm.inl). Changing this file or RtTextures.glsl: rebuild tools/nvr-rt-helper/RtOmm.h (its
+// check calls rtAlphaPass) and re-check the builder's bounds (RtOmm.comp, NvrRtOmmMath.h). Never trace with
+// gl_RayFlagsForceOpacityMicromap2StateEXT; a loop that rejects a candidate for another reason than this test traces with NoOpaque.
 
 #ifndef RT_RECORDS_DECLARED
 struct RtRecord { vec4 albedo; uint flags; uint geometryId; uint vertexOffset; uint indexOffset; };
@@ -31,9 +36,23 @@ vec2 rtTexcoord(uint uvOffset, uint vertex) {
 	return vec2(uintBitsToFloat(words[uvOffset + 2u * vertex]), uintBitsToFloat(words[uvOffset + 2u * vertex + 1u]));
 }
 
+// UNOFFICIAL 2026-11-07 (ptaaa-materials) glass panes (record kind 1, NvrRtProtocol.h NVR_RT_RECORD_KIND_*: bits 0x02 low, 0x08 high) are
+// non-opaque instances under mask 0x10 that only the path tracer sees: every other shader's candidate test passes them (as if the glass
+// were not in the scene, as before). The path tracer defines RT_ALPHA_GLASS_SOLID (an expression: whether this ray meets glass) before
+// including this file.
+uint rtRecordKind(uint flags) { return ((flags >> 1u) & 1u) | ((flags >> 2u) & 2u); }
+bool rtIsGlass(uint instance) { return rtRecordKind(records[instance].flags) == 1u; }
+
 // True: this candidate hit is solid (its alpha passes the material's test). Not alpha-tested: always true.
 bool rtAlphaPass(uint instance, uint primitive, vec2 bary) {
 	const uint flags = records[instance].flags;
+	if (rtRecordKind(flags) == 1u) {
+#ifdef RT_ALPHA_GLASS_SOLID
+		return RT_ALPHA_GLASS_SOLID;
+#else
+		return false;
+#endif
+	}
 	if ((flags & RT_RECORD_ALPHA_TESTED) == 0u)
 		return true;
 	const uint uvOffset = floatBitsToUint(records[instance].albedo.w);
@@ -84,5 +103,5 @@ bool rtAlphaPass(uint instance, uint primitive, vec2 bary) {
 #define RT_CUSTOM_DECAL 4u
 bool rtIsDecal(uint customIndex) { return (customIndex & RT_CUSTOM_DECAL) != 0u; }
 bool rtAlphaPassShadow(uint customIndex, uint instance, uint primitive, vec2 bary) {
-	return !rtIsDecal(customIndex) && rtAlphaPass(instance, primitive, bary);
+	return !rtIsDecal(customIndex) && !rtIsGlass(instance) && rtAlphaPass(instance, primitive, bary);	// (2026-11-07: glass never blocks them)
 }

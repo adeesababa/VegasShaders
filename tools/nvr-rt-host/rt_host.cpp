@@ -36,6 +36,8 @@
 #include "RtTessContact.h"    // (2026-11-07 rtgap-tess) the bumps' slack + the contact march's constants (src/core)
 #include "RtReflDenoise.h"   // (2026-11-07) the RT reflection denoiser (src/core), run by the refldenoise scene
 #include "RtFaceMorph.h"     // (2026-11-07) faces and lip-sync: a head's change detection and feed (src/core), run by the facemorph scene
+#include "RtFogGrid.h"       // (2026-11-07 ptaaa-fog) RT fog visibility: the trace pass's constants + history rules (src/core), run by the fogvis scene
+#include "RtViewModel.h"     // (2026-11-07 ptaaa-firstperson) PTViewModel's prep pass (src/core), run by the vmprep scene
 #include <d3dcompiler.h>
 
 #pragma comment(lib, "d3d9.lib")
@@ -128,12 +130,15 @@ struct Object {               // one instance of one mesh
 	int id = 0;               // the host's own object id (CPU reference)
 	float scale = 1.0f;       // (2026-11-07 tessblas) uniform scale of the transform
 	uint32_t instFlags = 0;   // (2026-11-07 tessblas, protocol 8) NvrRtInstance::flags bits 8-31 (NVR_RT_INSTANCE_DISPLACE + key)
+	uint32_t kind = NVR_RT_KIND_PLAIN;   // (2026-11-07 ptaaa-materials) the path tracer's material kind (glass: mask 0x10, built non-opaque)
+	uint32_t emissive = 0;    // (2026-11-07 ptaaa-emissive) PTEmissive's number + 1 in the record's bits 8-15 (RtScenePick::WithEmissive)
 	RtScenePick::Record record() const {
 		RtScenePick::Record r;
 		r.land = land; r.albedoKnown = albedoKnown; r.glowMap = glow; r.alphaTested = alphaTested; r.alphaRef = alphaRef;
 		r.textured = textured && !alphaTested; r.slot = alphaSlot; r.materialRule = rough >= 0.0f || metal >= 0.0f; r.rough = rough; r.metal = metal;
 		r.hookMask = hookMask; r.hidden = hidden; r.decal = decal;
 		r.normalMap = normalMap;
+		r.kind = kind;
 		return r;
 	}
 	uint32_t mask() const { return RtScenePick::InstanceMask(record()); }
@@ -278,6 +283,7 @@ struct Host {
 		WNDCLASSA wc = {}; wc.lpfnWndProc = DefWindowProcA; wc.hInstance = GetModuleHandleA(nullptr); wc.lpszClassName = "nvrrthost";
 		RegisterClassA(&wc);
 		HWND win = CreateWindowExA(0, "nvrrthost", "NvrRtHost", WS_OVERLAPPEDWINDOW, 0, 0, 64, 48, nullptr, nullptr, wc.hInstance, nullptr);
+		window = win;
 		d3d = Direct3DCreate9(D3D_SDK_VERSION);
 		if (!d3d) { say("  error: Direct3DCreate9 (is the fork's d3d9.dll next to the exe?)\n"); return false; }
 		D3DPRESENT_PARAMETERS pp = {};
@@ -332,7 +338,7 @@ struct Host {
 		MemoryBarrier();
 		shared->shaderCount = uint32_t(shaders.size());
 		wchar_t exe[MAX_PATH]; MultiByteToWideChar(CP_ACP, 0, helperExe, -1, exe, MAX_PATH);
-		std::wstring cmd = L"\"" + std::wstring(exe) + L"\" --shm " + baseName;
+		std::wstring cmd = L"\"" + std::wstring(exe) + L"\" --shm " + baseName + helperArgs;
 		STARTUPINFOW su = { sizeof(su) };
 		if (!CreateProcessW(exe, &cmd[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &su, &helper)) {
 			say("  error: could not start %s (%lu)\n", helperExe, GetLastError()); return false;
@@ -354,7 +360,9 @@ struct Host {
 		shared->setupDone = 1;
 		SetEvent(frameEvent);
 		const ULONGLONG start = GetTickCount64();
-		while (shared->state == NVR_RT_STATE_STARTING && GetTickCount64() - start < 30000) {
+		// (2026-11-07 ptaaa-firstperson: 30 s -> 180 s; the first start after a shader change compiles every pipeline, ~45-90 s while
+		// other runs share the iGPU, and a timed-out start never finished the driver's pipeline cache: every rerun timed out again)
+		while (shared->state == NVR_RT_STATE_STARTING && GetTickCount64() - start < 180000) {
 			HANDLE waits[2] = { statusEvent, helper.hProcess };
 			if (WaitForMultipleObjects(2, waits, FALSE, 200) == WAIT_OBJECT_0 + 1) break;
 		}
@@ -364,15 +372,82 @@ struct Host {
 		return true;
 	}
 
-	void Stop() {
-		if (!shared) return;
+	std::wstring helperArgs;   // (2026-11-07 rt-shutdown) more of the helper's command line (" --log <name>": the shutdown scene's second helpers)
+
+	bool HelperAlive() const { DWORD code = 0; return helper.hProcess && GetExitCodeProcess(helper.hProcess, &code) && code == STILL_ACTIVE; }
+	// (2026-11-07 rt-shutdown) the game's shutdown order (RtCore.cpp Core::Stop, PgHost::Stop): the helper finishes every frame (CPU wait
+	// for outputReady >= frame; a helper gone or hung is terminated, then SignalFromHost), our queue drained (SignalShared + CPU poll),
+	// quit, the helper's exit (TerminateProcess only when hung). Every step logged when it had to force something. False: forced.
+	bool Stop(DWORD timeoutMs = 5000) {
+		if (!shared) return true;
+		bool clean = true;
+		if (outputReady && frame > 0) {
+			UINT64 v = 0;
+			const ULONGLONG s = GetTickCount64();
+			while (SUCCEEDED(outputReady->GetCompletedValue(&v)) && v < frame && HelperAlive() && GetTickCount64() - s < timeoutMs) Sleep(1);
+			outputReady->GetCompletedValue(&v);
+			if (v < frame) {
+				if (HelperAlive()) { say("  shutdown: the helper did not finish frame %llu (output ready %llu): hung, terminated\n", (unsigned long long)frame, (unsigned long long)v); TerminateProcess(helper.hProcess, 1); WaitForSingleObject(helper.hProcess, 2000); }
+				else say("  shutdown: the helper is gone with output ready %llu of %llu: released from here\n", (unsigned long long)v, (unsigned long long)frame);
+				outputReady->SignalFromHost(frame + (1ull << 20));
+				clean = false;
+			}
+		}
+		if (!Drain(timeoutMs)) clean = false;
 		shared->quit = 1;
+		MemoryBarrier();
 		if (frameEvent) SetEvent(frameEvent);
 		if (helper.hProcess) {
-			if (WaitForSingleObject(helper.hProcess, 3000) != WAIT_OBJECT_0) TerminateProcess(helper.hProcess, 1);
+			if (WaitForSingleObject(helper.hProcess, timeoutMs) != WAIT_OBJECT_0) { say("  shutdown: the helper did not exit in %lu ms: terminated\n", timeoutMs); TerminateProcess(helper.hProcess, 1); WaitForSingleObject(helper.hProcess, 2000); clean = false; }
 			CloseHandle(helper.hProcess); CloseHandle(helper.hThread); helper = {};
 		}
+		if (outputReady && frame > 0) { UINT64 v = 0; outputReady->GetCompletedValue(&v); if (v < frame) { outputReady->SignalFromHost(frame + (1ull << 20)); clean = false; } }
+		return clean;
 	}
+	// everything recorded on our queue has run: SignalShared(inputsReady, past every frame) + a CPU poll (the fork's own fence)
+	uint64_t drainValue = 0;
+	bool Drain(DWORD timeoutMs) {
+		if (!share || !inputsReady) return true;
+		UINT64 v = 0;
+		inputsReady->GetCompletedValue(&v);
+		const uint64_t target = (std::max)((std::max)(frame, drainValue), (uint64_t)v) + 1;   // (above a value the helper may have signalled from the CPU)
+		drainValue = target;
+		if (FAILED(share->SignalShared(inputsReady, target))) { say("  shutdown: SignalShared for the drain failed\n"); return false; }
+		const ULONGLONG s = GetTickCount64();
+		while (SUCCEEDED(inputsReady->GetCompletedValue(&v)) && v < target && GetTickCount64() - s < timeoutMs) Sleep(1);
+		if (v < target) { say("  shutdown: our queue did not drain in %lu ms (fence %llu of %llu)\n", timeoutMs, (unsigned long long)v, (unsigned long long)target); return false; }
+		return true;
+	}
+	// after Stop: every D3D9 / fork object (the shutdown scene's second hosts; the main host leaves this to the process exit)
+	void Release() {
+		for (auto* t : uploads) t->Release();
+		uploads.clear();
+		for (auto& g : staged) { if (g.vb) g.vb->Release(); if (g.ib) g.ib->Release(); }
+		staged.clear();
+		for (Image& im : images) {
+			if (im.readSys) { im.readSys->Release(); im.readSys = nullptr; }
+			if (im.readRt) { im.readRt->Release(); im.readRt = nullptr; }
+			if (im.readTex) { im.readTex->Release(); im.readTex = nullptr; }
+			if (im.shared) { im.shared->Release(); im.shared = nullptr; }
+		}
+		images.clear();
+		if (inputsReady) { inputsReady->Release(); inputsReady = nullptr; }
+		if (outputReady) { outputReady->Release(); outputReady = nullptr; }
+		if (rtSeq) { rtSeq->Release(); rtSeq = nullptr; }
+		if (rt) { rt->Release(); rt = nullptr; }
+		if (share) { share->Release(); share = nullptr; }
+		if (ext) { ext->Release(); ext = nullptr; }
+		if (dev) { dev->Release(); dev = nullptr; }
+		if (d3d) { d3d->Release(); d3d = nullptr; }
+		if (shared) { UnmapViewOfFile(shared); shared = nullptr; }
+		if (mapping) { CloseHandle(mapping); mapping = nullptr; }
+		if (texStaging) { UnmapViewOfFile(texStaging); texStaging = nullptr; }
+		if (texMapping) { CloseHandle(texMapping); texMapping = nullptr; }
+		if (frameEvent) { CloseHandle(frameEvent); frameEvent = nullptr; }
+		if (statusEvent) { CloseHandle(statusEvent); statusEvent = nullptr; }
+		if (window) { DestroyWindow(window); window = nullptr; }
+	}
+	HWND window = nullptr;
 
 	// ---- geometry: a mesh staged into the arena (as RtCore::Gather: float3 positions in a D3D9 VB, 16-bit list, texcoords via
 	// NVR_EXT_RT_TEXCOORD_FLAGS(12) like the cards), a BUILD op this frame
@@ -522,7 +597,8 @@ struct Host {
 
 	// ---- the exchange (RtCore::Exchange's order): flush the staged geometry (+ sequence texel), the frame record, SignalShared,
 	// WaitShared. Instances are given in world space; the transform is made camera-relative here (eye = the scene's origin).
-	bool Exchange(const World& w, const std::vector<uint32_t>& geometryOf, V3 eye) {
+	// (2026-11-07 rt-shutdown) wake false: no frame event (the shutdown scene publishes frames the helper has not woken for)
+	bool Exchange(const World& w, const std::vector<uint32_t>& geometryOf, V3 eye, bool wake = true) {
 		const uint64_t n = ++frame;
 		for (int i = 0; i < 5000 && shared->consumedFrame + (int64_t)NVR_RT_FRAME_RING < (int64_t)n; i++) Sleep(1);
 		if (shared->consumedFrame + (int64_t)NVR_RT_FRAME_RING < (int64_t)n) { say("  error: helper did not read the ring (consumed %lld, frame %llu)\n", (long long)shared->consumedFrame, (unsigned long long)n); return false; }
@@ -551,7 +627,7 @@ struct Host {
 			in.flags = 0x1u | o.instFlags;   // both faces (RtCore); (protocol 8) the displacement flag + key
 			NvrRtInstanceRecord r = {};
 			r.albedo[0] = o.albedo.x; r.albedo[1] = o.albedo.y; r.albedo[2] = o.albedo.z; r.albedo[3] = 1.0f;
-			r.flags = RtScenePick::RecordFlags(o.record());
+			r.flags = RtScenePick::WithEmissive(RtScenePick::RecordFlags(o.record()), o.emissive);   // (2026-11-07 ptaaa-emissive)
 			r.geometryId = in.geometryId;
 			f.instances[count] = in; f.records[count] = r; count++;
 		}
@@ -563,7 +639,7 @@ struct Host {
 		f.frame = n;
 		MemoryBarrier();
 		InterlockedExchange64((volatile LONG64*)&shared->latestFrame, (LONG64)n);
-		SetEvent(frameEvent);
+		if (wake) SetEvent(frameEvent);
 		CHECKHR(share->SignalShared(inputsReady, n), "SignalShared");
 		CHECKHR(share->WaitShared(outputReady, n), "WaitShared");
 		ops.clear(); passes.clear(); arenaTexel = 0; texOffset = 0;
@@ -671,7 +747,7 @@ static bool stageWorld(Host& h, const World& w, std::vector<uint32_t>& ids) {
 	ids.assign(w.meshes.size(), 0);
 	for (size_t m = 0; m < w.meshes.size(); m++) {
 		bool alpha = false;
-		for (auto& o : w.objects) if (o.mesh == int(m) && o.alphaTested) alpha = true;
+		for (auto& o : w.objects) if (o.mesh == int(m) && (o.alphaTested || o.kind == NVR_RT_KIND_GLASS)) alpha = true;   // (glass: non-opaque too)
 		if (!h.Stage(w.meshes[m], alpha, ids[m])) return false;
 	}
 	return true;
@@ -1205,6 +1281,7 @@ static bool sceneCameraMove(Ctx& c) {
 #include "rt_host_refl.inl"	// (2026-11-07) the RT reflection denoiser vs the exact glossy reflection (docs/next/RT-REFLECTION-DENOISER.md)
 #include "rt_host_light.inl"	// (2026-11-06) the path tracer's lamp falloff: game vs physical (PTLampFalloff)	// (2026-11-06) chain-link: fine cut-outs through the 64 x 64 atlas slot
 #include "rt_host_pt.inl"	// (2026-11-07) the path tracer's quality scenes: ReSTIR DI (PTRestirDI)
+#include "rt_host_emissive.inl"	// (2026-11-07 ptaaa-emissive) PTEmissive: glowing triangles as lights vs the exact glow
 #include "rt_host_pthidden.inl"	// (2026-11-07) the path tracer's camera rays pass over the hidden first-person body
 #include "rt_host_denoisepeople.inl"	// (2026-11-07) RtDenoise RGB: PeopleHistory (the path tracer's dialogue ghosting)
 #include "rt_host_aniso.inl"	// (2026-11-07) anisotropic filtering at ray-traced hits (ray cones)
@@ -1214,9 +1291,16 @@ static bool sceneCameraMove(Ctx& c) {
 #include "rt_host_normals.inl"	// (2026-11-07) RealNormalMaps: the real normal maps at traced hits (PT, RT reflections, RT GI)
 #include "rt_host_tessblas.inl"	// (2026-11-07, rtgap-tessblas, protocol 8) displaced geometry in the RT scene vs the CPU's truth
 #include "rt_host_textures.inl"	// (2026-11-07, protocol 8) real textures' routes: BC blocks, the GPU route through the fork, auto caps, release
+#include "rt_host_fog.inl"	// (2026-11-07 ptaaa-fog) RT fog visibility: the froxel grid's traced sun visibility vs the CPU's rays
+#include "rt_host_materials.inl"	// (2026-11-07 ptaaa-materials) glass, foliage, skin, cloth in the path tracer
+#include "rt_host_firstperson.inl"	// (2026-11-07 ptaaa-firstperson) the view model lit by the path tracer; rays near the eye pass over the hidden first-person body
+#include "rt_host_omm.inl"	// (2026-11-07 ptaaa-omm, protocol 9) opacity micromaps: the state builder + its check vs rtAlphaPass, the curve, the thresholds
+#include "rt_host_ptsplit.inl"	// (2026-11-07 ptaaa-denoiser) the path tracer's split denoiser: diffuse / specular, hit-distance reprojection, object motion
+#include "rt_host_shutdown.inl"	// (2026-11-07 rt-shutdown) the helper's + the game's shutdown: quit with frames pending, the game killed mid-flight
 
 // ------------------------------------------------------------------------------------------------------------------------------
 int main(int argc, char** argv) {
+	if (argc >= 3 && !std::strcmp(argv[1], "--idle")) { Sleep(DWORD(std::atoi(argv[2]))); return 0; }   // (2026-11-07) the shutdown scene's stand-in game
 	std::string helperExe, spv, compute, includes, device = "Radeon";
 	std::vector<std::string> only;
 	bool keepGoing = false;
@@ -1231,7 +1315,7 @@ int main(int argc, char** argv) {
 		else if (a == "--scene" && i + 1 < argc) only.push_back(argv[++i]);
 		else if (a == "--keep-going") keepGoing = true;
 		else { std::printf("usage: NvrRtHost.exe --helper <NvrRtHelper.exe> --spv <folder> [--out <folder>] [--device <name part>] [--scene <name>]...\n"
-			"scenes: furnace alphacard material chainlink manylamps mirror cameramove sun ao pathtex falloff restirlamps restirgi denoise lamplookup scenepick decals sameframe movingrest facemorph\n"); return 2; }
+			"scenes: furnace alphacard material chainlink manylamps mirror cameramove sun ao pathtex falloff restirlamps restirgi denoise lamplookup scenepick decals sameframe movingrest facemorph fogvis\n"); return 2; }
 	}
 	if (helperExe.empty() || spv.empty()) { std::printf("--helper and --spv are required\n"); return 2; }
 	{ char full[MAX_PATH]; GetFullPathNameA(spv.c_str(), MAX_PATH, full, nullptr); spv = full; }
@@ -1241,6 +1325,7 @@ int main(int argc, char** argv) {
 	if (!gOut.empty()) { CreateDirectoryA(gOut.c_str(), nullptr); fopen_s(&gReport, (gOut + "\\report.txt").c_str(), "w"); }
 	const ULONGLONG t0 = GetTickCount64();
 
+	gShutdownHelperExe = helperExe; gShutdownDevice = device;   // (2026-11-07 rt-shutdown)
 	Host host;
 	Ctx c = {}; c.host = &host;
 	if (!host.Init(device.c_str())) { say("RESULT: FAIL (no device / fork)\n"); return 1; }
@@ -1273,10 +1358,16 @@ int main(int argc, char** argv) {
 	if (!registerSigma(host, spv) || !registerTess(host)) { say("RESULT: FAIL (shared images)\n"); return 1; }
 	if (!registerDecals(host, spv)) { say("RESULT: FAIL (shaders)\n"); return 1; }
 	if (!registerNormals(host, spv)) { say("RESULT: FAIL (shaders)\n"); return 1; }
+	if (!registerOmm(host, spv)) { say("RESULT: FAIL (shaders)\n"); return 1; }   // (2026-11-07 ptaaa-omm)
+	if (!registerPtSplit(host)) { say("RESULT: FAIL (shared images)\n"); return 1; }	// (2026-11-07 ptaaa-denoiser)
 	gCacheShader = host.AddShader(spv + "\\RtPathTraceCache.spv");   // (2026-11-07) PTRadianceCache's resolve pass
+	gEmissiveShader = host.AddShader(spv + "\\RtEmissiveBuild.spv");   // (2026-11-07 ptaaa-emissive) PTEmissive's light list
 	if (!registerTextureRoutes(host)) { say("RESULT: FAIL (texture transfer images)\n"); return 1; }   // (2026-11-07, protocol 8)
+	if (!registerFog(host, spv)) { say("RESULT: FAIL (fog visibility images)\n"); return 1; }   // (2026-11-07 ptaaa-fog)
 	for (auto& s : host.shaders) if (GetFileAttributesA(s.c_str()) == INVALID_FILE_ATTRIBUTES) { say("RESULT: FAIL (no %s)\n", s.c_str()); return 1; }
 	if (!host.Start(helperExe.c_str())) { host.Stop(); say("RESULT: FAIL (helper did not get ready)\n"); return 1; }
+	// (2026-11-07 ptaaa-omm, protocol 9) [Main.Main.RayTracing] OpacityMicromaps on, as the game sends it (a GPU without the extension: no-op)
+	host.shared->opacityMicromaps = NVR_RT_OMM_ON | (uint32_t(c.alphaAtlas + 1) & NVR_RT_OMM_ATLAS_MASK);
 	// clear the atlas once (an empty slot reads alpha 0) and the history pair
 	{ std::vector<float> z(size_t(32 * kAlphaSlot) * (32 * kAlphaSlot), 0.0f); if (!host.Upload(c.alphaAtlas, z)) return 1;
 	  std::vector<float> hz(size_t(S) * S * 4, 0.0f); host.Upload(c.histA, hz); host.Upload(c.histB, hz);
@@ -1302,12 +1393,20 @@ int main(int argc, char** argv) {
 		{ "restirdi", "path tracer ReSTIR DI for the lamps (PTRestirDI): exact shadowed lamp sum, shuffled lamp list, slide, broken-remap control", [&] { return sceneRestirDI(c); } },
 		{ "specfurnace", "path tracer specular energy: a white metal box under a uniform sky (VNDF + multiple-scattering compensation)", [&] { return sceneSpecularFurnace(c); } },
 		{ "cache", "path tracer radiance cache (PTRadianceCache): 2 bounces + the cache vs 32 bounces, the light halved", [&] { return sceneRadianceCache(c); } },
+		{ "emissive", "path tracer PTEmissive: glowing triangles as lights (MIS, ReSTIR DI with lamps) vs the exact glow, bounce-only brute force, noise + cost", [&] { return sceneEmissive(c); } },
 		{ "restirgi", "ReSTIR GI on the path tracer (RtPathTraceGI + RtRestirGI)", [&] { return sceneRestirGI(c); } },
 		{ "denoise", "the game's RtDenoise passes (fork, D3D9 side)", [&] { return sceneDenoise(c); } },
 		{ "sigmalamps", "RT shadow denoiser, lamps of physical size vs the exact soft shadow, still + moving (RtLampTraceSigma + RtShadowDenoise)", [&] { return sceneSigmaLamps(c); } },
 		{ "sigmasun", "RT shadow denoiser on the sun (10 deg disc + the real 0.53 deg) vs the exact soft shadow, still + moving (RtSunShadow + RtShadowDenoise)", [&] { return sceneSigmaSun(c); } },
 		{ "refldenoise", "RT reflection denoiser (FFX port / ours) vs the old Temporal + Blur and the exact glossy reflection, still + slide + turn (RtReflDenoise*)", [&] { return sceneReflDenoise(c); } },
 		{ "denoisepeople", "RtDenoise RGB temporal (the path tracer's): people's pixels keep PeopleHistory frames (dialogue ghosting)", [&] { return sceneDenoisePeople(c); } },
+		{ "ptsplit", "path tracer PTDenoiseSplit: diffuse + specular put back = the combined picture of the same paths; specular shares; the specular hit distance on a mirror vs the CPU (RtPathTrace)", [&] { return scenePtSplit(c); } },
+		{ "ptspecmove", "RtDenoise specular temporal: a camera sliding past a mirror reflection, hit-distance (virtual) vs surface-only reprojection, clean + noisy", [&] { return scenePtSpecMove(c); } },
+		{ "ptobjmotion", "RtDenoise RGB temporal with Settings.ObjectMotion: a box whose light moves with it, ghost with / without the object motion", [&] { return scenePtObjMotion(c); } },
+		{ "ptsplitstill", "a still path traced scene through today's combined denoise vs the split (diffuse + specular chains) against the 512-path mean", [&] { return scenePtSplitStill(c); } },
+		{ "ptdisocclusion", "RtDenoise a-trous history fix (PTDenoiseHistoryFix): newly seen pixels' one-path speckles vs a still scene unchanged; MeanVariance (PTDenoiseMeanVariance): a 1-pixel shadow line kept", [&] { return scenePtDisocclusion(c); } },
+		{ "ptfirefly", "RtDenoise AntiFirefly (PTDenoiseAntiFirefly): a room lit by bounces off a sunlit patch vs the 512-path mean, rare real fireflies + a glint + a thin line, the furnace", [&] { return scenePtFirefly(c); } },
+		{ "ptdenoisecost", "the denoiser passes' GPU time at 1280 x 720: today's chain vs the split's specular chain (informational)", [&] { return scenePtDenoiseCost(c); } },
 		{ "denoiseantilag", "RtDenoise RGB temporal AntiLag: a step clears in a few frames, a still noisy pixel keeps its mean and noise", [&] { return sceneDenoiseAntiLag(c); } },
 		{ "lamplookup", "the lamp shaders' lookup PointShadowTraced (D3D9 ps_3_0)", [&] { return sceneLampLookup(c); } },
 		{ "scenepick", "RtCore's scene picking rules + record packing (RtScenePick.h)", [&] { return sceneScenePick(c); } },
@@ -1325,7 +1424,16 @@ int main(int argc, char** argv) {
 		{ "realtexbc", "real textures as BC3 / BC1 blocks in the helper (CPU route) vs the exact chain-link shadow", [&] { return sceneRealTexBc(c); } },
 		{ "realtexgpu", "real textures on the game's GPU route through the fork (RGBA8 decode; BC1 / BC3 / BC5 blocks with fork 1.8-rt-bc): chain-link shadow + path-traced colour vs references", [&] { return sceneRealTexGpu(c); } },
 		{ "texrelease", "TEXTURE_RELEASE: a slot's real texture released -> the atlas at once; the id reused for another texture", [&] { return sceneTexRelease(c); } },
+		{ "materials", "path tracer materials: glass / leaf / skin furnace, sun through a window (tinted), back-lit leaf, skin wrap + light through, cloth sheen, the camera through glass; picking + packing (RtPathTrace + RtScenePick.h)", [&] { return sceneMaterials(c); } },
 		{ "facemorph", "FaceMorphs: a skinned head whose vertices change with still bones is re-posed by its hash, an unchanged one is not; the CPU-vertex copy (RtFaceMorph.h + StageSkinnedGeometry + RtLampPrimary)", [&] { return sceneFaceMorph(c); } },
+		{ "fogvis", "RT fog visibility: the froxel grid's traced sun visibility (a window's shaft, an alpha-tested card) = the CPU's rays per cell; the history converges and follows a moving camera (RtFogVisibility + RtFogGrid.h)", [&] { return sceneFogVis(c); } },
+		{ "ptviewmodel", "the first-person view model lit by the path tracer (PTViewModel: its G-buffer, its own FOV, the hidden body round the eye passed over; not-captured pixels keep the game's) (RtPathTrace)", [&] { return scenePtViewModel(c); } },
+		{ "vmprep", "PTViewModel's prep pass (src/core/RtViewModel.h, ps_3_0 on the fork's D3D9 device): the view model's code (4 + s / -1), its captured view-space normal, people 2, the world 1, vs the CPU", [&] { return sceneVmPrep(c); } },
+		{ "hiddennear","rays that start or end within reach of the eye pass over the hidden first-person body (a lamp in the head, a counter under the third-person gun); beyond reach its shadow stays (RtSunShadow, RtLampTrace, RtAOTrace)", [&] { return sceneHiddenNear(c); } },
+		{ "shutdown", "the RT helper's shutdown on second hosts: quit with 4 frames pending, then the game killed mid-flight (a frame whose inputs never come + 2 never run): every published frame's output ready signalled, the GPU idle, the helper exits by itself (NvrRtHelper ShutdownDrain + RtCore Core::Stop's order)", [&] { return sceneShutdown(); } },
+		{ "omm", "opacity micromaps (ptaaa-omm): the curve + thresholds vs brute force; the helper's state builder checked with rtAlphaPass on the GPU (atlas, real texture lod 0 / every mip, tiled grid, decal left out)", [&] { return sceneOmm(c); } },
+		// (2026-11-07 ptaaa-omm) LAST: it switches the micromaps off for the rest of the helper's session
+		{ "ommbreak", "opacity micromaps' negative control: a builder that marks every micro-triangle opaque is caught by the check and the micromaps go off", [&] { return sceneOmmBreak(c); } },
 	};
 	int failed = 0, ran = 0;
 	std::string summary;
@@ -1350,7 +1458,13 @@ int main(int argc, char** argv) {
 		host.shared->geometries, host.shared->failedOps, host.shared->shaderFailures, host.shared->gpuTimeUsAvg / 1000.0, host.shared->buildUsAvg / 1000.0,
 		host.shared->sceneUsAvg / 1000.0, host.shared->traceUsAvg / 1000.0, host.shared->message);
 	if (host.shared->failedOps) { say("  helper refused %u ops -> FAIL\n", host.shared->failedOps); failed++; }
-	host.Stop();
+	{	// (2026-11-07 rt-shutdown) the game's shutdown order (Host::Stop); forced = FAIL
+		const ULONGLONG ts = GetTickCount64();
+		const bool clean = host.Stop();
+		say("main helper shutdown: %s in %.2f s (output ready for every frame, our queue drained, the helper exited by itself)\n", clean ? "clean" : "FORCED -> FAIL",
+			(GetTickCount64() - ts) / 1000.0);
+		if (!clean) failed++;
+	}
 	say("\nSUMMARY (%d scenes, %.1f s)\n%s", ran, (GetTickCount64() - t0) / 1000.0, summary.c_str());
 	say("RESULT: %s\n", failed ? "FAIL" : "PASS");
 	if (gReport) std::fclose(gReport);

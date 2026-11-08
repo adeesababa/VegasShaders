@@ -8,6 +8,7 @@
 
 #include <stdint.h>
 #include <math.h>
+#include <string.h>
 #include "../../tools/nvr-rt-helper/NvrRtProtocol.h"
 
 namespace RtScenePick {
@@ -43,22 +44,34 @@ namespace RtScenePick {
 		bool		decal = false;				// (2026-11-07) BSSP_DECAL or BSSP_DYNAMIC_DECAL (posters, cracks, the game's blood splats)
 		bool		hasAlphaProperty = false;
 		uint16_t	alphaFlags = 0;
+		bool		glassRule = false;			// (2026-11-07 ptaaa-materials) its diffuse texture's material rule is the class "glass"
 	};
 	struct Switches {
 		float		cullAngle = 0.0f;			// [Main.Main.RayTracing] CullAngle (0 off)
 		bool		alphaTested = false;		// [Main.Main.RayTracing] AlphaTested (and the fork stages texcoords)
 		bool		leafCards = false;			// LeafCards (leaf planes > 0)
 		bool		decals = false;				// (2026-11-07) [Main.Main.RayTracing] Decals (with AlphaTested)
+		bool		glass = false;				// (2026-11-07 ptaaa-materials) PTGlass with the path tracer on (and AlphaTested + the atlas)
 	};
 
-	// AddGeometry's tests before the geometry is described; alphaTested: it goes in as an alpha-tested caster
-	inline Fate Classify(const Geometry& g, const Switches& s, bool& alphaTested) {
+	// AddGeometry's tests before the geometry is described; alphaTested: it goes in as an alpha-tested caster; (2026-11-07) glass: it goes
+	// in as a glass pane (NVR_RT_KIND_GLASS: non-opaque, mask 0x10; only the path tracer sees it, RtAlpha.glsl)
+	inline Fate Classify(const Geometry& g, const Switches& s, bool& alphaTested, bool& glass);
+	inline Fate Classify(const Geometry& g, const Switches& s, bool& alphaTested) { bool glass; return Classify(g, s, alphaTested, glass); }
+	inline Fate Classify(const Geometry& g, const Switches& s, bool& alphaTested, bool& glass) {
 		alphaTested = false;
+		glass = false;
+		// (2026-11-07 ptaaa-materials) GLASS for the path tracer: what the material rules call glass (VegasShaders.materials.txt: the keyword
+		// "glass" in the diffuse texture's name, not fxglass; textures\effects\ is never a rule, so heat haze and other refraction effects
+		// stay out) and that the scene left out until now: refraction-flagged or alpha blended without a test. Not decals, not far LOD.
+		const bool blendedOnly = g.hasAlphaProperty && (g.alphaFlags & kAlphaBlend) && !(g.alphaFlags & kAlphaTest);
+		const bool glassCandidate = s.glass && s.alphaTested && g.glassRule && !g.land && !g.farLod && !g.decal && (g.refraction || blendedOnly);
 		if (!g.land && g.hasBound && s.cullAngle > 0.0f && g.distance > g.radius && g.radius < s.cullAngle * g.distance) return Culled;
 		if (!g.hasShaderAndData) return NoShader;
 		if (g.skinned) return Skinned;
 		if (s.leafCards && !g.land && g.hasShaderProperty && g.speedTreeLeaf) return Leaves;
 		if (!g.hasShaderProperty || !g.lightingProperty) return NotLighting;
+		if (glassCandidate && !g.speedTreeLeaf) { glass = true; return Taken; }
 		if (g.refraction) return DecalOrRefraction;
 		// (2026-11-07, docs/next/RT-DETAIL-GAPS.md 5) decals go in as alpha-tested geometry (their diffuse alpha the cut-out: DecalAlphaRef,
 		// blended ones too), lifted off what they lie on (DecalLift) and tagged NVR_RT_CUSTOM_DECAL: shadow, AO and visibility rays pass
@@ -97,6 +110,7 @@ namespace RtScenePick {
 		bool		compact = false;			// [Main.Main.RayTracing] Compact
 		bool		hidden = false;				// (2026-11-07) the player's body in first person: traced, not drawn (NVR_RT_CUSTOM_HIDDEN)
 		bool		decal = false;				// (2026-11-07) a decal (alpha-tested; NVR_RT_CUSTOM_DECAL)
+		uint32_t	kind = NVR_RT_KIND_PLAIN;	// (2026-11-07 ptaaa-materials) the path tracer's material kind (NvrRtProtocol.h NVR_RT_KIND_*)
 	};
 
 	// (2026-11-07) a decal's alpha reference for the traced test (D3DCMP_GREATER): its own with the alpha test on; blended only (most decals:
@@ -133,6 +147,20 @@ namespace RtScenePick {
 		return true;
 	}
 
+	// (2026-11-07 ptaaa-materials) an actor part is SKIN for the path tracer when its diffuse texture lies under textures\characters\ (bodies,
+	// heads, hands) and is none of the parts there that are not skin (hair, eyes, teeth, the mouth's inside, brows, beards)
+	inline bool SkinTexturePath(const char* path) {
+		if (!path) return false;
+		char p[260];
+		size_t n = 0;
+		for (; path[n] && n + 1 < sizeof(p); n++) { const char c = path[n]; p[n] = c == '/' ? '\\' : (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c; }
+		p[n] = 0;
+		if (!strstr(p, "characters\\")) return false;
+		static const char* const kNot[] = { "hair", "eye", "teeth", "tooth", "mouth", "tongue", "brow", "beard", "mustache", "lash" };
+		for (const char* word : kNot) if (strstr(p, word)) return false;
+		return true;
+	}
+
 	// The instance's custom index (NvrRtProtocol.h NVR_RT_CUSTOM_*): land, hidden (the first-person body), decal
 	inline uint32_t CustomIndex(const Record& r) {
 		return (r.land ? NVR_RT_CUSTOM_LAND : 0u) | (r.hidden ? NVR_RT_CUSTOM_HIDDEN : 0u) | (r.decal ? NVR_RT_CUSTOM_DECAL : 0u);
@@ -147,12 +175,24 @@ namespace RtScenePick {
 			if (r.rough >= 0.0f) { int k = (int)(r.rough * 7.0f + 0.5f); k = k < 1 ? 1 : k > 7 ? 7 : k; flags |= (uint32_t)k << NVR_RT_RECORD_ROUGH_SHIFT; }
 			if (r.metal >= 0.0f) { int k = (int)(r.metal * 6.0f + 0.5f) + 1; k = k > 7 ? 7 : k; flags |= (uint32_t)k << NVR_RT_RECORD_METAL_SHIFT; }
 		}
+		flags |= NvrRtKindBits(r.kind & 3u);	// (2026-11-07 ptaaa-materials) bits 0x02 / 0x08
 		return flags;
+	}
+
+	// UNOFFICIAL 2026-11-07 (ptaaa-emissive) PTEmissive's number in a record (RtEmissiveRow.h): bits 8-15 = the emissive instance's number + 1
+	// (1-255; 0 none) on a glow record that is NOT alpha-tested (there they hold the alpha reference); the record is returned unchanged
+	// where they are taken or the record has no glow
+	inline bool CanBeEmissive(uint32_t flags) { return (flags & (NVR_RT_RECORD_GLOW | NVR_RT_RECORD_ALPHA_TESTED)) == NVR_RT_RECORD_GLOW; }
+	inline uint32_t WithEmissive(uint32_t flags, uint32_t number) {
+		if (!CanBeEmissive(flags) || number > 255u) return flags;
+		return (flags & ~0xFF00u) | (number << 8);
 	}
 
 	inline uint32_t InstanceMask(const Record& r) {
 		uint32_t mask = r.hookMask >= 0 ? ((uint32_t)r.hookMask & 0xFFu) : (r.land ? 0x01u : 0x02u);	// default: bit 0 land, bit 1 objects
-		if (r.alphaTested) mask = NVR_RT_MASK_ALPHA;	// only rays that test alpha (RtAlpha.glsl) see it
+		// (2026-11-07 ptaaa-materials) glass: non-opaque under the alpha bit, so a ray either tests it (RtAlpha.glsl: every shader but the path
+		// tracer passes it) or leaves it out (a mask without 0x10)
+		if (r.alphaTested || r.kind == NVR_RT_KIND_GLASS) mask = NVR_RT_MASK_ALPHA;	// only rays that test alpha (RtAlpha.glsl) see it
 		else if (r.player) mask = NVR_RT_MASK_PLAYER;	// the player's rigid parts: every ray sees them but the gun's
 		else if (r.farLod) mask = NVR_RT_MASK_FAR;		// far object LOD (the skyline for reflections)
 		return mask;
@@ -160,6 +200,7 @@ namespace RtScenePick {
 
 	inline uint32_t OpFlags(const Record& r) {
 		uint32_t flags = r.alphaTested ? (NVR_RT_OP_FLAG_TEXCOORDS | NVR_RT_OP_FLAG_ALPHA) : r.textured ? NVR_RT_OP_FLAG_TEXCOORDS : 0u;
+		if (r.kind == NVR_RT_KIND_GLASS) flags |= NVR_RT_OP_FLAG_ALPHA;	// (2026-11-07 ptaaa-materials) built non-opaque: the rays see its candidates
 		if (r.compact) flags |= NVR_RT_OP_FLAG_COMPACT;
 		return flags;
 	}
