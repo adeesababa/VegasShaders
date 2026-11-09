@@ -44,7 +44,7 @@ namespace RtAmbient {
 		// nearest lamps); into AmbientLight's bounce light (ComputeGI's accumulate and apply), strength GIStrength. AmbientLight only.
 		bool	GI = false;
 		float	GIDistance = 1500.0f;	// [100-8000] GI ray length, world units
-		float	GIStrength = 1.0f;		// [0-4] the bounce light added (x the surface colour), as ComputeGIStrength
+		float	GIStrength = 1.0f;		// [0-20] the bounce light added (x the surface colour), as ComputeGIStrength (UNOFFICIAL 2026-11-09: the cap was 4; outdoors the sun's bounce is a small share of the light, so users asked for room)
 		float	GIOffscreen = 1.0f;		// [0-1] (GI v2) the analytic light's scale for bounce hits the screen did not see (2026-11-03 rtgi-cal: 1, was 0.1)
 		bool	GIScreenLight = false;	// UNOFFICIAL 2026-11-03 (rtgi-cal) on-screen bounce hits take the game's lit frame (GI v2); false (default): every hit the analytic light
 		bool	GIGameLamps = true;		// UNOFFICIAL 2026-11-03 (rtspec) the bounce hits lit by the game's lamp table (its lamps, reach, colour, falloff)
@@ -118,7 +118,7 @@ namespace RtAmbient {
 		Current.DebugView = std::clamp(TheSettingManager->GetSettingI(s, "DebugView"), 0, 8);
 		Current.GI = TheSettingManager->GetSettingI(s, "GI") != 0;
 		Current.GIDistance = std::clamp(TheSettingManager->GetSettingF(s, "GIDistance"), 100.0f, 8000.0f);
-		Current.GIStrength = std::clamp(TheSettingManager->GetSettingF(s, "GIStrength"), 0.0f, 4.0f);
+		Current.GIStrength = std::clamp(TheSettingManager->GetSettingF(s, "GIStrength"), 0.0f, 20.0f);	// UNOFFICIAL 2026-11-09: 20 (was 4); the menu clamps to the same [0-20] its description gives
 		Current.GIAmbient = std::clamp(TheSettingManager->GetSettingF(s, "GIAmbient"), 0.0f, 1.0f);
 		Current.GIOffscreen = std::clamp(TheSettingManager->GetSettingF(s, "GIOffscreen"), 0.0f, 1.0f);
 		Current.GIScreenLight = TheSettingManager->GetSettingI(s, "GIScreenLight") != 0;	// UNOFFICIAL 2026-11-03 (rtgi-cal)

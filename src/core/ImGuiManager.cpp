@@ -1415,6 +1415,7 @@ static const SimpleRow kSimpleRows[] = {
 		"How rough a surface can be and still get ray-traced reflections; rougher ones keep the screen-space reflections. Wet ground counts "
 		"by Reflections' WetRoughness: if it is rougher than this, puddles get no rays." },
 	{ "Shaders.Reflections.RT", "Weapon", "Weapon reflections", nullptr, "Your gun reflects the world around it: lamps, signs, the sky. Strongest on metal parts." },
+	{ "Shaders.Reflections.RT", "WeaponHands", "Hands and arms reflect too", nullptr, "Off: only the gun reflects. On: your hands, gloves and arms reflect like the gun (the whole first-person model)." },
 	{ "Shaders.Reflections.RT", "Water", "Ray-traced water reflections", nullptr, "Water reflects the world with rays instead of the old reflection map." },
 	// Light shafts and fog (UNOFFICIAL 2026-11-07 ptaaa-fog)
 	{ "Shaders.VolumetricLight.RT", "Enabled", "Ray-traced light shafts and fog", nullptr, "Sunbeams through windows, trees and buildings, and the fog's sunlight, "
@@ -2386,6 +2387,30 @@ static bool RenderScaleCombo(const char* section, float& val) {
 	return true;
 }
 
+// UNOFFICIAL 2026-11-09 (user: "clamp settings in the menu if a user sets it higher than the limit so there's no confusion"): a number
+// whose description opens with its limits, "[0-4] How much ...", is held to them in the menu. It cannot be dragged, typed (Ctrl+click)
+// or stepped past them, and one saved past a limit (a hand-edited file) shows the limit the effect reads it at. The limits are read from
+// the defaults' own comment, so the menu and the settings file say the same; the effects clamp what they read to the same numbers (the
+// ranges and the code's clamps were compared once: 0 differ). Only "[a-b]" counts; "[1, 2, 4, 8]" lists and plain text are left alone.
+static bool DocumentedRange(const std::string& description, float& lo, float& hi) {
+	if (description.size() < 5 || description[0] != '[') return false;
+	const char* p = description.c_str() + 1;
+	char* end = nullptr;
+	const float a = strtof(p, &end);
+	if (end == p) return false;
+	while (*end == ' ') end++;
+	if (*end != '-') return false;
+	p = ++end;
+	while (*p == ' ') p++;
+	const float b = strtof(p, &end);
+	if (end == p) return false;
+	while (*end == ' ') end++;
+	if (*end != ']' || !(b > a)) return false;
+	lo = a;
+	hi = b;
+	return true;
+}
+
 // UNOFFICIAL: float settings too large for the drag step every other float uses (0.001 a pixel), such as distances in game
 // units, render as a slider over a fixed range instead. Keyed by "Section.Key" like the choice lists.
 struct FloatRange { float Min; float Max; const char* Format; };
@@ -2469,17 +2494,28 @@ static bool DrawFloatSetting(SettingRow& row, bool isShader) {
 	float value = (float)atof(node.Value);
 	const bool modes = IsRenderScaleSetting(node.Section, node.Key);	// UNOFFICIAL 2026-10-27
 	const auto range = kFloatSliders.find(std::string(node.Section) + "." + node.Key);
+	// UNOFFICIAL 2026-11-09: held to its limits (a slider's own, else the "[a-b]" its description opens with): dragging, typing and the
+	// step keys / buttons all stop there, and a value saved past one shows the limit it is read at (the file is left alone until edited)
+	float lo = 0.0f, hi = 0.0f;
+	bool limited = false;
+	if (!modes) {
+		if (range != kFloatSliders.end()) { lo = range->second.Min; hi = range->second.Max; limited = true; }
+		else limited = DocumentedRange(node.Description, lo, hi);
+	}
+	if (limited) value = ImClamp(value, lo, hi);
 
 	ImGui::SetNextItemWidth(row.controlW);
 	bool edited;
 	if (modes) edited = RenderScaleCombo(node.Section, value);
-	else if (range != kFloatSliders.end()) edited = ImGui::SliderFloat("##v", &value, range->second.Min, range->second.Max, range->second.Format);
+	else if (range != kFloatSliders.end()) edited = ImGui::SliderFloat("##v", &value, lo, hi, range->second.Format, ImGuiSliderFlags_AlwaysClamp);
+	else if (limited) edited = ImGui::DragFloat("##v", &value, 0.001f, lo, hi, "%.4f", ImGuiSliderFlags_AlwaysClamp);
 	else edited = ImGui::DragFloat("##v", &value, 0.001f, 0.0f, 0.0f, "%.4f");
 	if (edited) Store(node, value);
 
 	const bool hovered = ImGui::IsItemHovered();
 	if (hovered && !modes && (gMenu.plusKey || gMenu.minusKey)) {
 		value += gMenu.plusKey ? gMenu.step : -gMenu.step;
+		if (limited) value = ImClamp(value, lo, hi);
 		Store(node, value);
 	}
 	if (isShader && DevOptionsShown() && !modes) {	// UNOFFICIAL 2026-10-25
@@ -2487,6 +2523,7 @@ static bool DrawFloatSetting(SettingRow& row, bool isShader) {
 			ImGui::SameLine();
 			if (!ImGui::SmallButton(button)) continue;
 			value += button[0] == '+' ? gMenu.step : -gMenu.step;
+			if (limited) value = ImClamp(value, lo, hi);
 			Store(node, value);
 		}
 	}
@@ -2514,7 +2551,14 @@ static bool DrawIntSetting(SettingRow& row) {
 	}
 	else {
 		ImGui::SetNextItemWidth(row.controlW);
-		ImGui::DragInt("##v", &wanted, 1.0f);
+		float lo = 0.0f, hi = 0.0f;
+		if (DocumentedRange(node.Description, lo, hi)) {	// UNOFFICIAL 2026-11-09: held to its documented limits, as the float rows
+			const int low = (int)lo, high = (int)hi;
+			int shown = ImClamp(stored, low, high);	// a value saved past a limit shows the limit it is read at; only an edit writes
+			ImGui::DragInt("##v", &shown, 1.0f, low, high, "%d", ImGuiSliderFlags_AlwaysClamp);
+			if (shown != ImClamp(stored, low, high)) wanted = shown;
+		}
+		else ImGui::DragInt("##v", &wanted, 1.0f);
 	}
 	const bool hovered = ImGui::IsItemHovered();
 	if (wanted != stored && ConfirmChange(node.Section, node.Key, std::to_string(wanted))) {	// (2026-11-05: conflicts ask first)
@@ -3508,7 +3552,7 @@ static const MenuGroup kMenuGroups[] = {
 	{ "Shaders.Reflections.RT", "Glossy surfaces",
 		"VisibleNormals, RayReuse, ReuseRoughness, ContactSharpness, ContactSpread, RoughShare, RoughReach",
 		FogType::None, false, "Blurred reflections on worn tiles, satin metal and wet stone: how sharp they stay and how cheap they are.", nullptr },
-	{ "Shaders.Reflections.RT", "Weapon", "Weapon, WeaponMetal, WeaponRoughness",
+	{ "Shaders.Reflections.RT", "Weapon", "Weapon, WeaponHands, WeaponMetal, WeaponRoughness",
 		FogType::None, false, "Your first-person weapon reflects the ray traced scene.", nullptr },
 	{ "Shaders.Reflections.RT", "Water", "Water, WaterSkipPlanar, WaterPlanarRefresh, WaterRoughness",
 		FogType::None, false, "Water reflects the ray traced scene instead of the game's own water reflection.", nullptr },
@@ -4241,6 +4285,8 @@ static void DrawRtDebugPicker() {
 		WrappedTooltip("Shows one ray-traced effect's own picture, to see what it does. It stays on until you pick Off (the normal picture).");
 }
 
+static void DrawRtSharedBlocksOnRtPage(const char* rtSection);	// 2026-11-09: below, with the pages by what you see
+
 static void RenderRayTracingPage() {
 	PageTitle("Ray tracing", "Every ray-traced effect in one place. Needs the DXVK fork, NvrRtHelper.exe and a GPU with ray tracing.");
 
@@ -4275,6 +4321,7 @@ static void RenderRayTracingPage() {
 		PageOrder(rows);
 		RenderSettingsList(rows);
 		gMenu.page = page;
+		DrawRtSharedBlocksOnRtPage(section.Section);	// 2026-11-09: the raster settings this effect shares, shown again
 		ImGui::PopID();
 	}
 }
@@ -4848,6 +4895,67 @@ static void DrawVisualItem(const VisualItem& item, bool titled) {
 	ImGui::PopID();
 }
 
+// ---- The raster settings an RT effect shares, shown again under it ----------------------------------------------------------
+// 2026-11-09 (user: "make the settings for RT effects that live under raster menus also have duplicate copies under each RT effect so
+// users do not have to swap between menus to configure them"): a ray-traced effect runs together with its raster twin and reads some of
+// the twin's settings (the sun's shadow maps and smoothing, the lamps' reach and capsules, the screen-space reflections, Ambient light and
+// the light grid with the surface colour it multiplies the bounce by). Each folder above that is marked "used by both" shows again under
+// the RT effect, folded, as the very same rows (the same keys: a change here is a change there, and the toml is the same). They sit under
+// the effect's section on the Ray tracing page and inside its "Ray traced" folder on the pages by what you see.
+struct RtSharedBlock {
+	const char* Rt;				// the RT effect's section
+	const char* Folder;			// its folder's title on a page by what you see, or nullptr (not shown there: it already holds them)
+	bool OnRtPage;				// shown under the effect on the Ray tracing page
+	const VisualFolder* Source;	// the raster folder whose rows are shown again (one list: edit the folder, the copy follows)
+};
+static const VisualFolder kShaftsSharedFolder = { "Light shafts", "The shafts' own strength and look; the traced shadow only changes what blocks the sun.",
+	nullptr, 0, { { "Shaders.VolumetricLight.Main", nullptr, "General" }, { "Shaders.VolumetricLight.Night", nullptr, "At night" } }, nullptr };
+static const RtSharedBlock kRtSharedBlocks[] = {
+	{ "Shaders.ShadowsExteriors.RT", "Ray traced", true, &kSunMapsFolder },
+	{ "Shaders.ShadowsExteriors.RT", "Ray traced", true, &kSunSoftFolder },
+	{ "Shaders.ShadowsExteriors.RT", "Ray traced", true, &kSunContactFolder },
+	{ "Shaders.ShadowsInteriors.RT", "Ray traced", true, &kLampCommonFolder },
+	{ "Shaders.ShadowsInteriors.RT", "Ray traced", true, &kLampCapsuleFolder },
+	{ "Shaders.AmbientOcclusion.RT", "Ray-traced bounce light", true, &kAmbientLightFolder },
+	{ "Shaders.AmbientOcclusion.RT", "Ray-traced bounce light", true, &kGridFolder },
+	{ "Shaders.AmbientOcclusion.RT", "Ray-traced occlusion", false, &kAmbientLightFolder },	// (one copy on the Ray tracing page: it shows both)
+	{ "Shaders.Reflections.RT", "Ray traced", true, &kSsrFolder },
+	{ "Shaders.VolumetricLight.RT", nullptr, true, &kShaftsSharedFolder },	// (the Fog page's Light shafts folder already holds RT and raster)
+};
+
+static void DrawRtSharedBlock(const RtSharedBlock& b, const char* where) {
+	const VisualFolder& f = *b.Source;
+	const std::string header = std::string("Also used here: ") + f.Title + "###rtshared/" + where + "/" + b.Rt + "/" + f.Title;
+	if (!MenuWidgets::SubHeader(header.c_str(), false)) return;
+	ImGui::PushID(f.Title);
+	ImGui::Indent(ImGui::GetFontSize() * 0.75f);
+	ImGui::PushTextWrapPos(0.0f);
+	ImGui::TextDisabled("The same rows as the \"%s\" folder: a change here is a change there.", f.Title);
+	if (f.Note) ImGui::TextDisabled("%s", f.Note);
+	ImGui::PopTextWrapPos();
+	int sections = 0;
+	for (const VisualItem& item : f.Items) if (strcmp(item.Section, "@effect")) sections++;
+	for (const VisualItem& item : f.Items) DrawVisualItem(item, sections > 1);
+	ImGui::Unindent(ImGui::GetFontSize() * 0.75f);
+	ImGui::PopID();
+}
+
+// Inside a "Ray traced" folder of a page by what you see: the blocks of the RT section its own rows belong to.
+static void DrawRtSharedBlocksInFolder(const VisualFolder& f) {
+	for (const RtSharedBlock& b : kRtSharedBlocks) {
+		if (!b.Folder || strcmp(b.Folder, f.Title)) continue;
+		bool ownsRt = false;
+		for (const VisualItem& item : f.Items) if (!strcmp(item.Section, b.Rt)) { ownsRt = true; break; }
+		if (ownsRt) DrawRtSharedBlock(b, "folder");
+	}
+}
+
+// Under an RT effect's section on the Ray tracing page.
+static void DrawRtSharedBlocksOnRtPage(const char* rtSection) {
+	for (const RtSharedBlock& b : kRtSharedBlocks)
+		if (b.OnRtPage && !strcmp(b.Rt, rtSection)) DrawRtSharedBlock(b, "page");
+}
+
 static void DrawVisualChoice(const VisualChoice& c) {
 	const int active = ActiveOption(c);
 	ImGui::PushID(c.Id);
@@ -4908,6 +5016,7 @@ static void DrawVisualFolder(const VisualFolder& f, const char* pageId) {
 	int sections = 0;
 	for (const VisualItem& item : f.Items) if (strcmp(item.Section, "@effect")) sections++;
 	for (const VisualItem& item : f.Items) DrawVisualItem(item, sections > 1);
+	DrawRtSharedBlocksInFolder(f);	// 2026-11-09: an RT folder shows the raster settings it shares, folded
 	ImGui::Unindent(ImGui::GetFontSize() * 0.75f);
 	ImGui::PopID();
 }

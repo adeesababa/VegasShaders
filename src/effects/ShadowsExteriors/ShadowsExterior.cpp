@@ -1082,6 +1082,13 @@ void ShadowsExteriorEffect::RecreateTextures(bool cascades, bool ortho, bool cub
 		TheShaderManager->Effects.Snow->ClearSampler("TESR_OrthoMapBuffer", 19);
 		TheShaderManager->Effects.SnowAccumulation->ClearSampler("TESR_OrthoMapBuffer", 19);
 		TheShaderManager->Effects.WetWorld->ClearSampler("TESR_OrthoMapBuffer", 19);
+
+		// UNOFFICIAL 2026-11-09 (crash log 2026-11-08 14:07, Ortho.Resolution 2 -> 3, access violation on the dxvk-cs thread 12 s later):
+		// the game's own shaders (SLS*, PAR*, SKIN* ...) sample the ortho map too, and each holds its own cached pointer to the texture
+		// just released above (ShaderRecord::SetCT re-resolves only a null one). Only the four effects above were cleared, so the first
+		// ortho resize of a run left every game shader binding a freed texture: DXVK's SetTexture touched freed memory, fine until the
+		// memory was reused, then a wild pointer on the command-stream thread. The atlas path above has always done this.
+		TheShaderManager->ClearShaderSamplers("TESR_OrthoMapBuffer", 19);
 	}
 
 	// Start the shadow manager's frame counter again, and refresh every cascade next frame: the staggered schedule would

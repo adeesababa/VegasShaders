@@ -27,7 +27,7 @@ void AmbientLightEffect::UpdateSettings() {
 	Constants.Data2.z = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "BlurRadius"), 0.5f, 4.0f);
 	Constants.Data2.w = (float)std::clamp(TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "DebugView"), 0, 13);	// 13: ComputeGI's light (2026-10-27)
 	temporal = TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "Temporal") != 0;
-	gridBounce = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "GridBounce"), 0.0f, 10.0f);
+	gridBounce = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "GridBounce"), 0.0f, 40.0f);	// UNOFFICIAL 2026-11-09: 40 (was 10): the sun's bounce outdoors; the menu clamps to the same [0-40]
 	gridCell = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "GridCellSize"), 50.0f, 800.0f);
 	gridSteps = std::clamp(TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "GridSteps"), 1, 16);
 	gridSpread = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "GridSpread"), 0.0f, 0.6f);
@@ -57,7 +57,7 @@ void AmbientLightEffect::UpdateSettings() {
 	hizLogQ = std::clamp(TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "HiZ"), 0, 6);	// UNOFFICIAL 2026-10-26 (deep/fork-hiz)
 	// UNOFFICIAL 2026-10-27 (NVR DXVK, deep/fork2-ssgi) ComputeGI (AmbientLight.h).
 	computeGI = TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "ComputeGI") != 0;
-	giStrength = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "ComputeGIStrength"), 0.0f, 4.0f);
+	giStrength = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "ComputeGIStrength"), 0.0f, 20.0f);	// UNOFFICIAL 2026-11-09: 20 (was 4), as RT GIStrength
 	giThickness = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "ComputeGIThickness"), 5.0f, 500.0f);
 	giQuality = std::clamp(TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "ComputeGIQuality"), 0, 2);
 	giThinOcclusion = TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "ComputeGIThinOcclusion") != 0;

@@ -62,6 +62,7 @@ void HdrOutputNoteDesktop() { HdrOutput::NoteDesktop(); }	// UNOFFICIAL 2026-10-
 #include "../../core/LandLamps.h"	// UNOFFICIAL 2026-10-30 LandAllLamps: the land lit by all of its own lamps (plan C)
 #include "../../core/ReactiveMask.h"	// UNOFFICIAL 2026-10-30 ReactiveMask: FSR's reactive mask from the world's alpha draws
 #include "../../core/SkyCoverage.h"	// UNOFFICIAL 2026-11-04 SkyCoverage: the game's MSAA, exact sky shares
+#include "../../core/WeaponMask.h"	// UNOFFICIAL 2026-11-09 WeaponMask: the weapon's own pixels of the first-person model (RT weapon reflections, not the hands)
 #include "../../core/ForwardCloudShadows.h"	// UNOFFICIAL 2026-11-04 ForwardCloudShadows: the clouds' shadow in the surface shaders
 
 namespace RmaosDraw { static void Upload(); }	// UNOFFICIAL _rmaos maps (below)
@@ -3640,7 +3641,10 @@ namespace MaterialDraw {
 		const Current c = Now();
 		ReflMaterial::DrawState s;
 		ReflMaterial::DrawBegin(device, true, c.world, c.firstPerson, c.pass ? c.pass->passEnum : 0, c.pixelShader, s);
+		WeaponMask::DrawState weaponTag;	// UNOFFICIAL 2026-11-09 (core/WeaponMask.h): a first-person draw tags the stencil (a skinned one: the arms, never the gun)
+		if (c.firstPerson) WeaponMask::DrawBegin(device, c.pass ? c.pass->geometry : nullptr, weaponTag);
 		PartitionNext[Site](renderer, edx, buffer, partition, unused);
+		WeaponMask::DrawEnd(device, weaponTag);
 		ReflMaterial::DrawEnd(device, s);
 		if (c.world && c.pass) RtHairTint::NoteHairDraw(c.pass->geometry, c.pixelShader, device);
 	}
@@ -3650,7 +3654,10 @@ namespace MaterialDraw {
 		const Current c = Now();
 		ReflMaterial::DrawState s;
 		ReflMaterial::DrawBegin(device, false, c.world, c.firstPerson, c.pass ? c.pass->passEnum : 0, c.pixelShader, s);
+		WeaponMask::DrawState weaponTag;	// UNOFFICIAL 2026-11-09 (core/WeaponMask.h): a first-person draw tags the stencil (the gun's: 1, the rest: 0)
+		if (c.firstPerson) WeaponMask::DrawBegin(device, geometry, weaponTag);
 		StillNext[Slot](renderer, edx, geometry);
+		WeaponMask::DrawEnd(device, weaponTag);
 		ReflMaterial::DrawEnd(device, s);
 		// (2026-11-08 perf-reflfix4) the rigid hair, beards and brows draw HERE (the vanilla hair NIFs hold no skin instance): its c2, noted as
 		// a fallback and a cross-check of the property's tint (RtHairTint.h; RtCore reads the property itself)
@@ -3661,7 +3668,9 @@ namespace MaterialDraw {
 // After the cloth / Pip-Boy fit hooks (Hooks.cpp): ours on top, calling on theirs
 void InstallMaterialDrawHooks() {
 	const bool rtActors = TheSettingManager->GetSettingI("Main.Main.RayTracing", "Actors") != 0;
-	if (!ReflMaterial::CompiledIn() && !rtActors) return;
+	// UNOFFICIAL 2026-11-09 WeaponMask: the RT weapon reflections tag the weapon's draws through these hooks too
+	const bool rtWeapon = TheSettingManager->GetSettingI("Shaders.Reflections.RT", "Enabled") != 0 && TheSettingManager->GetSettingF("Shaders.Reflections.RT", "Weapon") > 0.0f;
+	if (!ReflMaterial::CompiledIn() && !rtActors && !rtWeapon) return;
 	static const UInt32 kSites[2] = { 0x00B992E3, 0x00B99339 };
 	const bool callsThere = *(const UInt8*)kSites[0] == 0xE8 && *(const UInt8*)kSites[1] == 0xE8;
 	if (callsThere) {
@@ -3677,6 +3686,7 @@ void InstallMaterialDrawHooks() {
 		SafeWrite32(0x010EE670, (UInt32)&MaterialDraw::StillHook<0>);
 		SafeWrite32(0x010EE674, (UInt32)&MaterialDraw::StillHook<1>);
 	}
+	WeaponMask::HooksOn = callsThere && stillThere;	// UNOFFICIAL 2026-11-09: both draw paths reach the first-person tags (else no mask: the old whole-model weapon)
 	Logger::Log("UNOFFICIAL MaterialAware / RT hair tint draw hooks (perf-mirrorfix2): skinned partition draws %s (calling %08X %08X), still-object draws %s (calling %08X %08X)",
 		callsThere ? "hooked" : "NOT hooked (not the game's calls)", callsThere ? (UInt32)MaterialDraw::PartitionNext[0] : 0u, callsThere ? (UInt32)MaterialDraw::PartitionNext[1] : 0u,
 		stillThere ? "hooked" : "NOT hooked", shape, strips);
@@ -3864,6 +3874,9 @@ void __fastcall RenderFirstPersonHook(Main* This, UInt32 edx, NiDX9Renderer* Ren
 		}
 	}
 	PbrPop::ActorPasses::FirstPersonNow = 1;	// UNOFFICIAL ActorsInOnePass: the first-person model's passes are built in here
+	// UNOFFICIAL 2026-11-09 WeaponMask (core/WeaponMask.h): the weapon's draws tag the stencil from here to the end of the pass (MaterialDraw hooks),
+	// for the RT weapon reflections to leave the hands and arms out. Nothing unless [Shaders.Reflections.RT] Weapon is on and WeaponHands off.
+	WeaponMask::Begin(TheRenderManager->device);
 	// UNOFFICIAL 2026-11-07 (ptaaa-firstperson) PTViewModel: the model's colour, normals and material into the G-buffer, for the path
 	// tracer to light it (core/CapturedNormals.h BeginViewModelSpan; nothing unless the path tracer asked for it this frame)
 	CapturedNormals::BeginViewModelSpan(TheRenderManager->device);
@@ -3873,6 +3886,7 @@ void __fastcall RenderFirstPersonHook(Main* This, UInt32 edx, NiDX9Renderer* Ren
 	ReflMaterial::EndFirstPerson(TheRenderManager->renderState, TheRenderManager->device);
 	CapturedNormals::EndViewModelSpan(TheRenderManager->device, TheFrameRateManager->FrameNumber);
 	PbrPop::ActorPasses::FirstPersonNow = 0;
+	WeaponMask::End(TheRenderManager->device, TheFrameRateManager->FrameNumber);	// UNOFFICIAL 2026-11-09: the stencil's tags into TESR_WeaponMask (core/WeaponMask.h)
 	SkyCoverage::DrawViewModel(TheRenderManager->device);	// UNOFFICIAL 2026-11-04: the weapon out of the sky share (core/SkyCoverage.h)
 	if (viewModelShadows) {
 		// The map holds the viewmodel now, not what the world's draws read: nothing later this frame reads it (w 0).

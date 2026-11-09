@@ -78,6 +78,7 @@ public:
 		float	RtWaterRoughness;	// 2026-10-31: the water's roughness for its rays
 		float	RtWeaponRoughness;	// 2026-10-30: the weapon's roughness where no material data says (MaterialAware / MaterialBuffer)
 		float	RtWeaponMetal;		// 2026-10-30: the weapon's metal guessed from its colour (grey = metal) x this, without material data
+		bool	RtWeaponHands;		// 2026-11-09: the hands and arms of the first-person model reflect like the weapon too (off: the weapon's own pixels only, core/WeaponMask.h)
 		bool	RtHitTextures;		// 2026-10-29: with the core's [Main.Main.RayTracing] HitTextures, hits take the texture's colour (else the draw's average)
 		// UNOFFICIAL 2026-11-07 the RT reflection denoiser (core/RtReflDenoise.h, docs/next/RT-REFLECTION-DENOISER.md): in place of Temporal +
 		// Blur X / Y on frames the RT trace runs (native frames, not under DLSS RR); false: the old path exactly as before
