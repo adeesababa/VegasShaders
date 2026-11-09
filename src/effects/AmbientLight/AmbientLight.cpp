@@ -1127,7 +1127,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 		Effect->SetVector(h, &edges);
 	}
 	if (D3DXHANDLE h = ParameterHandle(paramReach, "NVR_ALReach")) {	// UNOFFICIAL 2026-11-01 MinReach (AmbientLight.fx.hlsl Estimate)
-		D3DXVECTOR4 reach(minReach ? 1.0f : 0.0f, minReachTexels, 0.0f, 0.0f);
+		D3DXVECTOR4 reach(minReach ? 1.0f : 0.0f, minReachTexels, 0.0f, RtAmbient::Current.RtFarFade ? 1.0f : 0.0f);	// w: (alsky) RtFarFade
 		Effect->SetVector(h, &reach);
 	}
 	D3DXHANDLE flagsHandle = ParameterHandle(paramFlags, "NVR_ALFlags");
@@ -1143,7 +1143,10 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	// UNOFFICIAL 2026-10-19 SunFar: the land's and the clouds' shadow factor on stage 13 for the folded sun-shadow apply (Apply pass).
 	IDirect3DTexture9* sunFar = shadow && TheShaderManager->Effects.SunFar ? TheShaderManager->Effects.SunFar->FactorTexture() : nullptr;
 	if (D3DXHANDLE h = ParameterHandle(paramSunFarFlags, "NVR_SunFarFlags")) {
-		D3DXVECTOR4 sunFarFlags(sunFar ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+		// yz: UNOFFICIAL 2026-11-08 (alsky) MinReach for the Vulkan Estimate (AmbientLightEstimate.frag; NVR_ALReach's x and y, which the
+		// D3D9 Estimate reads). The Vulkan constants block has no field for NVR_ALReach and nothing reads this vector past x.
+		// w: (alsky) RtFarFade for AmbientLightEstimateRT.frag
+		D3DXVECTOR4 sunFarFlags(sunFar ? 1.0f : 0.0f, minReach ? 1.0f : 0.0f, minReachTexels, RtAmbient::Current.RtFarFade ? 1.0f : 0.0f);
 		Effect->SetVector(h, &sunFarFlags);
 	}
 	else sunFar = nullptr;

@@ -358,7 +358,9 @@ float4 Estimate(VSOUT IN) : COLOR0 {
 	// Bounce: the average over the reads, x BounceScale so a pixel enclosed by surfaces showing light L receives about L.
 	// UNOFFICIAL 2026-11-03 RT GI on the D3D9 passes (NVR_ALGI.x, see the samplers): the traced bounce light instead, x the fade, as
 	// AmbientLightEstimateRT.frag writes it (point read: each texel's own ray; the blurs and Accumulate average them).
-	[branch] if (NVR_ALGI.x > 0.5f) bounce = tex2Dlod(NVR_ALRTGI, float4(uv, 0.0f, 0.0f)).rgb * fade;
+	// (UNOFFICIAL 2026-11-08 alsky RtFarFade, NVR_ALReach.w: the trace stops at endFade, so the bounce fades out before it, not at DrawDistance)
+	[branch] if (NVR_ALGI.x > 0.5f) bounce = tex2Dlod(NVR_ALRTGI, float4(uv, 0.0f, 0.0f)).rgb * fade *
+		(NVR_ALReach.w > 0.5f ? 1.0f - smoothstep(0.75f * endFade, (float)endFade, origin.z) : 1.0f);
 	else bounce *= BounceScale * fade / (SLICES * STEPS * 2);
 	return float4(bounce, saturate(visibility));
 }

@@ -100,7 +100,8 @@ void AmbientOcclusionEffect::UpdateSkyConstants() {
 	SkyData2.w = LinearLuma(TheShaderManager->ShaderConst.sunColor);
 	{	// UNOFFICIAL 2026-10-20 (skyamb) LightCap (above)
 		const D3DXVECTOR2 take = SkyTakeComposite();
-		SkyData5 = D3DXVECTOR4(take.x, SkyOpenSides, 0.0f, take.y);
+		// z: UNOFFICIAL 2026-11-08 (alsky) SkySoftEdges, read only by the RT sky pass (AmbientOcclusionSkyRT.frag: open toward endFade)
+		SkyData5 = D3DXVECTOR4(take.x, SkyOpenSides, RtAmbient::Current.SkySoftEdges ? 1.0f : 0.0f, take.y);
 	}
 	if (SkyData.x > 0.0f) TheShaderManager->orthoRequired = true;	// UNOFFICIAL Skylighting v1 reads the ortho map
 	if (SkyData2.x > 0.0f && !RtAmbient::SkyReady()) TheShaderManager->orthoSkyRequired = true;	// v2: amortised + clean map (ShadowManager); not for the RT sky (2026-10-28)
@@ -639,6 +640,7 @@ IDirect3DTexture9* AmbientOcclusionEffect::RtDenoisedGI(IDirect3DDevice9* Device
 	s.Downscale = 2;
 	s.MovingHistory = RtAmbient::Current.GIMovingHistory;	// (2026-10-31, rt-ao-sky) with DenoiseBackbone only
 	s.Kernel = RtAmbient::Current.DenoiseKernel;	// (2026-10-30) 3 by default: ~2.5x cheaper (rt-sun 1f5d987e)
+	s.AntiLag = RtAmbient::Current.GIDenoiseAntiLag;	// UNOFFICIAL 2026-11-08 (rtgi-ghost): the path tracer's anti-lag (0 = off, as before)
 	result = RtDenoise::Run(denoiser, Device, gi, rtDenoisedGISurface, s);
 	static bool logged = false;
 	if (result && !logged) { logged = true; Logger::Log("UNOFFICIAL RT AO: the GI bounce light goes through the shared RT denoiser (RGB, half resolution)."); }
@@ -708,8 +710,28 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 	// every ray ~71000 units outside the scene (CameraLocation reads ~0 in game: the every-ray-misses bug, rt-sun-core 4ba2abfd).
 	const D3DXVECTOR3 eye = RtCore::Eye();
 	c.origin = D3DXVECTOR4(eye.x, eye.y, eye.z, (float)(TheFrameRateManager->FrameNumber % 1024));
-	c.ao = D3DXVECTOR4(rt.Distance, (float)rt.RayCount, 1.0f, rt.DebugView == 4 || rt.DebugView == 5 ? (float)rt.DebugView : 0.0f);	// (both consumers keep a history: the noise moves)
+	// UNOFFICIAL 2026-11-09 (rtgi-lock) ao.z: 1 = the noise moves each frame, 2 = and the AO / GI sample numbers are independent (SampleLockFix; RtAOTrace.comp SampleU)
+	{
+		static int loggedLock = -1;
+		if ((rt.SampleLockFix ? 1 : 0) != loggedLock) {
+			loggedLock = rt.SampleLockFix ? 1 : 0;
+			Logger::Log("UNOFFICIAL RT AO: SampleLockFix %s (the AO and GI rays' two sample numbers %s).", rt.SampleLockFix ? "on" : "off",
+				rt.SampleLockFix ? "are independent" : "are locked together: one spiral of directions for the whole screen, 7.3-frame pulses");
+		}
+	}
+	c.ao = D3DXVECTOR4(rt.Distance, (float)rt.RayCount, rt.SampleLockFix ? 2.0f : 1.0f, rt.DebugView == 4 || rt.DebugView == 5 || rt.DebugView == 8 ? (float)rt.DebugView : 0.0f);	// (both consumers keep a history: the noise moves)
 	c.sky = D3DXVECTOR4(rt.SkyDistance, rt.Sky && SkyData2.x > 0.0f ? (float)rt.SkyRays : 0.0f, 0.0f, 0.0f);
+	// UNOFFICIAL 2026-11-08 (alsky) SkyInsideFix / SkySoftEdges ride in sky.y as 1000 x flags (RtAOTrace.comp SkyBlocked; the constants are full)
+	if (c.sky.y > 0.0f) {
+		const int skyFlags = (rt.SkyInsideFix ? 1 : 0) | (rt.SkySoftEdges ? 2 : 0);
+		c.sky.y += 1000.0f * (float)skyFlags;
+		static int loggedFlags = -1;	// (once per change: a tester's log says which sky rays drew the picture)
+		if (skyFlags != loggedFlags) {
+			loggedFlags = skyFlags;
+			Logger::Log("UNOFFICIAL RT AO: sky rays: SkyInsideFix %s (a ray starting under the traced ground carries on past it), SkySoftEdges %s (cover fades toward the ray's end and past %.0f units).",
+				rt.SkyInsideFix ? "on" : "off", rt.SkySoftEdges ? "on" : "off", 0.75f * 8000.0f);
+		}
+	}
 	// (rt-ao-gi) one-bounce GI: AmbientLight takes it (its bounce light), so only while AmbientLight renders. The sun lights the hits
 	// outdoors while it is up (the cascades' fade); its colour and the ambient as the game gives them (TESR_SunColor, TESR_SunAmbient),
 	// linear.
@@ -859,7 +881,17 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 		static int cuts = 0, frames = 0;	// (logged every 600 GI frames: how often the light changed enough to cut the history)
 		cuts += changed ? 1 : 0;
 		if (++frames >= 600) { Logger::Log("UNOFFICIAL RT AO: GI reuse history cut %d times in the last 600 frames (the lamps or the sun changed by > 10 %%).", cuts); cuts = frames = 0; }
-		const D3DXVECTOR4 reuseNow = RtGIHistory ? D3DXVECTOR4(camera.x - prevCamera.x, camera.y - prevCamera.y, camera.z - prevCamera.z, (std::max)(giCap, 1.0f) + 64.0f * rt.GISpatial)
+		// UNOFFICIAL 2026-11-08 (rtgi-ghost) + 4096 x the reuse fixes' flags (RtAOTrace.comp ReuseGI: 1 GIReuseSpread, 2 GIReuseShuffle, 4 SampleLockFix 2026-11-09)
+		const int reuseFlags = (rt.GIReuseSpread ? 1 : 0) | (rt.GIReuseShuffle ? 2 : 0) | (rt.SampleLockFix ? 4 : 0);
+		{
+			static int loggedFlags = -1;
+			if (reuseFlags != loggedFlags) {
+				loggedFlags = reuseFlags;
+				Logger::Log("UNOFFICIAL RT AO: GI reuse: GIReuseSpread %s (a sample copied onto a surface now seen larger keeps that copy's share of its weight), GIReuseShuffle %s (last frame's sample from a shuffled texel of the 2 x 2 block); GI denoiser anti-lag %.1f.",
+					rt.GIReuseSpread ? "on" : "off", rt.GIReuseShuffle ? "on" : "off", rt.GIDenoiseAntiLag);
+			}
+		}
+		const D3DXVECTOR4 reuseNow = RtGIHistory ? D3DXVECTOR4(camera.x - prevCamera.x, camera.y - prevCamera.y, camera.z - prevCamera.z, (std::max)(giCap, 1.0f) + 64.0f * rt.GISpatial + 4096.0f * reuseFlags)
 												 : D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
 		const D3DXMATRIX& last = RtGIHistory ? prevViewToWorld : viewToWorldPlain;	// (2026-11-04: without the rect frames' jitter shear)
 		if (giPass) {

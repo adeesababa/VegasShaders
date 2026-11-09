@@ -26,9 +26,19 @@ namespace RtAmbient {
 		bool	Sky = true;			// also the sky visibility (needs Skylighting on, as the ortho version)
 		int		SkyRays = 16;		// 8 or 16 (one or two rings round the normal + straight up)
 		float	SkyDistance = 800.0f;	// [64-8000] sky ray length (Skylighting's Distance: 800)
+		// UNOFFICIAL 2026-11-08 (alsky; tester: Skylighting with RT AO draws hard straight lines on roads, RT AO alone looks right) BUG FIXES,
+		// both on by default (a missing key, an older toml: on); RtAOTrace.comp SkyBlocked, AmbientOcclusionSkyRT.frag. SkyInsideFix: a sky
+		// ray that meets a back face just after its start began under the traced surface and carries on past it (as the AO rays' 'inside').
+		// SkySoftEdges: cover near the end of a sky ray counts less (the AO rays' falloff) and the traced factor opens up toward endFade.
+		bool	SkyInsideFix = true;
+		bool	SkySoftEdges = true;
+		// UNOFFICIAL 2026-11-08 (alsky; tester: RT GI strength + AmbientLight DrawDistance 12000 drew a hard line across the ground) BUG FIX,
+		// on by default: AmbientLight's traced occlusion and RT GI bounce fade out before endFade (where the trace stops) instead of at
+		// AmbientLight's DrawDistance (AmbientLightEstimateRT.frag, AmbientLight.fx.hlsl Estimate).
+		bool	RtFarFade = true;
 		int		DebugView = 0;		// 1 RT visibility (before strength), 2 RT sky visibility, 3 rays that started inside something / hit distance,
 									// 4 / 5 the helper's input (view distance / 2000, normal up), test only, 6 the GI bounce light alone,
-									// 7 (2026-10-31) as 6 with every bounce hit lit as if off screen (RadianceCache's whole share shows)
+									// 7 (2026-10-31) as 6 with every bounce hit lit as if off screen (RadianceCache's whole share shows); 8 (2026-11-09, rtgi-lock) the AO / GI rays' tangent frame (white flat normals, grey tilted, the shade = the tangent's angle)
 		// UNOFFICIAL 2026-10-29 (rt-ao-gi) one-bounce diffuse GI: one ray per half-resolution pixel and frame, GIDistance long; at the
 		// hit the light it sends back = its albedo (the core's per-instance record) x (the sun with a shadow ray + the ambient + the
 		// nearest lamps); into AmbientLight's bounce light (ComputeGI's accumulate and apply), strength GIStrength. AmbientLight only.
@@ -71,6 +81,23 @@ namespace RtAmbient {
 		// denoiser's history on pixels that move themselves (B1's object motion > 0.25 units a frame: a walking person) at most this many
 		// frames (their bounce light changes as they move; 16 frames there trail behind them); 0 = no cap
 		int		GIMovingHistory = 4;
+		// UNOFFICIAL 2026-11-08 (rtgi-ghost; tester: dark streaks fanning out over the sand behind a running player, ghosting when turning,
+		// GIReuse 32) BUG FIXES, on by default (a missing key, an older toml: on); RtAOTrace.comp ReuseGI. GIReuseSpread: a GI sample
+		// copied from last frame onto a surface now seen larger (the camera came closer) keeps only the share of its weight that one copy
+		// covers, so the copies a running player makes do not each hold it for GIReuse frames. GIReuseShuffle: last frame's sample from
+		// a texel of the reprojected one's 2 x 2 block, shuffled each frame (one-to-one), so neighbouring copies part ways: noise the
+		// denoiser smooths instead of streaks along the motion.
+		bool	GIReuseSpread = true;
+		bool	GIReuseShuffle = true;
+		// UNOFFICIAL 2026-11-08 (rtgi-ghost) the GI denoiser's anti-lag (RtDenoise Settings.AntiLag, as PTDenoiseAntiLag): beside its 16
+		// frames a fast history of 4; where the long one leaves the fast one's window by this many standard errors the bounce light really
+		// changed and the history restarts at 4 frames. 0 = off (as before).
+		float	GIDenoiseAntiLag = 3.0f;
+		// UNOFFICIAL 2026-11-09 (rtgi-lock; tester: a screen-fixed 45-degree step in the GI that pulses at 8 Hz) BUG FIX, on by default (a missing key, an
+		// older toml: on); RtAOTrace.comp SampleU. The AO and GI rays' two sample numbers were locked together (one spiral of directions for the whole
+		// screen, turning 0.1368 of a turn a frame: the bounce light pulsed every 7.3 frames, half a period apart where the normals' tangent frame
+		// differs). Off: the old pair, for the A/B.
+		bool	SampleLockFix = true;
 	};
 	inline Settings Current;
 
@@ -82,7 +109,13 @@ namespace RtAmbient {
 		Current.Sky = TheSettingManager->GetSettingI(s, "Sky") != 0;
 		Current.SkyRays = TheSettingManager->GetSettingI(s, "SkyRays") <= 8 ? 8 : 16;
 		Current.SkyDistance = std::clamp(TheSettingManager->GetSettingF(s, "SkyDistance"), 64.0f, 8000.0f);
-		Current.DebugView = std::clamp(TheSettingManager->GetSettingI(s, "DebugView"), 0, 7);
+		{	// UNOFFICIAL 2026-11-08 (alsky): on unless the toml says false
+			SettingManager::Configuration::ConfigNode node;
+			Current.SkyInsideFix = !TheSettingManager->Config.FillNode(&node, s, "SkyInsideFix") || node.BoolValue;
+			Current.SkySoftEdges = !TheSettingManager->Config.FillNode(&node, s, "SkySoftEdges") || node.BoolValue;
+			Current.RtFarFade = !TheSettingManager->Config.FillNode(&node, s, "RtFarFade") || node.BoolValue;
+		}
+		Current.DebugView = std::clamp(TheSettingManager->GetSettingI(s, "DebugView"), 0, 8);
 		Current.GI = TheSettingManager->GetSettingI(s, "GI") != 0;
 		Current.GIDistance = std::clamp(TheSettingManager->GetSettingF(s, "GIDistance"), 100.0f, 8000.0f);
 		Current.GIStrength = std::clamp(TheSettingManager->GetSettingF(s, "GIStrength"), 0.0f, 4.0f);
@@ -111,6 +144,13 @@ namespace RtAmbient {
 		Current.CacheRaysExterior = std::clamp(TheSettingManager->GetSettingI(s, "CacheRaysExterior"), 1, 32);
 		Current.CacheSpreadExterior = pow2(std::clamp(TheSettingManager->GetSettingI(s, "CacheSpreadExterior"), 1, 32));
 		Current.GIMovingHistory = std::clamp(TheSettingManager->GetSettingI(s, "GIMovingHistory"), 0, 16);
+		{	// UNOFFICIAL 2026-11-08 (rtgi-ghost): on / 3 unless the toml says otherwise
+			SettingManager::Configuration::ConfigNode node;
+			Current.GIReuseSpread = !TheSettingManager->Config.FillNode(&node, s, "GIReuseSpread") || node.BoolValue;
+			Current.GIReuseShuffle = !TheSettingManager->Config.FillNode(&node, s, "GIReuseShuffle") || node.BoolValue;
+			Current.GIDenoiseAntiLag = TheSettingManager->Config.FillNode(&node, s, "GIDenoiseAntiLag") ? std::clamp(node.FloatValue, 0.0f, 16.0f) : 3.0f;
+			Current.SampleLockFix = !TheSettingManager->Config.FillNode(&node, s, "SampleLockFix") || node.BoolValue;	// UNOFFICIAL 2026-11-09 (rtgi-lock)
+		}
 	}
 
 	inline constexpr int GILampsMax = 8;
