@@ -11,6 +11,7 @@
 #include "../../core/RtCore.h"
 #include "../../core/RtDenoise.h"	// (2026-10-29) the shared RT denoiser	// (the RT core: AddUser / CopyIn / AddPass / CopyOut)	// UNOFFICIAL 2026-10-28 (fork RT) [Shaders.AmbientOcclusion.RT]
 #include "../../core/Upscaler.h"	// UNOFFICIAL 2026-10-30 DLSS RR (RayReconstructionWantsRaw: the RT temporal pass is skipped)
+#include "../../core/PixelInspector.h"	// UNOFFICIAL 2026-11-09 RtInspect
 #include "../BounceLight/BounceLightMath.h"	// (the RT AO's temporal pass)
 
 // UNOFFICIAL 2026-10-16 GTAO ([Shaders.AmbientOcclusion.GTAO]; AmbientOcclusion.fx.hlsl GTAOValue): x 1 on (the DedicatedGTAO
@@ -590,6 +591,17 @@ IDirect3DSurface9* AmbientOcclusionEffect::RtRawSurface() {	// UNOFFICIAL 2026-1
 	return ao && RtTracedFrame != 0xFFFFFFFF ? ao->rtRawSurface : nullptr;
 }
 
+// UNOFFICIAL 2026-11-09 (diagnostic; AmbientOcclusion.h). Only textures that exist; a stage is one tiny copy, with the inspector on.
+void AmbientOcclusionEffect::RtInspect() {
+	if (!PixelInspector::Active) return;
+	PixelInspector::CaptureIf("RT AO input (NVR_RTAOInput: distance, normal)", rtInputTexture, PixelInspector::RtInput);
+	PixelInspector::CaptureIf("RT AO raw (r AO, g sky, b covered)", rtRawTexture, PixelInspector::Buffer);
+	PixelInspector::CaptureIf("RT AO denoised (NVR_RTAODenoised)", rtDenoisedTexture, PixelInspector::Buffer);
+	PixelInspector::CaptureIf("RT GI frame light (on-screen hits' light)", rtLightTexture, PixelInspector::Buffer);
+	PixelInspector::CaptureIf("RT GI raw (rgb bounce, a hit distance)", rtGITexture, PixelInspector::Buffer);
+	PixelInspector::CaptureIf("RT GI denoised (NVR_RTGIDenoised)", rtDenoisedGITexture, PixelInspector::Buffer);
+}
+
 IDirect3DTexture9* AmbientOcclusionEffect::RtRaw() {
 	return RtTracedFrame == TheFrameRateManager->FrameNumber && RtAmbient::Ready() ? rtRawTexture : nullptr;
 }
@@ -681,7 +693,17 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 		UINT count = 0;
 		AOPush push = {};
 		const bool wasFailed = ExtFailed;
-		if (!ExtConstants(extRtUniforms, layout, D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f)) || !Resources(resources, count, inputs, 2, extRtUniforms.Buffer) ||
+		// UNOFFICIAL 2026-11-09 (rt-review) NormalGuard rides in the sky layout's w (unused by this pass; RtAOInput.frag)
+		const bool normalGuard = RtAmbient::Current.NormalGuard;
+		{
+			static int loggedGuard = -1;
+			if ((normalGuard ? 1 : 0) != loggedGuard) {
+				loggedGuard = normalGuard ? 1 : 0;
+				Logger::Log("UNOFFICIAL RT AO: NormalGuard %s (%s).", normalGuard ? "on" : "off",
+					normalGuard ? "the rays' normals fetched by texel, no sampler; a texel that is not a unit normal takes the normal rebuilt from depth" : "the point-sampled read, traced as it reads");
+			}
+		}
+		if (!ExtConstants(extRtUniforms, layout, D3DXVECTOR4(0.0f, 0.0f, 0.0f, normalGuard ? 1.0f : 0.0f)) || !Resources(resources, count, inputs, 2, extRtUniforms.Buffer) ||
 			!ExtDrawTo(extInputRT.Pipeline, &rtInputSurface, 1, resources, count, &push, sizeof(push))) {
 			ExtFailed = wasFailed;
 			failed = true;

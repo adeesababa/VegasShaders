@@ -1818,6 +1818,14 @@ static const SimpleRow kSimpleRows[] = {
 	// Snow (Main)
 	{ "Shaders.Snow.Main", "Flakes", "Snowfall amount", nullptr, "How many snowflakes fall." },
 	{ "Shaders.Snow.Main", "Speed", "Snowfall speed", nullptr, "How fast the snow falls." },
+	{ "Shaders.Snow.Main", "WorldSpace", "World-space snow", nullptr, "Flakes have a place in the world: the snow stays put when you turn. Off is the old snow." },
+	{ "Shaders.Snow.Main", "WorldFlakeSize", "Flake size", nullptr, "How big each flake is." },
+	{ "Shaders.Snow.Main", "WorldDensity", "Flake density", nullptr, "How thick the snowfall is." },
+	{ "Shaders.Snow.Main", "WorldDistance", "Snow distance", nullptr, "How far away flakes are drawn. Shorter is cheaper." },
+	{ "Shaders.Snow.Main", "WorldOpacity", "Flake opacity", nullptr, "How solid each flake is." },
+	{ "Shaders.Snow.Main", "WorldSurfaceMarks", "Flakes landing on surfaces", nullptr, "Short-lived marks where flakes land on open ground and roofs." },
+	{ "Shaders.Snow.Main", "WorldCloudWind", "Drift with the cloud wind", nullptr, "How strongly the snow drifts sideways with the clouds." },
+	{ "Shaders.Snow.Main", "WorldPlantWind", "Sway with the plant wind", nullptr, "How much flakes sway with the gusts that move grass and leaves." },
 	// SnowAccumulation (Main)
 	{ "Shaders.SnowAccumulation.Main", "SnowColorR", "Snow colour", nullptr, "The colour of the snow lying on the ground." },
 	{ "Shaders.SnowAccumulation.Main", "SunPower", "Snow brightness in sunlight", nullptr, "How brightly the sun lights the snow." },
@@ -1979,6 +1987,7 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.Particles.Main", "SoftScale", "Soft smoke and dust edges", nullptr, "Smoke, dust, blood and sparks fade where they meet the ground and walls instead of cutting a hard line. Zero is off. Needs particle lighting on at startup." },
 	{ "Shaders.Particles.Main", "MeshSoftScale", "Soft glow and flash edges", nullptr, "The same for glows, lamp cards, muzzle flashes and dust storm walls. Lower it if big dust storms look too faint near the ground." },
 	{ "Shaders.Particles.Main", "SunShare", "Sunlight on particles", nullptr, "How much sunlight particles catch outdoors. Shaded ones get only ambient light and lamps." },
+	{ "Shaders.Particles.Main", "SunPhase", "Smoke glows with the sun behind it", nullptr, "Smoke and dust glow when the sun is behind them and look darker from the sun's side, at the same average brightness. Zero is the old even look." },
 	// GPUParticles (Main)
 	{ "Shaders.GPUParticles.Main", "Enabled", "Rain and snow drawn on the graphics card (needs the DXVK fork)", nullptr, "Draws rain and snow as many more drops and flakes outdoors. Needs the DXVK fork." },
 	{ "Shaders.GPUParticles.Main", nullptr, "Quality",

@@ -98,6 +98,9 @@ namespace RtAmbient {
 		// screen, turning 0.1368 of a turn a frame: the bounce light pulsed every 7.3 frames, half a period apart where the normals' tangent frame
 		// differs). Off: the old pair, for the A/B.
 		bool	SampleLockFix = true;
+		// UNOFFICIAL 2026-11-09 (rt-review) on by default (a missing key: on); RtAOInput.frag. A normals texel that is not a unit normal (an
+		// undrawn or cleared buffer) gets no rays instead of a made-up normal that flips on the view plane X + Y + Z = 0. Off: as before.
+		bool	NormalGuard = true;
 	};
 	inline Settings Current;
 
@@ -150,6 +153,7 @@ namespace RtAmbient {
 			Current.GIReuseShuffle = !TheSettingManager->Config.FillNode(&node, s, "GIReuseShuffle") || node.BoolValue;
 			Current.GIDenoiseAntiLag = TheSettingManager->Config.FillNode(&node, s, "GIDenoiseAntiLag") ? std::clamp(node.FloatValue, 0.0f, 16.0f) : 3.0f;
 			Current.SampleLockFix = !TheSettingManager->Config.FillNode(&node, s, "SampleLockFix") || node.BoolValue;	// UNOFFICIAL 2026-11-09 (rtgi-lock)
+			Current.NormalGuard = !TheSettingManager->Config.FillNode(&node, s, "NormalGuard") || node.BoolValue;	// UNOFFICIAL 2026-11-09 (rt-review)
 		}
 	}
 

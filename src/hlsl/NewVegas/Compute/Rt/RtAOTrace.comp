@@ -527,7 +527,7 @@ float Luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 // second an integer hash of the texel (independent of it), both stepped in time by R2's pair (a good 2D sequence at each texel).
 // decorrelate false (SampleLockFix off): the old pair, bit for bit, for the A/B.
 float HashTexel(ivec2 texel, uint salt) {
-    uint v = uint(texel.x) + 2048u * uint(texel.y) + salt * 0x9E3779B9u;
+    uint v = uint(texel.x) + 65536u * uint(texel.y) + salt * 0x9E3779B9u;   // (2026-11-09 rt-review R8: was 2048u, so on a trace grid wider than 2048 texel (x, y) had (x - 2048, y + 1)'s numbers)
     v = v * 747796405u + 2891336453u;
     v = ((v >> ((v >> 28u) + 4u)) ^ v) * 277803737u;
     v = (v >> 22u) ^ v;

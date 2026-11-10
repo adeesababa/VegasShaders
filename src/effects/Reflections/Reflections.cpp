@@ -46,6 +46,8 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.Steps = std::clamp(TheSettingManager->GetSettingI(section, "Steps"), 8, 64);
 	Settings.Thickness = std::clamp(TheSettingManager->GetSettingF(section, "Thickness"), 0.1f, 10.0f);
 	Settings.Temporal = std::clamp(TheSettingManager->GetSettingF(section, "Temporal"), 0.0f, 0.95f);
+	// UNOFFICIAL 2026-11-09 TemporalJitterFix (core/TemporalBackbone.h ShiftReprojection; missing key: on)
+	{ SettingManager::Configuration::ConfigNode node; Settings.JitterFix = !TheSettingManager->Config.FillNode(&node, section, "TemporalJitterFix") || node.BoolValue; }
 	Settings.BlurRadius = std::clamp(TheSettingManager->GetSettingF(section, "BlurRadius"), 0.0f, 8.0f);
 	Settings.DrawDistance = std::clamp(TheSettingManager->GetSettingF(section, "DrawDistance"), 500.0f, 50000.0f);
 	Settings.SkyFallback = TheSettingManager->GetSettingI(section, "SkyFallback") != 0;
@@ -735,7 +737,12 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 			toLastView.m[3][j] = (float)(move[0] * lastView.m[0][j] + move[1] * lastView.m[1][j] + move[2] * lastView.m[2][j]);
 		toLastView.m[3][3] = 1.0f;
 		D3DXMatrixMultiply(&reprojectNow, &toLastView, &lastProj);
-		if (usable) Constants.Reproject = reprojectNow;
+		if (usable) {
+			Constants.Reproject = reprojectNow;
+			// UNOFFICIAL 2026-11-09 TemporalJitterFix: the Temporal pass (D3D9 and Compute/ReflectionsTemporal.frag) reads the history where
+			// the TAA jitter's change since last frame puts it (the RT denoiser's own reprojection, reprojectNow, is left as it was)
+			if (Settings.JitterFix) TemporalBackbone::ShiftReprojection(Constants.Reproject, TemporalBackbone::DepthJitter() - lastJitter);
+		}
 	}
 	Constants.Data3.x = usable ? Settings.Temporal : 0.0f;
 	// UNOFFICIAL 2026-11-01 SharedNoise: with Temporal the shared index (own offset); without (and under DLSS RR, a temporal resolve) the
@@ -818,6 +825,7 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 	lastView = view;
 	lastInvView = invView;
 	lastProj = TheRenderManager->projMatrix;
+	lastJitter = TemporalBackbone::DepthJitter();	// UNOFFICIAL 2026-11-09 TemporalJitterFix
 }
 
 // UNOFFICIAL 2026-10-31 RT water reflections ([Shaders.Reflections.RT] Water, docs/next/FORK-RT-REFLECTIONS.md "Water"): the water

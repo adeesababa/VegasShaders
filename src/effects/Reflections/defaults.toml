@@ -12,6 +12,7 @@ MaxDistance = 4000.0                   # [200-20000] How far each reflected ray 
 Steps = 24                             # [8-64] Samples along each reflected ray (at half resolution). More: steadier, fewer gaps; costs more.
 Thickness = 1.0                        # [0.1-10] How thick things count as when a ray passes behind them. Higher fills gaps behind poles and signs, too high reflects things that should be hidden.
 Temporal = 0.85                        # [0.0-0.95] How much of last frame's reflection each frame keeps: steadies the noise of blurred reflections. Lower it if reflections trail when turning quickly. 0: none.
+TemporalJitterFix = true               # UNOFFICIAL (2026-11-09), BUG FIX, applies immediately, with Temporal: TAA / FSR / DLSS draw every frame shifted by a fraction of a pixel, and last frame's reflection was read back without that shift's change, so while you moved it smeared a little (as AmbientLight's TemporalJitterFix). On: it is read where the shift puts it. Off: as before. Does nothing without TAA's Jitter.
 BlurRadius = 8.0                      # [0-8] Edge-aware smoothing, in half-resolution pixels each way (wider on rough ground, narrow on wet).
 DrawDistance = 8000.0                  # [500-50000] Surfaces farther than this (game units) do not reflect; they fade out before it.
 SkyFallback = true                     # Outdoors: a reflected ray that finds nothing on screen takes the sky's colour if it points up into the sky. Off: nothing is reflected there.

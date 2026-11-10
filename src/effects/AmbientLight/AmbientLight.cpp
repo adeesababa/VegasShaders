@@ -96,7 +96,24 @@ void AmbientLightEffect::EnsureBuffers() {
 	const int height = lowScale ? (int)TheRenderManager->height : MaxQuality::Reduced(TheRenderManager->height, 2);
 	if (lowScale) Logger::Log("UNOFFICIAL AmbientLight: LowScaleFullRes: buffers made at %d x %d (RenderScale 0.5 or less with LowResEffects: one texel a rendered pixel); "
 		"restart after changing RenderScale", width, height);
-	TheTextureManager->InitTexture("NVR_AmbientLightPrep", &prepTexture, &prepSurface, width, height, D3DFMT_A32B32G32R32F);
+	// UNOFFICIAL 2026-11-09 (rt-review; docs/next/RT-PT-REVIEW-2026-11-09.md section 6) SlimPrep ([Shaders.AmbientLight.Main], read here: restart):
+	// the prep holds two numbers a texel (x the view depth, y the packed normal; z and w have been 0 since the screen bounce went, 10-14) in a
+	// four-number format, 16 bytes a texel. It is the most-read texture of the effect: Estimate takes 17 texels of it a pixel, each smoothing
+	// pass 7. With two numbers a texel (G32R32F, 8 bytes, the same precision) those reads move half the memory: the part that costs on the
+	// older cards (players' profiles: Estimate 0.8-1.7 ms and prepare + smooth 0.5 ms on a GTX 1070 / 680, 0.1-0.3 ms on RTX cards). Not
+	// with AmbientLightSmoothCompute (off by default: it copies a four-number buffer into the prep). false = the old format.
+	bool slimPrep = false;
+	{
+		SettingManager::Configuration::ConfigNode node;
+		slimPrep = (!TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "SlimPrep") || node.BoolValue) &&
+			!TheSettingManager->SettingsMain.Main.AmbientLightSmoothCompute;
+	}
+	TheTextureManager->InitTexture("NVR_AmbientLightPrep", &prepTexture, &prepSurface, width, height, slimPrep ? D3DFMT_G32R32F : D3DFMT_A32B32G32R32F);
+	if (slimPrep && !prepTexture) {	// (a card without that target format: the old one)
+		slimPrep = false;
+		TheTextureManager->InitTexture("NVR_AmbientLightPrep", &prepTexture, &prepSurface, width, height, D3DFMT_A32B32G32R32F);
+	}
+	Logger::Log("UNOFFICIAL AmbientLight: prep %d x %d, %s", width, height, slimPrep ? "two numbers a texel (SlimPrep, 8 bytes)" : "four numbers a texel (16 bytes)");
 	TheTextureManager->InitTexture("NVR_AmbientLight0", &bufferTexture[0], &bufferSurface[0], width, height, D3DFMT_A16B16G16R16F);
 	TheTextureManager->InitTexture("NVR_AmbientLight1", &bufferTexture[1], &bufferSurface[1], width, height, D3DFMT_A16B16G16R16F);
 	TheTextureManager->InitTexture("NVR_AmbientLightHistory0", &historyTexture[0], &historySurface[0], width, height, D3DFMT_A16B16G16R16F);

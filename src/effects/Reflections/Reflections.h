@@ -23,6 +23,7 @@ public:
 		int		Steps;
 		float	Thickness;		// how thick things count as, for a ray passing behind them
 		float	Temporal;		// share of last frame's result kept (0: no history)
+		bool	JitterFix;		// UNOFFICIAL 2026-11-09 TemporalJitterFix: the history read where the TAA jitter's change puts it
 		float	BlurRadius;		// half-resolution texels each way
 		float	DrawDistance;	// surfaces farther than this do not reflect
 		bool	SkyFallback;	// outdoors: rays that find nothing take the sky
@@ -227,6 +228,7 @@ private:
 	D3DXVECTOR4			extSky = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// NVR_ReflectionsSky as RenderBuffers set it
 	IDirect3DTexture9*	extSkyTexture = nullptr;	// the sky visibility it bound on stage 14 (null: none)
 	D3DXMATRIX	lastView, lastInvView, lastProj;
+	D3DXVECTOR2	lastJitter = D3DXVECTOR2(0.0f, 0.0f);	// UNOFFICIAL 2026-11-09 TemporalJitterFix: the depth jitter of the frame lastView is
 	UINT		lastRenderedFrame = 0;	// TheFrameRateManager->FrameNumber of the last frame this effect drew (UNOFFICIAL 2026-10-18: it counted
 										// UpdateConstants calls, two a frame, so last frame's history and cube were never kept)
 	bool		haveHistory = false;
