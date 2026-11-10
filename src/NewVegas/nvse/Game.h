@@ -988,7 +988,8 @@ namespace Pointers {	// raw game globals and functions
 
 // Bit numbers for BSShaderProperty::GetFlag (0..31 in ulFlags[0], 32..63 in ulFlags[1]).
 enum BSShaderPropertyFlag {
-	BSSP_ENVIRONMENT_MAPPING = 7,	// the env pass (0x248-0x24B); its cube is texture slot 4, its mask (the "_m" texture) slot 5
+	BSSP_ENVIRONMENT_MAPPING = 7, BSSP_FACEGEN = 10, BSSP_HAIR = 18,	// (10 / 18, 2026-11-09: FaceGen heads and hair, as the NIF format names the flag bits)
+	// BSSP_ENVIRONMENT_MAPPING:	// the env pass (0x248-0x24B); its cube is texture slot 4, its mask (the "_m" texture) slot 5
 	BSSP_REFRACTION = 15, BSSP_FIRE_REFRACTION = 16, BSSP_EYE_ENVIRONMENT_MAPPING = 17,
 	BSSP_WINDOW_ENVIRONMENT_MAPPING = 21,
 	BSSP_DECAL = 26, BSSP_DYNAMIC_DECAL = 27,

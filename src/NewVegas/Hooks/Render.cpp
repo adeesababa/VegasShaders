@@ -1829,7 +1829,10 @@ namespace RmaosDraw {
 	namespace EnvData {
 		static bool Checked = false, Compiled = false, Live = false;
 		static float NoMask = 1.0f;
-		static unsigned long long Flagged = 0, Masked = 0;
+		static float Amount = 0.5f;	// UNOFFICIAL 2026-11-09 FromGameDataAmount: the flag's strength x this (the game's env pass ADDS a reflection, it does not turn the surface into metal)
+		static bool Dirty = false;	// c94 holds an object's value: AfterObject puts "no flag" back, so a draw that never comes through ForObject inherits nothing
+		static unsigned long long Flagged = 0, Masked = 0, Bodies = 0;
+		static std::unordered_set<std::string> Seen;	// (log) each flagged or left-out geometry once, at most 60 a session
 	}
 
 	static void Worker() {
@@ -1891,6 +1894,11 @@ namespace RmaosDraw {
 		if (EnvData::Compiled) {
 			EnvData::Live = TheSettingManager->GetSettingI("Shaders.PBR.EnvMaps", "FromGameData") != 0;
 			EnvData::NoMask = std::clamp(TheSettingManager->GetSettingF("Shaders.PBR.EnvMaps", "FromGameDataNoMask"), 0.0f, 1.0f);
+			{	// (a missing key: 0.5)
+				SettingManager::Configuration::ConfigNode node;
+				EnvData::Amount = TheSettingManager->Config.FillNode(&node, "Shaders.PBR.EnvMaps", "FromGameDataAmount") ?
+					std::clamp(TheSettingManager->GetSettingF("Shaders.PBR.EnvMaps", "FromGameDataAmount"), 0.0f, 1.0f) : 0.5f;
+			}
 		}
 #if NVR_TEST_TOOLS
 		ReloadTest();
@@ -2027,16 +2035,27 @@ namespace RmaosDraw {
 				env[3] = EnvData::NoMask;
 				if ((vtable == 0x10AE0D0 || vtable == 0x10B9910) && !(property->ulFlags[0] & BSShaderProperty::Landscape)) {
 					const UInt32 flags = property->ulFlags[0];
-					const bool flagged = (flags & (1u << BSSP_ENVIRONMENT_MAPPING)) &&
+					// UNOFFICIAL 2026-11-09 (a tester's path-traced character: head and hair came out as polished gold with FromGameData on):
+					// hair and FaceGen heads are never made metal by the flag (hair meshes carry it for a faint sheen; with no mask the
+					// whole surface took the flag's full strength), and the flag's strength is scaled (FromGameDataAmount)
+					const bool body = (flags & ((1u << BSSP_FACEGEN) | (1u << BSSP_HAIR))) != 0;
+					const bool flagged = (flags & (1u << BSSP_ENVIRONMENT_MAPPING)) && !body &&
 						!(flags & ((1u << BSSP_EYE_ENVIRONMENT_MAPPING) | (1u << BSSP_WINDOW_ENVIRONMENT_MAPPING)));
+					if (body && (flags & (1u << BSSP_ENVIRONMENT_MAPPING))) {
+						EnvData::Bodies++;
+						const std::string name = geometry && geometry->m_pcName ? geometry->m_pcName : "?";
+						if (EnvData::Seen.size() < 60 && EnvData::Seen.insert("b:" + name).second)
+							Logger::Log("UNOFFICIAL FromGameData: '%s' carries the env-map flag but is %s: left out (flags %08X, strength %.2f)", name.c_str(),
+								(flags & (1u << BSSP_HAIR)) ? "hair" : "a FaceGen head", flags, property->fEnvMapScale);
+					}
 					if (flagged) {
-						env[1] = std::clamp(property->fEnvMapScale, 0.0f, 4.0f);
+						env[1] = std::clamp(property->fEnvMapScale, 0.0f, 4.0f) * EnvData::Amount;
 						NiSourceTexture** mask = ((BSShaderPPLightingProperty*)property)->ppTextures[5];
 						if (!on && mask && *mask && (*mask)->rendererData) envMask = (*mask)->rendererData->dTexture;
 						env[2] = envMask ? 1.0f : 0.0f;
 						EnvData::Flagged++;
 						if (envMask) EnvData::Masked++;
-						if (EnvData::Flagged <= 8 || EnvData::Flagged % 200000 == 0)
+						if (EnvData::Seen.size() < 60 && EnvData::Seen.insert(std::string(geometry && geometry->m_pcName ? geometry->m_pcName : "?")).second)
 							Logger::Log("UNOFFICIAL FromGameData: env-mapped object %llu '%s': strength %.2f, %s (%llu with a mask so far)", EnvData::Flagged,
 								geometry && geometry->m_pcName ? geometry->m_pcName : "?", env[1], envMask ? "its _m mask" : on ? "its _rmaos map decides" : "no mask",
 								EnvData::Masked);
@@ -2045,8 +2064,18 @@ namespace RmaosDraw {
 			}
 			// every draw: the land shaders' bind and the effects drawn between scenes write c94 too, so a cached value could be stale
 			TheRenderManager->device->SetPixelShaderConstantF(94, env, 1);
+			EnvData::Dirty = env[1] > 0.0f;
 		}
 		Send(values, on ? map->Texture : (IDirect3DTexture9*)envMask);
+	}
+
+	// UNOFFICIAL 2026-11-09 FromGameData: after the object's draw. A draw that does not come through ForObject (the game's sorted blended
+	// list, another plugin's draws) read whatever the last object left in c94: one object's metal on the next. Put "on, no flag" back.
+	static void AfterObject() {
+		if (!EnvData::Compiled || !EnvData::Dirty) return;
+		const float env[4] = { EnvData::Live ? 1.0f : 0.0f, 0.0f, 0.0f, EnvData::NoMask };
+		TheRenderManager->device->SetPixelShaderConstantF(94, env, 1);
+		EnvData::Dirty = false;
 	}
 
 	int LoadedCount() { return Loaded; }
@@ -3611,6 +3640,7 @@ void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32
 	DisplaceHeight::Geometry = ((const PointShadowForward::RenderPassView*)Pass)->geometry;	// UNOFFICIAL 2026-11-01 SameHeight
 	AlphaHash::ForPass(((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World, TheRenderManager->device);	// UNOFFICIAL 2026-11-03 SmoothCutouts
 	RenderPassStandard(Pass, Arg2, Arg3, Arg4);
+	RmaosDraw::AfterObject();	// UNOFFICIAL 2026-11-09 FromGameData: nothing inherited by the next draw
 	AlphaHash::AfterPass(TheRenderManager->device);
 	FlashlightLamp::AfterPass();	// UNOFFICIAL 2026-11-04 the flashlight's game lamp back to its own dimmer
 	EnvLightFade::AfterPass();
@@ -3686,6 +3716,7 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 	GameEyes::Before((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL GameShaderEyes, per draw
 	AlphaHash::ForPass(((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World, TheRenderManager->device);	// UNOFFICIAL 2026-11-03 SmoothCutouts
 	RenderPassSkinned(Pass, Arg2, Arg3, Arg4);
+	RmaosDraw::AfterObject();	// UNOFFICIAL 2026-11-09 FromGameData: nothing inherited by the next draw
 	if (ShaderSplit::CurrentContext == ShaderSplit::World)	// UNOFFICIAL 2026-11-07 perf-mirrorfix: the hair's tint for the RT scene (core/RtHairTint.h)
 		RtHairTint::NoteDraw(((const PointShadowForward::RenderPassView*)Pass)->geometry, TheRenderManager->device);
 	AlphaHash::AfterPass(TheRenderManager->device);
