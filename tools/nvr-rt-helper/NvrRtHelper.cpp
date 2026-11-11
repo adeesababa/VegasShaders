@@ -33,6 +33,7 @@
 #include <vulkan/vulkan.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <cstddef>
@@ -40,6 +41,7 @@
 #include <map>
 #include <string>
 #include <thread>
+#include <chrono>
 #include <unordered_map>
 #include <vector>
 
@@ -60,6 +62,10 @@ namespace {
 	CRITICAL_SECTION	g_logLock;
 	FILE*				g_log = nullptr;
 	NvrRtShared*		g_shared = nullptr;
+	bool g_cpuWait = false, g_highPriority = false, g_measure = false, g_calibratedExt = false;	// (2026-11-10) --wait cpu, --gpu-priority high, --measure (described at WaitSlot)
+	HANDLE g_parent = nullptr;
+	bool g_cpuSignal = false;	// (2026-11-10 --signal cpu) see RecordFrame's submit
+	int g_timerResult = -2;	// (--timer-1ms) -2 not asked, 0 set, else refused
 	HANDLE				g_statusEvent = nullptr;
 	bool				g_console = false;
 	std::wstring		g_exeDir;
@@ -73,6 +79,7 @@ namespace {
 	VkPipelineCache		g_pipelineCache = VK_NULL_HANDLE;
 	size_t				g_pipelineCacheSaved = 0;	// the size last written (0: nothing yet)
 	bool				g_pipelineCacheLive = false;	// after the first save: a pipeline built later is saved at once
+	bool				g_serialPipelines = false;	// (2026-11-11) --serial-pipelines: the start's pipelines one after another (see the start block)
 
 	void Log(const char* format, ...) {
 		char line[1024];
@@ -364,12 +371,38 @@ namespace {
 		queueInfo.queueFamilyIndex = vk.queueFamily;
 		queueInfo.queueCount = 1;
 		queueInfo.pQueuePriorities = &priority;
+		// UNOFFICIAL 2026-11-10 --gpu-priority high / --measure (the extensions looked up again: the list above is out of scope here)
+		VkDeviceQueueGlobalPriorityCreateInfoEXT globalPriority = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_EXT };
+		globalPriority.globalPriority = VK_QUEUE_GLOBAL_PRIORITY_HIGH_EXT;
+		const char* priorityExtension = nullptr;
+		{
+			uint32_t n = 0;
+			vkEnumerateDeviceExtensionProperties(vk.physical, nullptr, &n, nullptr);
+			std::vector<VkExtensionProperties> exts(n);
+			vkEnumerateDeviceExtensionProperties(vk.physical, nullptr, &n, exts.data());
+			if (g_highPriority) {
+				if (HasExtension(exts, "VK_KHR_global_priority")) priorityExtension = "VK_KHR_global_priority";
+				else if (HasExtension(exts, "VK_EXT_global_priority")) priorityExtension = "VK_EXT_global_priority";
+				if (priorityExtension) { enabled.push_back(priorityExtension); queueInfo.pNext = &globalPriority; }
+				else Log("GPU priority: the driver offers no global queue priority (VK_KHR/EXT_global_priority); the queue stays at the default");
+			}
+			if (g_measure && HasExtension(exts, "VK_EXT_calibrated_timestamps")) { enabled.push_back("VK_EXT_calibrated_timestamps"); g_calibratedExt = true; }
+		}
 		VkDeviceCreateInfo deviceInfo = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &features };
 		deviceInfo.queueCreateInfoCount = 1;
 		deviceInfo.pQueueCreateInfos = &queueInfo;
 		deviceInfo.enabledExtensionCount = (uint32_t)enabled.size();
 		deviceInfo.ppEnabledExtensionNames = enabled.data();
-		VK_CHECK(vkCreateDevice(vk.physical, &deviceInfo, nullptr, &vk.device), "vkCreateDevice");
+		{
+			VkResult created = vkCreateDevice(vk.physical, &deviceInfo, nullptr, &vk.device);
+			if (priorityExtension && created == VK_ERROR_NOT_PERMITTED_EXT) {
+				Log("GPU priority: %s HIGH is not permitted here; the queue stays at the default", priorityExtension);
+				queueInfo.pNext = nullptr; priorityExtension = nullptr;
+				created = vkCreateDevice(vk.physical, &deviceInfo, nullptr, &vk.device);
+			}
+			VK_CHECK(created, "vkCreateDevice");
+			if (priorityExtension) Log("GPU priority: the queue is at %s HIGH", priorityExtension);
+		}
 		if (supported.features.samplerAnisotropy) vk.anisotropy = vk.properties.limits.maxSamplerAnisotropy;
 		vkGetDeviceQueue(vk.device, vk.queueFamily, 0, &vk.queue);
 		vk.importSemaphoreWin32Handle = (PFN_vkImportSemaphoreWin32HandleKHR)vkGetDeviceProcAddr(vk.device, "vkImportSemaphoreWin32HandleKHR");
@@ -677,6 +710,8 @@ namespace {
 
 	struct Slot {
 		VkCommandBuffer	cmd = VK_NULL_HANDLE;
+		int64_t			tWake = 0, tSubmit = 0, tOutSeen = 0, tFenceSeen = 0;
+		VkFence			fence = VK_NULL_HANDLE;	// (2026-11-10 --measure / --signal cpu) this slot's submission's fence	// (2026-11-10 --measure) QPC ticks of this slot's frame
 		uint64_t		frame = 0;			// the frame last submitted from this slot (0 = none)
 		Buffer			instances;			// host-visible VkAccelerationStructureInstanceKHR[NVR_RT_MAX_INSTANCES]
 		Buffer			constants;			// host-visible, NVR_RT_PASS_CONSTANTS per pass
@@ -750,6 +785,9 @@ namespace {
 
 	struct Helper {
 		VulkanDevice	vk;
+		VkResult (VKAPI_PTR* getCalibrated)(VkDevice, uint32_t, const VkCalibratedTimestampInfoEXT*, uint64_t*, uint64_t*) = nullptr;	// (--measure)
+		double			mWakeToSubmit = 0, mSubmitToStart = 0, mWork = 0, mEndToSeen = 0, mSubmitToStartMax = 0, mEndToSeenMax = 0; uint32_t mCount = 0;
+		double			mEndToFence = 0, mEndToFenceMax = 0;
 		SharedImage		images[NVR_RT_MAX_IMAGES];
 		uint32_t		imageCount = 0;
 		VkSemaphore		inputsReady = VK_NULL_HANDLE, outputReady = VK_NULL_HANDLE;
@@ -810,13 +848,20 @@ namespace {
 
 #include "NvrRtTextures.inl"	// UNOFFICIAL 2026-11-07 (protocol 7) real textures: set 1
 
+	// UNOFFICIAL 2026-11-10 (experiment, measured through the capture replay): the scene's top level is rebuilt every frame; with
+	// NVR_RT_TLAS_FAST_TRACE in the environment it is built for tracing speed (PREFER_FAST_TRACE) instead of build speed. One function:
+	// the size query, the live build and the replay's build must ask with the same flags.
+	VkBuildAccelerationStructureFlagsKHR TlasBuildFlags() {
+		static const bool fastTrace = getenv("NVR_RT_TLAS_FAST_TRACE") != nullptr;
+		return fastTrace ? VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR : VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
+	}
 	bool CreateTlas(Helper& h) {
 		VkAccelerationStructureGeometryKHR geometry = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
 		geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
 		geometry.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
 		VkAccelerationStructureBuildGeometryInfoKHR build = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR };
 		build.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-		build.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
+		build.flags = TlasBuildFlags();
 		build.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
 		build.geometryCount = 1;
 		build.pGeometries = &geometry;
@@ -939,12 +984,14 @@ namespace {
 		Log("pipeline cache: %s (%u KB, %s)", ok ? "saved" : "could NOT be written next to the helper (the next start builds the pipelines again)", (unsigned)(size >> 10), when);
 	}
 
-	// The pipeline of shader `index` (loaded from NVR's path on first use; a failure is logged once and skips its passes).
-	VkPipeline Pipeline(Helper& h, uint32_t index) {
-		if (index >= NVR_RT_MAX_SHADERS || index >= g_shared->shaderCount) return VK_NULL_HANDLE;
-		if (h.pipelines.size() <= index) { h.pipelines.resize(index + 1, VK_NULL_HANDLE); h.pipelineTried.resize(index + 1, false); }
-		if (h.pipelineTried[index]) return h.pipelines[index];
-		h.pipelineTried[index] = true;
+	// UNOFFICIAL 2026-11-11 (docs/next/RT-HELPER-STARTUP-2026-11-11.md, change A) the build of shader `index`'s pipeline, shared by
+	// Pipeline() below and the start's worker threads (RunHelper). Thread safe: it reads the SPIR-V into its own buffer, makes its own module
+	// and calls vkCreateComputePipelines with g_pipelineCache, which PipelineCacheOpen made with flags 0 (no EXTERNALLY_SYNCHRONIZED bit: the
+	// driver synchronises it), and h.pipelineLayout, made before and only read. It logs "loaded" (Log takes g_logLock) and writes nothing
+	// else that is shared: no Status(), no shaderFailures bit, no cache save, no h.pipelines / h.pipelineTried. A failure returns null with
+	// its status line (the same text as before) in `failure`; the caller writes it with Status() and sets the shader's failure bit.
+	VkPipeline BuildPipeline(Helper& h, uint32_t index, std::string& failure) {
+		char line[512];
 		char path[261] = {};
 		memcpy(path, g_shared->shaderPaths[index], 260);
 		FILE* f = nullptr;
@@ -957,8 +1004,8 @@ namespace {
 			fclose(f);
 		}
 		if (code.empty() || code[0] != 0x07230203u) {
-			Status("trace shader %u: cannot read SPIR-V from %s", index, path);
-			InterlockedOr((volatile LONG*)&g_shared->shaderFailures, (LONG)(1u << index));
+			snprintf(line, sizeof(line), "trace shader %u: cannot read SPIR-V from %s", index, path);
+			failure = line;
 			return VK_NULL_HANDLE;
 		}
 		VkShaderModuleCreateInfo moduleInfo = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
@@ -978,11 +1025,27 @@ namespace {
 			vkDestroyShaderModule(h.vk.device, module, nullptr);
 		}
 		if (r != VK_SUCCESS) {
-			Status("trace shader %u (%s): pipeline creation failed: %s", index, path, VkResultName(r));
-			InterlockedOr((volatile LONG*)&g_shared->shaderFailures, (LONG)(1u << index));
+			snprintf(line, sizeof(line), "trace shader %u (%s): pipeline creation failed: %s", index, path, VkResultName(r));
+			failure = line;
 			return VK_NULL_HANDLE;
 		}
 		Log("trace shader %u loaded: %s", index, path);
+		return pipeline;
+	}
+
+	// The pipeline of shader `index` (loaded from NVR's path on first use; a failure is logged once and skips its passes).
+	VkPipeline Pipeline(Helper& h, uint32_t index) {
+		if (index >= NVR_RT_MAX_SHADERS || index >= g_shared->shaderCount) return VK_NULL_HANDLE;
+		if (h.pipelines.size() <= index) { h.pipelines.resize(index + 1, VK_NULL_HANDLE); h.pipelineTried.resize(index + 1, false); }
+		if (h.pipelineTried[index]) return h.pipelines[index];
+		h.pipelineTried[index] = true;
+		std::string failure;
+		const VkPipeline pipeline = BuildPipeline(h, index, failure);
+		if (!failure.empty()) {
+			Status("%s", failure.c_str());
+			InterlockedOr((volatile LONG*)&g_shared->shaderFailures, (LONG)(1u << index));
+			return VK_NULL_HANDLE;
+		}
 		if (g_pipelineCacheLive) PipelineCacheSave(h.vk.device, "a shader registered after the start");
 		h.pipelines[index] = pipeline;
 		return pipeline;
@@ -1362,6 +1425,12 @@ namespace {
 		else c.spec.armed = false;
 	}
 
+	// UNOFFICIAL 2026-11-10 --wait cpu ([Main.Main.RayTracing] HelperWait 1; as NvrDlssHelper's since 2026-10-30): the helper waits on the CPU
+	// until the game's "inputs ready" reaches the frame, then submits with no semaphore wait in the submission. Measured on an L4: the game's
+	// GPU sat 4.6-7.9 ms a frame in the round trip beyond the helper's own work (builds + passes), in every mode, with the wait on the GPU.
+	// UNOFFICIAL 2026-11-10: --gpu-priority high (as NvrDlssHelper's): the queue at global priority HIGH where the driver allows it and the process's
+	// WDDM GPU scheduling class HIGH. --measure (with --wait cpu): per frame, when the helper saw the game's inputs, when it had submitted, when
+	// its GPU work began and ended (VK calibrated timestamps -> the QPC clock) and when it saw its own "output ready": a log line every 300 frames.
 	bool WaitSlot(Helper& h, Slot& s, HANDLE parent) {
 		if (!s.frame) return true;
 		VkSemaphoreWaitInfo wait = { VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
@@ -1382,6 +1451,29 @@ namespace {
 				const uint64_t mask = h.vk.timestampBits >= 64 ? ~0ull : ((1ull << h.vk.timestampBits) - 1);
 				auto us = [&](uint32_t a, uint32_t b) { return (uint64_t)((double)((stamps[b] - stamps[a]) & mask) * h.vk.properties.limits.timestampPeriod / 1000.0); };
 				const uint64_t total = us(0, 3);
+				if (g_measure && g_calibratedExt && !h.getCalibrated)
+					h.getCalibrated = (VkResult (VKAPI_PTR*)(VkDevice, uint32_t, const VkCalibratedTimestampInfoEXT*, uint64_t*, uint64_t*))vkGetDeviceProcAddr(h.vk.device, "vkGetCalibratedTimestampsEXT");
+				if (g_measure && h.getCalibrated && s.tWake && s.tSubmit && s.tOutSeen) {	// (--measure) this slot's frame on the QPC clock
+					VkCalibratedTimestampInfoEXT info[2] = { { VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, nullptr, VK_TIME_DOMAIN_DEVICE_EXT },
+						{ VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, nullptr, VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_EXT } };
+					uint64_t now[2] = {}, deviation = 0;
+					LARGE_INTEGER f; QueryPerformanceFrequency(&f);
+					if (h.getCalibrated(h.vk.device, 2, info, now, &deviation) == VK_SUCCESS) {
+						const double nsPerTick = h.vk.properties.limits.timestampPeriod, qpcMs = 1000.0 / (double)f.QuadPart;
+						auto agoMs = [&](uint32_t k) { return (double)((now[0] - stamps[k]) & mask) * nsPerTick / 1e6; };	// how long before 'now' stamp k was
+						const double nowMs = (double)(int64_t)now[1] * qpcMs;
+						const double startMs = nowMs - agoMs(0), endMs = nowMs - agoMs(3);
+						const double a = (double)(s.tSubmit - s.tWake) * qpcMs, b = startMs - (double)s.tSubmit * qpcMs, c = endMs - startMs, d = (double)s.tOutSeen * qpcMs - endMs;
+						h.mWakeToSubmit += a; h.mSubmitToStart += b; h.mWork += c; h.mEndToSeen += d; h.mCount++;
+						if (s.tFenceSeen) { const double e = (double)s.tFenceSeen * qpcMs - endMs; h.mEndToFence += e; h.mEndToFenceMax = std::max(h.mEndToFenceMax, e); }
+						h.mSubmitToStartMax = std::max(h.mSubmitToStartMax, b); h.mEndToSeenMax = std::max(h.mEndToSeenMax, d);
+						if (h.mCount >= 300) {
+							Log("measure (300 frames, ms): %s -> submitted %.3f | submitted -> GPU work began %.3f (max %.3f) | GPU work %.3f | GPU work ended -> own output seen %.3f (max %.3f), -> its fence seen %.3f (max %.3f); wait %s; signal %s; calibration deviation %llu ns",
+								g_cpuWait ? "inputs seen" : "frame taken up (inputs not seen: the wait is on the GPU, inside 'submitted -> GPU work began')", h.mWakeToSubmit / h.mCount, h.mSubmitToStart / h.mCount, h.mSubmitToStartMax, h.mWork / h.mCount, h.mEndToSeen / h.mCount, h.mEndToSeenMax, h.mEndToFence / h.mCount, h.mEndToFenceMax, g_cpuWait ? "cpu" : "gpu", g_cpuSignal ? "cpu (after the fence)" : "gpu", (unsigned long long)deviation);
+							h.mWakeToSubmit = h.mSubmitToStart = h.mWork = h.mEndToSeen = h.mSubmitToStartMax = h.mEndToSeenMax = h.mEndToFence = h.mEndToFenceMax = 0; h.mCount = 0;
+						}
+					}
+				}
 				h.gpuUs[h.gpuCount++ % 64] = total;
 				g_shared->gpuTimeUsLast = (uint32_t)total;
 				g_shared->gpuTimeUsAvg = Average(h.gpuUs, h.gpuCount);
@@ -1775,7 +1867,7 @@ namespace {
 			g.geometry.instances.data.deviceAddress = s.instances.address;
 			VkAccelerationStructureBuildGeometryInfoKHR b = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR };
 			b.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-			b.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
+			b.flags = TlasBuildFlags();
 			b.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
 			b.dstAccelerationStructure = h.tlas;
 			b.geometryCount = 1;
@@ -1852,6 +1944,8 @@ namespace {
 	// One frame: GPU wait for inputsReady >= N, the work, signal outputReady = N. Always submits (even when the work could not be
 	// recorded) so the game's GPU wait for N is released.
 	bool ProcessFrame(Helper& h, uint64_t frameNumber, HANDLE parent) {
+		LARGE_INTEGER taken = {};	// (2026-11-11 --measure) when the helper took the frame up: the first stamp when the wait is on the GPU
+		if (g_measure) QueryPerformanceCounter(&taken);
 		const NvrRtFrame& ring = g_shared->frames[frameNumber % NVR_RT_FRAME_RING];
 		const bool intact = ring.frame == frameNumber;
 		if (intact) {
@@ -1919,21 +2013,71 @@ namespace {
 		VK_CHECK(vkEndCommandBuffer(cmd), "vkEndCommandBuffer");
 
 		const uint64_t waitValue = frameNumber, signalValue = frameNumber;
+		bool gpuWait = !g_cpuWait;
+		if (g_cpuWait) {	// (--wait cpu) the game's inputs first, on the CPU; a failure or the game going away: this frame waits on the GPU as before
+			VkSemaphoreWaitInfo wait = { VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
+			wait.semaphoreCount = 1; wait.pSemaphores = &h.inputsReady; wait.pValues = &waitValue;
+			for (;;) {
+				const VkResult r = vkWaitSemaphores(h.vk.device, &wait, 250ull * 1000 * 1000);
+				if (r == VK_SUCCESS) { LARGE_INTEGER q; QueryPerformanceCounter(&q); s.tWake = q.QuadPart; break; }
+				if (r != VK_TIMEOUT) {
+					Log("--wait cpu: waiting for the game's inputs failed (%s); the helper's submissions wait on the GPU from now on", VkResultName(r));
+					g_cpuWait = false; gpuWait = true; break;
+				}
+				if ((g_parent && WaitForSingleObject(g_parent, 0) == WAIT_OBJECT_0) || g_shared->quit) { gpuWait = true; break; }
+			}
+		}
+		// (2026-11-11 --measure) with the wait on the GPU the helper never sees the game's inputs: its first stamp is when it took the frame up.
+		// Before, every stamp stayed 0 in that mode (only --wait cpu set tWake, and the block below ran only without the GPU wait), so WaitSlot's
+		// test never passed and the "measure" line was never written.
+		if (g_measure && gpuWait) s.tWake = taken.QuadPart;
 		VkTimelineSemaphoreSubmitInfo timeline = { VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO };
-		timeline.waitSemaphoreValueCount = 1;
-		timeline.pWaitSemaphoreValues = &waitValue;
-		timeline.signalSemaphoreValueCount = 1;
-		timeline.pSignalSemaphoreValues = &signalValue;
+		timeline.waitSemaphoreValueCount = gpuWait ? 1 : 0;
+		timeline.pWaitSemaphoreValues = gpuWait ? &waitValue : nullptr;
+		// UNOFFICIAL 2026-11-10 --signal cpu (measured on an L4: the helper's own timeline semaphore became visible 2.3-2.9 ms, at most 4 ms,
+		// after its GPU work had ended, with any timer resolution; a plain fence may be told sooner): the submission carries a FENCE and no
+		// semaphore signal; the helper waits for the fence on the CPU and then signals "output ready" itself (vkSignalSemaphore).
+		const bool wantFence = g_measure || (g_cpuSignal && !gpuWait);	// (2026-11-11: --measure in every wait mode; was (g_measure || g_cpuSignal) && !gpuWait)
+		if (wantFence && !s.fence) { VkFenceCreateInfo fi = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO }; if (vkCreateFence(h.vk.device, &fi, nullptr, &s.fence) != VK_SUCCESS) s.fence = VK_NULL_HANDLE; }
+		const bool useFence = wantFence && s.fence;
+		if (useFence) vkResetFences(h.vk.device, 1, &s.fence);
+		const bool cpuSignal = g_cpuSignal && useFence && !gpuWait;	// (--signal cpu needs --wait cpu, as before)
+		timeline.signalSemaphoreValueCount = cpuSignal ? 0 : 1;
+		timeline.pSignalSemaphoreValues = cpuSignal ? nullptr : &signalValue;
 		const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
 		VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO, &timeline };
-		submit.waitSemaphoreCount = 1;
-		submit.pWaitSemaphores = &h.inputsReady;
-		submit.pWaitDstStageMask = &waitStage;
+		submit.waitSemaphoreCount = gpuWait ? 1 : 0;
+		submit.pWaitSemaphores = gpuWait ? &h.inputsReady : nullptr;
+		submit.pWaitDstStageMask = gpuWait ? &waitStage : nullptr;
 		submit.commandBufferCount = 1;
 		submit.pCommandBuffers = &cmd;
-		submit.signalSemaphoreCount = 1;
-		submit.pSignalSemaphores = &h.outputReady;
-		VK_CHECK(vkQueueSubmit(h.vk.queue, 1, &submit, VK_NULL_HANDLE), "vkQueueSubmit");
+		submit.signalSemaphoreCount = cpuSignal ? 0 : 1;
+		submit.pSignalSemaphores = cpuSignal ? nullptr : &h.outputReady;
+		VK_CHECK(vkQueueSubmit(h.vk.queue, 1, &submit, useFence ? s.fence : VK_NULL_HANDLE), "vkQueueSubmit");
+		s.tFenceSeen = 0;
+		if (useFence) {
+			LARGE_INTEGER q0; QueryPerformanceCounter(&q0); s.tSubmit = q0.QuadPart;
+			VkResult fr = VK_TIMEOUT;
+			for (int tries = 0; tries < 40 && fr == VK_TIMEOUT; tries++) {	// 10 s at most, the game's death or a quit ends it
+				fr = vkWaitForFences(h.vk.device, 1, &s.fence, VK_TRUE, 250ull * 1000 * 1000);
+				if (fr == VK_TIMEOUT && ((g_parent && WaitForSingleObject(g_parent, 0) == WAIT_OBJECT_0) || g_shared->quit)) break;
+			}
+			if (fr == VK_SUCCESS) { LARGE_INTEGER q1; QueryPerformanceCounter(&q1); s.tFenceSeen = q1.QuadPart; }
+			if (cpuSignal) {
+				if (fr != VK_SUCCESS) vkQueueWaitIdle(h.vk.queue);	// (never signal before the work is done: the game reads the outputs next)
+				VkSemaphoreSignalInfo si = { VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO };
+				si.semaphore = h.outputReady; si.value = signalValue;
+				const VkResult sr = vkSignalSemaphore(h.vk.device, &si);
+				if (sr != VK_SUCCESS) { Log("--signal cpu: vkSignalSemaphore failed (%s) at frame %llu: the GPU signals again from now on", VkResultName(sr), (unsigned long long)frameNumber); g_cpuSignal = false; }
+			}
+		}
+		if (g_measure) {	// (--measure) when this frame's own "output ready" is seen from the CPU (a wake-up latency sample; 250 ms at most). (2026-11-11) in every wait mode: with the wait on the GPU this CPU wait (and the fence's) holds the helper's thread each frame: bench only
+			LARGE_INTEGER q; QueryPerformanceCounter(&q); if (!useFence) s.tSubmit = q.QuadPart;
+			VkSemaphoreWaitInfo own = { VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
+			own.semaphoreCount = 1; own.pSemaphores = &h.outputReady; own.pValues = &signalValue;
+			if (vkWaitSemaphores(h.vk.device, &own, 250ull * 1000 * 1000) == VK_SUCCESS) { QueryPerformanceCounter(&q); s.tOutSeen = q.QuadPart; } else s.tOutSeen = 0;
+		}
+		else if (!useFence) s.tWake = s.tSubmit = s.tOutSeen = 0;
 		h.lastSubmitted = frameNumber;
 		s.frame = frameNumber;
 		if (h.capture.active) CaptureFinish(h, s, frameNumber);	// (2026-11-03) waits for this frame, writes the file on a thread
@@ -2131,6 +2275,17 @@ namespace {
 		if (!frameEvent || !g_statusEvent) { Status("the helper's events do not exist"); SetState(NVR_RT_STATE_FAILED); return 2; }
 		HANDLE parent = OpenProcess(SYNCHRONIZE, FALSE, shared->parentPid);
 		if (!parent) { Status("the game's process %u cannot be opened", shared->parentPid); SetState(NVR_RT_STATE_FAILED); return 2; }
+		g_parent = parent;
+		if (g_highPriority) {	// (as NvrDlssHelper) the process's WDDM GPU scheduling priority class HIGH (4); the CPU class does not reach the GPU
+			typedef LONG(APIENTRY* SetGpuPriorityClass)(HANDLE, int);
+			const SetGpuPriorityClass setClass = (SetGpuPriorityClass)GetProcAddress(GetModuleHandleW(L"gdi32.dll") ? GetModuleHandleW(L"gdi32.dll") : LoadLibraryW(L"gdi32.dll"), "D3DKMTSetProcessSchedulingPriorityClass");
+			const LONG status = setClass ? setClass(GetCurrentProcess(), 4) : -1;
+			Log("GPU priority: the process's GPU scheduling priority class HIGH: %s (NTSTATUS 0x%08lX)", status == 0 ? "set" : "not set", (unsigned long)status);
+		}
+		Log("start options: signal %s, GPU priority %s, measure %s, timer %s", g_cpuSignal ? "cpu (a fence, then vkSignalSemaphore)" : "gpu", g_highPriority ? "high" : "normal", g_measure ? "on" : "off",
+			g_timerResult == -2 ? "as the system gives it" : g_timerResult == 0 ? "1 ms (timeBeginPeriod)" : "1 ms asked, refused");
+		Log("start option: %s", g_cpuWait ? "--wait cpu (the helper waits for the game's inputs on the CPU, then submits)" : "--wait gpu (the submission waits on the GPU)");
+		if (g_measure && !g_cpuWait) Log("start option: --measure with the wait on the GPU: the helper's thread waits each frame for its own fence and output on the CPU (bench only: it cannot record the next frame meanwhile)");
 
 		for (int i = 0; i < 100 && !shared->setupDone; i++) {
 			HANDLE waits[2] = { frameEvent, parent };
@@ -2241,7 +2396,113 @@ namespace {
 		if (!CreateBuffer(h.vk, 3 * 4096, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, h.probe)) h.probe = Buffer();	// the probe is optional
 
 		// The shaders NVR registered at setup are compiled now (a first use mid-game would hold the game's GPU ~2 s on the iGPU)
-		for (uint32_t i = 0; i < std::min<uint32_t>((uint32_t)shared->shaderCount, NVR_RT_MAX_SHADERS); i++) Pipeline(h, i);
+		// UNOFFICIAL 2026-11-11 (docs/next/RT-HELPER-STARTUP-2026-11-11.md, change A) built on a few worker threads at once: the start takes
+		// about as long as its slowest pipeline instead of the sum (cloud L4 after a path-tracing shader changed: 55-58 s serial, RtPathTrace
+		// alone 27-29 s). All are joined before anything below, so "ready" and everything after it are as before. The way back:
+		// NVR_RT_HELPER_SERIAL in the environment (any value; the helper inherits the game's environment) or --serial-pipelines = the old
+		// serial loop on this thread. Thread safety: BuildPipeline (above) writes nothing shared; each worker writes only its own `built[i]`
+		// and `ms[i]` (pre-sized); h.pipelines / h.pipelineTried (a bit-packed vector<bool>: neighbouring bits share a word, so never written
+		// from two threads) are sized before the workers start and filled here after the join; a failure's Status() line and its
+		// shaderFailures bit are written here after the join, in index order, as Pipeline() writes them; the cache is saved only once, after
+		// "ready" (PipelineCacheSave below; g_pipelineCacheLive is still false here, so nothing saves before).
+		{	// (the summary line: docs/next/SHADER-COMPILE-TIMES-2026-11-11.md, extended for the threads)
+			LARGE_INTEGER freq, wallStart; QueryPerformanceFrequency(&freq);
+			auto msSince = [&freq](const LARGE_INTEGER& from) { LARGE_INTEGER now; QueryPerformanceCounter(&now); return (double)(now.QuadPart - from.QuadPart) * 1000.0 / (double)freq.QuadPart; };
+			const uint32_t count = std::min<uint32_t>((uint32_t)shared->shaderCount, NVR_RT_MAX_SHADERS);
+			std::vector<double> ms(count, 0.0);	// each pipeline's own time (in its worker)
+			const bool serialEnv = getenv("NVR_RT_HELPER_SERIAL") != nullptr;
+			const unsigned cores = std::thread::hardware_concurrency();	// (0: unknown -> 1 worker)
+			const uint32_t want = std::min<uint32_t>(std::min<uint32_t>(count, (uint32_t)std::max<int>(1, (int)cores - 1)), 8u);
+			uint32_t workers = 0;
+			char mode[160];
+			QueryPerformanceCounter(&wallStart);
+			if (serialEnv || g_serialPipelines || count <= 1) {
+				snprintf(mode, sizeof(mode), "serial (%s)", serialEnv ? "NVR_RT_HELPER_SERIAL is set" : g_serialPipelines ? "--serial-pipelines" : "one pipeline or none");
+				Log("start pipelines: building %u, %s", count, mode);
+				for (uint32_t i = 0; i < count; i++) { LARGE_INTEGER a; QueryPerformanceCounter(&a); Pipeline(h, i); ms[i] = msSince(a); }
+			} else {
+				struct Built { VkPipeline pipeline = VK_NULL_HANDLE; std::string failure; };
+				std::vector<Built> built(count);
+				// the biggest .spv first: the path tracer's pipelines start at once, the small ones fill the other workers
+				std::vector<uint32_t> order(count);
+				std::vector<uint64_t> bytes(count, 0);
+				for (uint32_t i = 0; i < count; i++) {
+					order[i] = i;
+					char path[261] = {};
+					memcpy(path, shared->shaderPaths[i], 260);
+					WIN32_FILE_ATTRIBUTE_DATA fa;
+					if (GetFileAttributesExA(path, GetFileExInfoStandard, &fa)) bytes[i] = ((uint64_t)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
+				}
+				std::stable_sort(order.begin(), order.end(), [&bytes](uint32_t x, uint32_t y) { return bytes[x] > bytes[y]; });
+				if (h.pipelines.size() < NVR_RT_MAX_SHADERS) { h.pipelines.resize(NVR_RT_MAX_SHADERS, VK_NULL_HANDLE); h.pipelineTried.resize(NVR_RT_MAX_SHADERS, false); }
+				std::atomic<uint32_t> nextJob(0);
+				auto work = [&](bool ownThread) {
+					// (the helper runs at ABOVE_NORMAL priority class: below-normal threads there still sit above the game's normal ones)
+					if (ownThread) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+					for (uint32_t job = nextJob.fetch_add(1); job < count; job = nextJob.fetch_add(1)) {
+						const uint32_t i = order[job];
+						LARGE_INTEGER a; QueryPerformanceCounter(&a);
+						built[i].pipeline = BuildPipeline(h, i, built[i].failure);
+						ms[i] = msSince(a);
+					}
+				};
+				Log("start pipelines: building %u on up to %u worker threads (%u hardware threads)", count, want, cores);
+				std::vector<std::thread> pool;
+				for (uint32_t t = 0; t < want; t++) {
+					try { pool.emplace_back(work, true); }
+					catch (...) { Log("start pipelines: worker thread %u could not be started", t); break; }
+				}
+				workers = (uint32_t)pool.size();
+				if (!workers) work(false);	// no thread at all: this thread builds them, one after another
+				for (std::thread& t : pool) t.join();
+				if (workers) snprintf(mode, sizeof(mode), "parallel, %u worker thread%s", workers, workers == 1 ? "" : "s");
+				else snprintf(mode, sizeof(mode), "serial (no worker thread could be started)");
+				// UNOFFICIAL 2026-11-11 (the no-game test on an integrated GPU: with 8 workers both path tracing pipelines failed with
+				// VK_ERROR_OUT_OF_HOST_MEMORY, and alone, one after another, both built in 16 s each): several big compiles at once can
+				// run a driver out of memory that has room for each alone. A pipeline that failed next to others is built once more
+				// here, by itself, before it counts as failed.
+				if (workers > 1) for (uint32_t i = 0; i < count; i++) {
+					if (built[i].failure.empty()) continue;
+					const std::string first = built[i].failure;
+					const auto retryStart = std::chrono::steady_clock::now();
+					built[i].failure.clear();
+					built[i].pipeline = BuildPipeline(h, i, built[i].failure);
+					const double retryMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - retryStart).count();
+					ms[i] += retryMs;
+					Log("start pipelines: trace shader %u failed next to the others (%s); built alone: %s after %.0f ms", i, first.c_str(),
+						built[i].failure.empty() ? "ok" : "failed again", retryMs);
+				}
+				for (uint32_t i = 0; i < count; i++) {	// as Pipeline() does, now on this thread
+					h.pipelineTried[i] = true;
+					if (!built[i].failure.empty()) {
+						Status("%s", built[i].failure.c_str());
+						InterlockedOr((volatile LONG*)&shared->shaderFailures, (LONG)(1u << i));
+					} else h.pipelines[i] = built[i].pipeline;
+				}
+			}
+			const double wallMs = msSince(wallStart);
+			double sumMs = 0.0;
+			uint32_t failed = 0, quick = 0;
+			std::vector<uint32_t> slow(count);
+			for (uint32_t i = 0; i < count; i++) {
+				slow[i] = i;
+				sumMs += ms[i];
+				if (i >= h.pipelines.size() || !h.pipelines[i]) failed++;
+				else if (ms[i] < 50.0) quick++;
+			}
+			std::stable_sort(slow.begin(), slow.end(), [&ms](uint32_t x, uint32_t y) { return ms[x] > ms[y]; });
+			std::string slowest;
+			for (uint32_t k = 0; k < count && k < 8; k++) {
+				char name[261] = {};
+				memcpy(name, shared->shaderPaths[slow[k]], 260);
+				const char* file = strrchr(name, '\\');
+				char one[96];
+				snprintf(one, sizeof(one), "%s%.48s %.0f", k ? ", " : "", file ? file + 1 : name, ms[slow[k]]);
+				slowest += one;
+			}
+			Log("start pipelines: %u in %.0f ms wall, %s (their own times add up to %.0f ms); %u failed; %u built in under 50 ms (likely from the pipeline cache: the driver is not asked which were); slowest (ms): %s",
+				count, wallMs, mode, sumMs, failed, quick, slowest.empty() ? "none" : slowest.c_str());
+		}
 
 		h.dataWords.Init(kDataWords);
 		ReadCaptureSpec(g_exeDir + L"\\NvrRtHelper.capture-at", h.capture.spec);	// UNOFFICIAL 2026-11-03: a capture at a given frame (CaptureSpec)
@@ -2356,6 +2617,17 @@ int wmain(int argc, wchar_t** argv) {
 	g_exeDir = ExeDir();
 	const wchar_t* logName = nullptr;	// (2026-11-07 rt-shutdown) --log <file name> (next to the exe): a second helper's own log (the RT test host)
 	for (int i = 1; i + 1 < argc; i++) if (!wcscmp(argv[i], L"--log")) logName = argv[i + 1];
+	for (int i = 1; i + 1 < argc; i++) if (!wcscmp(argv[i], L"--wait")) g_cpuWait = !wcscmp(argv[i + 1], L"cpu");	// UNOFFICIAL 2026-11-10
+	for (int i = 1; i + 1 < argc; i++) if (!wcscmp(argv[i], L"--gpu-priority")) g_highPriority = !wcscmp(argv[i + 1], L"high");
+	for (int i = 1; i < argc; i++) if (!wcscmp(argv[i], L"--measure")) g_measure = true;
+	for (int i = 1; i + 1 < argc; i++) if (!wcscmp(argv[i], L"--signal")) g_cpuSignal = !wcscmp(argv[i + 1], L"cpu");	// (needs --wait cpu)
+	for (int i = 1; i < argc; i++) if (!wcscmp(argv[i], L"--timer-1ms")) {	// UNOFFICIAL 2026-11-10 (bench): this process's timer resolution 1 ms (per process since Windows 10 2004)
+		typedef UINT(WINAPI* TimeBegin)(UINT);
+		const HMODULE winmm = LoadLibraryW(L"winmm.dll");
+		const TimeBegin begin = winmm ? (TimeBegin)GetProcAddress(winmm, "timeBeginPeriod") : nullptr;
+		g_timerResult = begin ? (int)begin(1) : -1;
+	}
+	for (int i = 1; i < argc; i++) if (!wcscmp(argv[i], L"--serial-pipelines")) g_serialPipelines = true;	// (2026-11-11) as NVR_RT_HELPER_SERIAL: the start's pipelines one after another
 	for (int i = 1; i < argc; i++) {
 		if (!wcscmp(argv[i], L"--shm") && i + 1 < argc) return RunHelper(argv[i + 1], logName);
 		if (!wcscmp(argv[i], L"--probe")) return RunProbe();

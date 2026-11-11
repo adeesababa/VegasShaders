@@ -1,6 +1,7 @@
 #include "ShadowFaceCull.h"
 #include "PointShadowSchedule.h"
 #include "PointShadowForward.h"
+#include "BeatSeries.h"	// UNOFFICIAL 2026-11-11 the beat detector's per-frame series
 #include "TestTools.h"	// UNOFFICIAL: NVR_TEST_TOOLS (SkipWhenFadedCheck)
 #include "OrthoProbe.h"	// UNOFFICIAL 2026-10-17 test tools: ortho map caster dump
 #include "SunShadowStats.h"	// UNOFFICIAL 2026-10-21 test tools: where the sun cascades' CPU time goes
@@ -23,6 +24,10 @@ struct SkinnedBoundEntry { UInt32 frame; bool ok; NiBound bound; };
 static std::unordered_map<NiGeometry*, SkinnedBoundEntry> SkinnedBounds;
 static UInt32 SkinnedBoundFrame = 0;	// advanced once per ShadowManager::RenderShadowMaps
 static unsigned statSkinnedCasters = 0, statSkinnedFaces = 0, statSkinnedNoBound = 0, statSkinnedOutOfRange = 0;
+// UNOFFICIAL 2026-11-11 SkipOwnFixture ([Shaders.ShadowsInteriors.Forward]; LampFixtures.h): per lamp, how many casters its last whole
+// or static cube map draw left out as the lamp's own fixture (the F10 profile's POINT SHADOWS SkipOwnFixture line; LogLamps: CASTERS).
+static std::unordered_map<const void*, unsigned> FixtureSkips;
+static unsigned FixtureSkipsGeneration = 0;
 
 static bool SkinnedWorldBound(NiGeometry* geometry, NiBound& out) {
 	SkinnedBoundEntry& entry = SkinnedBounds[geometry];
@@ -181,6 +186,11 @@ static void PointShadowCasterState(ShadowSceneLight* light, UInt64& hash, bool& 
 	if (!LampFixtures::NoShadowWords.empty())	// UNOFFICIAL NoShadowLampModels (2026-10-27): its words and the cell's lamp list redraw too
 		hash = (hash ^ (UInt64)std::hash<std::string>{}(LampFixtures::NoShadowFrom) ^ ((UInt64)LampFixtures::Generation << 40) ^
 			(UInt64)(forwardSettings.LampModelDistance * 16.0f)) * 1099511628211ULL;
+	// UNOFFICIAL 2026-11-11 SkipOwnFixture: the switch, its distance and the cell's fixture list (LampFixtures::FixtureGeneration)
+	// redraw the kept maps; off, the hash is what it was.
+	if (forwardSettings.SkipOwnFixture)
+		hash = (hash ^ 0x7F4A7C159E3779B9ULL ^ ((UInt64)LampFixtures::FixtureGeneration << 24) ^
+			((UInt64)(SInt64)(forwardSettings.OwnFixtureDistance * 16.0f) << 4)) * 1099511628211ULL;
 	// UNOFFICIAL 2026-10-31 CapsuleShadows DropActors: people leave the maps (switching it redraws them)
 	const bool dropActors = CapsuleShadows::DropActors();
 	if (dropActors) hash = (hash ^ 0x5851F42D4C957F2DULL) * 1099511628211ULL;
@@ -1498,6 +1508,11 @@ bool ShadowManager::RenderShadowCubeMap(ShadowSceneLight** Lights, UInt32 LightI
 	const bool dropActors = CapsuleShadows::DropActors();	// UNOFFICIAL 2026-10-31 CapsuleShadows (interiors only)
 	std::unordered_map<int, int> lampModelCache;	// UNOFFICIAL LampModelShadows: this light's answer per lamp model (LampFixtures::NearLampModel)
 	std::unordered_map<int, int> noShadowCache;		// UNOFFICIAL NoShadowLampModels (2026-10-27): the same for LampFixtures::NoShadowLampModel
+	// UNOFFICIAL SkipOwnFixture (2026-11-11, BUG FIX, indoors): the light's own fixture casts nothing into its map (LampFixtures::OwnFixture)
+	const bool skipFixture = intCfg->Forward.SkipOwnFixture && !TheShaderManager->GameState.isExterior && !LampFixtures::Fixtures.empty();
+	const int builtIntoFixture = skipFixture ? LampFixtures::BuiltIntoFixture(pointLight) : -1;
+	std::unordered_map<int, int> fixtureCache;
+	unsigned fixtureSkipped = 0;
 	if (useGeometryList) {
 		// Since this is pure geometry, getting reference data will be difficult (read: slow)
 		for (auto iter = Lights[LightIndex]->kGeometryList.start; iter; iter = iter->next) {
@@ -1542,6 +1557,14 @@ bool ShadowManager::RenderShadowCubeMap(ShadowSceneLight** Lights, UInt32 LightI
 			if (!TheShaderManager->GameState.isExterior &&
 				LampFixtures::NoShadowLampModel(geo, eyePos, intCfg->Forward.LampModelDistance, noShadowCache))
 				continue;
+			// UNOFFICIAL SkipOwnFixture (2026-11-11, BUG FIX): the light's own fixture (the small static / light object it is built into or
+			// stands at: a ceiling panel, a housing, a shade) is the lamp, not a blocker; from a light right behind it, it threw a hard
+			// wedge of darkness over the room. Never a skinned mesh (people), never anything but a listed fixture (walls, furniture stay).
+			if (skipFixture && !geo->skinInstance &&
+				LampFixtures::OwnFixture(geo, pointLight, eyePos, intCfg->Forward.OwnFixtureDistance, builtIntoFixture, fixtureCache)) {
+				fixtureSkipped++;
+				continue;
+			}
 
 			// The player's first-person model and third-person body carry their own shade flags.
 			const bool inFirstPerson = casterShade->m_usFlags.GetBit(NiShadeProperty::kFirstPerson);
@@ -1595,6 +1618,11 @@ bool ShadowManager::RenderShadowCubeMap(ShadowSceneLight** Lights, UInt32 LightI
 			if (!pass) continue;
 			cubeCasters.push_back({ geo, pass, faces });
 		}
+	}
+	// UNOFFICIAL SkipOwnFixture: this lamp's count, for the F10 profile line (whole and static draws; the people layer has no fixtures)
+	if (Layer != CubeLayer::MovingOnto && intCfg->Forward.SkipOwnFixture && !TheShaderManager->GameState.isExterior) {
+		if (FixtureSkipsGeneration != LampFixtures::FixtureGeneration) { FixtureSkipsGeneration = LampFixtures::FixtureGeneration; FixtureSkips.clear(); }
+		FixtureSkips[Lights[LightIndex]] = fixtureSkipped;
 	}
 
 	// UNOFFICIAL CubeFaceCopySkip: the faces the moving casters reach are copied and drawn; the others are copied, unless they still
@@ -1684,9 +1712,10 @@ bool ShadowManager::RenderShadowCubeMap(ShadowSceneLight** Lights, UInt32 LightI
 				if (sqrtf(dx * dx + dy * dy + dz * dz) - b->Radius < nearLimit) nearCount++;
 			}
 			casterLines++;
-			Logger::Log("CASTERS lamp %p at %.0f %.0f %.0f, reach %.0f, cube radius %.0f, %s: %u casters, %d within %.0f of the lamp:",
+			Logger::Log("CASTERS lamp %p at %.0f %.0f %.0f, reach %.0f, cube radius %.0f, %s: %u casters, %d within %.0f of the lamp, %u left out as the lamp's own fixture (SkipOwnFixture %s):",
 				(const void*)lamp, eyePos->x, eyePos->y, eyePos->z, pointLight->Spec.r, cubeRange,
-				Layer == CubeLayer::StaticOnly ? "static layer" : "whole", (unsigned)cubeCasters.size(), nearCount, nearLimit);
+				Layer == CubeLayer::StaticOnly ? "static layer" : "whole", (unsigned)cubeCasters.size(), nearCount, nearLimit,
+				fixtureSkipped, intCfg->Forward.SkipOwnFixture ? "on" : "off");
 			int listed = 0;
 			for (const CubeCaster& caster : cubeCasters) {
 				NiGeometry* geo = caster.geometry;
@@ -3186,6 +3215,7 @@ void ShadowManager::RenderShadowMaps() {
 			}
 			now.partial = CubeCulledAny;	// UNOFFICIAL CubeFaceViewCull: redrawn next frame whatever happens
 			slots[i] = now;
+			BeatSeries::Add(BeatSeries::LiveCubeDraws);	// UNOFFICIAL 2026-11-11
 			if (i < 64) ShadowAtlas::LiveRedrawn[i] = true;	// UNOFFICIAL 2026-10-30 ShadowAtlas: its tile is converted again
 			if (GpuTimer::Enabled) { statRedrawn++; statReasons[(int)why]++; }
 
@@ -3210,6 +3240,11 @@ void ShadowManager::RenderShadowMaps() {
 			else if (fx->CubeMapSizeCreated && fx->EnsureStaticCubeMap(spare)) {
 				ShadowPool::Frame++;
 				if (ShadowPool::MadeSize != fx->CubeMapSizeCreated) { ShadowPool::Release(); ShadowPool::MadeSize = fx->CubeMapSizeCreated; }
+				// UNOFFICIAL 2026-11-11 SkipOwnFixture: the pool's still maps were keyed by lamp position and reach only; the switch, its
+				// distance and the cell's fixture list are part of the key now, so a change redraws them (with ShadowHold each is shown
+				// until its redraw). Off: the key is 0 for every map, as before.
+				const UInt64 poolFixtureKey = !intCfg->Forward.SkipOwnFixture ? 0 :
+					1 + ((UInt64)LampFixtures::FixtureGeneration << 24) + ((UInt64)(SInt64)(intCfg->Forward.OwnFixtureDistance * 16.0f) << 4);
 				LARGE_INTEGER frequency, counter;
 				QueryPerformanceFrequency(&frequency);
 				QueryPerformanceCounter(&counter);
@@ -3244,13 +3279,14 @@ void ShadowManager::RenderShadowMaps() {
 					const int index = ShadowPool::EntryFor(light, fx->CubeMapSizeCreated, want);
 					if (index < 0) continue;
 					ShadowPool::Cube& cube = ShadowPool::Cubes[index];
-					bool current = cube.valid && cube.x == at.x && cube.y == at.y && cube.z == at.z && cube.radius == radius && cube.cell == playerCell;
+					const bool fixtureKeyed = cube.fixtureKey == poolFixtureKey;	// UNOFFICIAL 2026-11-11 SkipOwnFixture
+					bool current = cube.valid && fixtureKeyed && cube.x == at.x && cube.y == at.y && cube.z == at.z && cube.radius == radius && cube.cell == playerCell;
 					// UNOFFICIAL 2026-10-30 ShadowHold: a flicker's reach change under 2 % (position under 1 unit) keeps the map; a map that is not
 					// current is still used until its redraw (same cell, moved under 32 units), instead of no shadow meanwhile.
 					bool stale = false;
 					if (!current && holdSeconds > 0.0f && cube.valid && cube.cell == playerCell) {
 						const float dx = cube.x - at.x, dy = cube.y - at.y, dz = cube.z - at.z, d2 = dx * dx + dy * dy + dz * dz;
-						if (d2 < 1.0f && fabsf(cube.radius - radius) <= 0.02f * radius) { current = true; if (GpuTimer::Enabled) ShadowHold::StatNear++; }
+						if (fixtureKeyed && d2 < 1.0f && fabsf(cube.radius - radius) <= 0.02f * radius) { current = true; if (GpuTimer::Enabled) ShadowHold::StatNear++; }
 						else stale = d2 < 32.0f * 32.0f;
 					}
 					if (!current && stale && budget <= 0) {
@@ -3271,8 +3307,10 @@ void ShadowManager::RenderShadowMaps() {
 						for (int f = 0; f < 6; f++) std::swap(faces[f], cube.faces[f]);
 						if (!drawn) continue;
 						cube.x = at.x; cube.y = at.y; cube.z = at.z; cube.radius = radius; cube.cell = playerCell; cube.valid = true;
+						cube.fixtureKey = poolFixtureKey;
 						cube.drawn++;	// UNOFFICIAL 2026-10-30 ShadowAtlas
 						SessionLog::Count.poolDraws++;	// UNOFFICIAL 2026-11-01
+						BeatSeries::Add(BeatSeries::PoolCubeDraws);	// UNOFFICIAL 2026-11-11
 						FRAME_JOURNAL("lamp shadow pool: cube %d drawn for lamp %p (static casters)", index, light);
 						if (GpuTimer::Enabled) ShadowPool::StatDrawn++;
 					}
@@ -3309,6 +3347,17 @@ void ShadowManager::RenderShadowMaps() {
 				}
 				ShadowHold::AfterPublish(published, n, liveCount);
 			}
+			if (BeatSeries::On) {	// UNOFFICIAL 2026-11-11 BeatSeries: the published table as numbers for the beat detector (read only)
+				unsigned fading = 0;
+				for (int s = 0; s < PointShadowForward::SlotCount; s++) {
+					const PointShadowForward::Slot& e = PointShadowForward::Slots[s];
+					const float fade = fabsf(e.fade);
+					BeatSeries::Mix(BeatSeries::ShadowTableHash, BeatSeries::Item((uintptr_t)e.light, (unsigned)(uintptr_t)e.cube, (unsigned)((std::min)(fade, 4.0f) * 64.0f + 0.5f)));
+					if (fade < 0.999f) fading++;
+				}
+				BeatSeries::Set(BeatSeries::ShadowsPublished, (unsigned)PointShadowForward::SlotCount);
+				BeatSeries::Set(BeatSeries::ShadowsFading, fading);
+			}
 			ForwardWasActive = PointShadowForward::Active;
 			PointShadowForward::FrameStats();
 		}
@@ -3343,6 +3392,14 @@ void ShadowManager::RenderShadowMaps() {
 			Logger::Log("POINT SHADOWS CubeFaceViewCull %s: per frame faces left out (out of view) %.1f of whole lamps, %.1f of people refreshes; partial redraws %.2f; moved lamps whose radius changed too %.2f per frame (largest change %.1f%%)",
 				TheSettingManager->SettingsMain.Main.CubeFaceViewCull ? "on" : "off", statFacesCulled[0] * perFrame, statFacesCulled[2] * perFrame,
 				statReasons[(int)PointShadowRedraw::Partial] * perFrame, statMovedResized * perFrame, 100.0f * statMovedRadiusStep);
+			{	// UNOFFICIAL 2026-11-11 SkipOwnFixture: what the lamps' current maps left out (LogLamps names each fixture: FIXTURE lines)
+				if (!intCfg->Forward.SkipOwnFixture || exteriorCell) FixtureSkips.clear();
+				unsigned fixtureLamps = 0, fixtureCasters = 0;
+				for (const auto& entry : FixtureSkips) if (entry.second) { fixtureLamps++; fixtureCasters += entry.second; }
+				Logger::Log("POINT SHADOWS SkipOwnFixture %s (OwnFixtureDistance %.0f): %u fixtures listed in the cell; of %u lamps drawn since that list last changed, %u leave %u casters in all out of their shadow maps as their own fixture",
+					intCfg->Forward.SkipOwnFixture ? "on" : "off", intCfg->Forward.OwnFixtureDistance, (unsigned)LampFixtures::Fixtures.size(),
+					(unsigned)FixtureSkips.size(), fixtureLamps, fixtureCasters);
+			}
 			statAnchored = 0; statMovedResized = 0; statMovedRadiusStep = 0.0f;
 			for (int k = 0; k < 3; k++) statViewFaces[k] = statViewFacesOut[k] = statFacesCulled[k] = 0;
 			statFacesSkipped = statFacesCopied = statFacesDrawn = statFacesOldPath = 0;

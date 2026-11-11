@@ -22,6 +22,7 @@
 #include "LampFixtures.h"
 #include "DxvkCompute.h"
 #include "RtCore.h"
+#include "RtPathTrace.h"	// UNOFFICIAL 2026-11-11 PTStandDownRT
 #include "RenderRect.h"	// UNOFFICIAL 2026-11-03 RenderScale < 1 (docs/next/RT-RENDERSCALE.md)
 #include "RtDenoise.h"
 #include "RtShadowDenoise.h"	// UNOFFICIAL 2026-11-07 ShadowDenoiser (docs/next/RT-DENOISER.md)
@@ -47,6 +48,14 @@ namespace RtLampShadows {
 	inline bool ActorsFromCubeMaps() {
 		return !RtCore::Actors() && TheSettingManager->GetSettingI(kSection, "ActorsFromCubeMaps");
 	}
+
+	// UNOFFICIAL 2026-11-11 BUG FIX (RTX bench: Enabled switched to 0 while the game ran, the helper's lamp passes kept running every
+	// frame). Enabled was read once, in Initialize (RtEnabled: the shaders' POINT_SHADOW_RT is a startup choice), and the per-frame switch
+	// was Live alone. Now Enabled is also read every frame wherever Live is: off = nothing submitted, Wants false, no trace before the
+	// world, the cube maps drawn and read again (exactly Live false, plus the capsule pass may take the buffer); on again = traced again
+	// from the next frame. Coming on when it was off at startup still needs the restart (the shaders).
+	inline bool EnabledNow() { return TheSettingManager->GetSettingI(kSection, "Enabled") != 0; }
+	inline bool LiveNow() { return EnabledNow() && TheSettingManager->GetSettingI(kSection, "Live") != 0; }
 
 	inline bool CompiledIn = false;			// POINT_SHADOW_RT in the object shaders (fixed at startup)
 	// UNOFFICIAL 2026-10-31 CapsuleShadows (core/CapsuleShadows.h): a second writer of the same buffer, a D3D9 pass (people's capsules and
@@ -400,7 +409,8 @@ namespace RtLampShadows {
 		ScreenSourceFrame = false;
 		if (!CompiledIn) return;
 		MaxLamps = (std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "MaxLamps"), 0), TableSlots);
-		const bool many = ManyOn() && TheSettingManager->GetSettingI(kSection, "Live") != 0;
+		const bool live = LiveNow();	// (2026-11-11) Enabled and Live, both read now
+		const bool many = ManyOn() && live;
 		// The table: every published lamp in cube slots 0-62, in NVR's order (its ranking), up to MaxLamps
 		for (int i = 0; i < MapSlots; i++) PendingMap[i] = -1;
 		for (int i = 0; i < count && LampCount < MaxLamps; i++)
@@ -430,9 +440,10 @@ namespace RtLampShadows {
 			}
 			ExtraCount = top - 63;
 		}
-		LampsThisFrame = RtEnabled && TheSettingManager->GetSettingI(kSection, "Live") != 0;
+		LampsThisFrame = RtEnabled && live;
 		// UNOFFICIAL 2026-10-31 CapsuleShadows: the pass writes the buffer when the RT path is not running (no RT GPU, or RT off)
-		const bool rtSource = RtEnabled && RtCore::Running();
+		// (2026-11-11: "RT off" also when Enabled was switched off while the game runs)
+		const bool rtSource = RtEnabled && EnabledNow() && RtCore::Running();
 		if (!rtSource && ScreenWants() && count > 0) { ScreenSourceFrame = true; LampsThisFrame = true; }
 		Aim(rtSource);
 	}
@@ -543,7 +554,9 @@ namespace RtLampShadows {
 
 	// --- The RT core user -----------------------------------------------------------------------------------------------------------
 	inline bool Wants() {
-		return (RtEnabled && !ScreenSourceFrame && !SameFrameTraced() && LampsThisFrame && LampCount > 0 && (!TheShaderManager->GameState.isExterior || ExteriorFrame)) ||
+		if (RtPathTrace::StandDownRT()) return false;	// UNOFFICIAL 2026-11-11 PTStandDownRT: the path traced picture has its own lamp shadows
+		// (2026-11-11) EnabledNow: the live switch (LampsThisFrame already holds it from Submit; asked again here for a frame without a Submit)
+		return (RtEnabled && EnabledNow() && !ScreenSourceFrame && !SameFrameTraced() && LampsThisFrame && LampCount > 0 && (!TheShaderManager->GameState.isExterior || ExteriorFrame)) ||
 			FlashWanted();
 	}
 
@@ -676,12 +689,41 @@ namespace RtLampShadows {
 		return SUCCEEDED(hr);
 	}
 
+	// UNOFFICIAL 2026-11-11 (log only) one line when a recorded trace starts to cover the RenderScale rect instead of the whole screen grid,
+	// by which path, and one when it goes back (8 lines a session at most; a session that starts at the full size says nothing)
+	inline void LogTracedSize(UINT tw, UINT th, UINT w, UINT h, bool followed) {
+		static int state = -1, logs = 0;
+		const int now = tw < w || th < h ? (followed ? 2 : 1) : 0;
+		if (now == state) return;
+		const bool first = state < 0;
+		state = now;
+		if ((first && !now) || logs >= 8) return;
+		logs++;
+		if (now) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT lamp shadows traced in the RenderScale rect: %ux%u of %ux%u (scale %.2f x %.2f; %s).", tw, th, w, h,
+			(float)tw / (float)w, (float)th / (float)h, followed ? "before the world, FollowRenderScale" : "after the world, on the frame's depth");
+		else Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT lamp shadows traced at the full size again: %ux%u (%s).", w, h,
+			InPrimary ? "before the world: FollowRenderScale off or the world not drawn small" : "after the world: a native frame");
+	}
+
 	inline void Record(IDirect3DDevice9* Device) {
 		if (imageDepth < 0 || imageNormals < 0 || imageResult < 0 || imageTable < 0 || shader < 0) return;
 		const UINT w = TheRenderManager->width, h = TheRenderManager->height;
 		// (2026-11-03) RenderScale < 1: trace only the frame's top-left RenderRect part (uv = pixel / rect size is the screen's; the
 		// depth is read in the rect); the forward shaders read it through Reproject's scaled uv. Off: the whole screen, as before.
-		const UINT tw = RenderRect::Width(w), th = RenderRect::Height(h);
+		UINT tw = RenderRect::Width(w), th = RenderRect::Height(h);
+		// UNOFFICIAL 2026-11-11 FollowRenderScale ([Shaders.ShadowsInteriors.RT], off; RTX bench: "RT lamp shadows traced (1280x720" at
+		// RenderScale 0.67). With SameFrame the trace runs BEFORE the world, where RenderRect is not on yet (it begins with the effects), so
+		// the camera rays, the trace and the denoiser covered the whole screen grid while the world was drawn at 856x480. On: that trace
+		// takes the size the world is about to be drawn at (TAAEffect::WorldDrawnSmall) and its jitter, so a traced texel is a drawn pixel;
+		// the result is in the top-left tw x th of its texture and every reader (the forward draws, the deferred lamps, the land) finds it
+		// through Reproject, which Aim scales by Traced.sx / sy as it always did for the after-the-world trace of a rect frame. Off, a
+		// native frame, or the after-the-world path: nothing here runs.
+		bool followed = false;
+		D3DXVECTOR2 followedJitter(0.0f, 0.0f);
+		if (InPrimary && tw == w && th == h && TheSettingManager->GetSettingI(kSection, "FollowRenderScale") != 0) {
+			UINT rw = 0, rh = 0;
+			if (TAAEffect::WorldDrawnSmall(rw, rh, followedJitter) && rw <= w && rh <= h && (rw < w || rh < h)) { tw = rw; th = rh; followed = true; }
+		}
 		if (!ResultTexture || TextureWidth != w || TextureHeight != h) {
 			if (ResultSurface) { ResultSurface->Release(); ResultSurface = nullptr; }
 			if (ResultTexture) { ResultTexture->Release(); ResultTexture = nullptr; }
@@ -747,6 +789,7 @@ namespace RtLampShadows {
 		c.size[0] = (float)tw; c.size[1] = (float)th; c.size[2] = 1.0f / tw; c.size[3] = 1.0f / th;
 		D3DXVECTOR2 jitter(0.0f, 0.0f);	// (2026-11-03) the depth's jitter, for the trace and (Traced) the lookup
 		if (TAAEffect* taa = TheShaderManager->Effects.TAA) jitter = taa->DepthJitterUV();
+		if (followed) jitter = followedJitter;	// (2026-11-11 FollowRenderScale) the small world's jitter (DepthJitterUV has it only once the frame waits for its upscale)
 		c.jitter[0] = jitter.x; c.jitter[1] = jitter.y;
 		c.jitter[2] = AlphaOn() && TheSettingManager->GetSettingI(kSection, "AlphaTest") != 0 ? 1.0f : 0.0f;	// (2026-11-03 rtalpha) test alpha-tested casters (the shaders add 0x10 to the masks)
 		c.forward[0] = view._13; c.forward[1] = view._23; c.forward[2] = view._33; c.forward[3] = cameraData->y;
@@ -973,6 +1016,7 @@ namespace RtLampShadows {
 					FramesTraced, cell, oneRay ? "one ray a pixel" : "2 exact + rest rays", MotionFrames, LampCount, LampCount - ExtraCount, ExtraCount, RefusedCount, SkippedCubes, listed ? list : " none", ExtraCount > listed ? " ..." : "");
 				SkippedCubes = 0;
 			}
+			LogTracedSize(tw, th, w, h, followed);	// (2026-11-11)
 			if (FramesTraced++ == 0)
 				Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT lamp shadows traced, ManyLights (%ux%u, %d lamps, %s).", w, h, LampCount, oneRay ? "one ray a pixel" : "2 exact + rest rays");
 			return;
@@ -1084,6 +1128,7 @@ namespace RtLampShadows {
 				FramesTraced, LampCount, SkippedCubes, LampCount ? text : "");
 			SkippedCubes = 0;
 		}
+		LogTracedSize(tw, th, w, h, followed);	// (2026-11-11)
 		if (FramesTraced++ == 0)
 			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT lamp shadows traced (%ux%u, %d lamps, %d rays).", w, h, LampCount, (int)c.params[0]);
 	}
@@ -1271,7 +1316,7 @@ namespace RtLampShadows {
 	// which then look this frame's result up (Aim: this frame's camera). When the helper is not running or refuses (outdoors with Grass),
 	// nothing happens and RtCore::Frame traces after the world as before (the next frame's draws reproject into it).
 	inline void TraceBeforeWorld(IDirect3DDevice9* Device) {
-		if (!CompiledIn || !RtEnabled || SameFrameTraced() || !SameFrameOn()) return;
+		if (!CompiledIn || !RtEnabled || !EnabledNow() || SameFrameTraced() || !SameFrameOn()) return;	// (2026-11-11: Enabled read now)
 		if (ScreenSourceFrame || !LampsThisFrame || LampCount <= 0) return;
 		if (TheShaderManager->GameState.isExterior && !ExteriorForwardFrame) return;	// the outdoor mask: a screen pass after the world
 		const UInt32 before = FramesTraced;

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "RtCore.h"
+#include "RtPathTrace.h"	// UNOFFICIAL 2026-11-11: ReferenceOn (ReferencePT as honoured)
 bool RtMaterialRuleOf(NiGeometry* geometry, float* roughness, float* metal);	// UNOFFICIAL 2026-11-03 (NewVegas/Hooks/Render.cpp)
 const char* RtMaterialClassOf(NiGeometry* geometry);	// UNOFFICIAL 2026-11-07 ptaaa-materials (NewVegas/Hooks/Render.cpp)
 #include "DxvkCompute.h"
@@ -392,6 +393,34 @@ namespace {
 		NvrRtFrame*	record = nullptr;			// the ring slot being written (null outside an exchange)
 		bool		recording = false;
 		std::vector<PendingCopy> copiesOut;
+		// UNOFFICIAL 2026-11-10 (PT early kick, env NVR_RT_EARLY_PT; docs/next/PT-EARLY-KICK-PLAN-2026-11-10.md) RtCore::SubmitEarly's open
+		// frame: its copies out wait here for CollectEarly (copiesOut / record are reused by the frame's later exchange). One frame in flight.
+		bool		submitOnly = false;			// Exchange: signal and return; the copies go to pendingOut (set by SubmitEarly only)
+		std::vector<PendingCopy> pendingOut;
+		UInt64		pendingN = 0;				// the pending exchange's record number (0: nothing pending)
+		const char*	earlyName = nullptr;		// the user submitted early, in game frame earlyFrame (FrameNumber + 1)
+		UInt32		earlyFrame = 0;
+		LONGLONG	earlySignalQpc = 0;
+		UInt32		earlySubmitted = 0, earlyRefused = 0, earlyCollected = 0;	// since the last log line
+		double		earlyOverlapMs = 0.0;
+		const char*	earlyRefusal = "none";
+		// UNOFFICIAL 2026-11-11 (PT-EARLY-KICK-BUDGET Q1) the RidesEarly users recorded with the submit of game frame earlyFrame (RT fog
+		// visibility outdoors): EarlyThisFrame names them too, so Frame neither records them again nor exchanges for them alone
+		std::vector<const char*> earlyRiders;
+		UInt32		earlyOwnPasses = 0;			// passes the submitting user itself recorded (Exchange, submit mode; the riders' come after)
+		UInt32		earlyRidden = 0;			// riders recorded, summed over the submits since the last log line
+		UInt32		earlySecond = 0;			// frames with an early submit in which Frame still made its own exchange (should be 0)
+		const char*	earlySecondBy = "none";		// the last user that made one
+		// where the open submit was collected: 0 CollectBeforeShow (RtCore::CollectEarly), the safety nets 1 Exchange, 2 Frame, 3 SubmitEarly
+		// (a frame left it open); 4 dropped by Stop (helper stop / restart / turn off). Last night's logs could not tell the nets apart
+		enum { kAtShow, kAtExchange, kAtFrame, kAtSubmit, kAtStop, kAtCount };
+		UInt32		earlyCollectedAt[kAtCount] = {};
+		// UNOFFICIAL 2026-11-11 profiler only: a scratch fence whose SignalShared flushes before the collect's WaitShared, so "RT early: collect
+		// wait"'s begin stamp runs before the wait (it read 0.000: both stamps sat in the list the wait gates). Made on first use, dropped in Stop
+		ID3D9NvrExtSharedFence*	profileFlush = nullptr;
+		UInt64		profileFlushValue = 0;
+		void		CollectEarly(IDirect3DDevice9* Device, int site = -1);	// site: earlyCollectedAt's index (-1: not counted)
+		bool		EarlyThisFrame(const char* name) const;	// that user's Record went with this game frame's SubmitEarly
 		// UNOFFICIAL 2026-10-28 (RT reflections) the second exchange (RtCore::Exchange): the scene is gathered once per game frame; a
 		// later exchange of the same frame sends this frame's instance list again (no geometry ops: those went with the first record).
 		UInt32		gatheredFrame = 0;			// TheFrameRateManager->FrameNumber of the last Gather (+1, 0 = never)
@@ -413,6 +442,7 @@ namespace {
 		// Alpha-tested casters ([Main.Main.RayTracing] AlphaTested, read at each helper start): the alpha atlas (a shared R16F image,
 		// 64 x 64 a texture) and the textures already in it
 		bool		alphaOn = false;
+		bool		blendedHairOn = true;	// (2026-11-10) [Main.Main.RayTracing] BlendedHair: the game's own blend-only hair as a cut-out (AddGeometry)
 		// alpha-tested meshes by fate (exchanges 1-60): [0] blended only, [1] feature off, [2] not described, [3] texcoords not in the
 		// position's stream, [4] no diffuse texture, [5] alpha unreadable (format / pool) or atlas full, [6] waited (upload budget), [7] taken
 		UInt32		alphaFate[8] = {};
@@ -1035,6 +1065,10 @@ namespace {
 		imageDescs.push_back({ kArenaWidth, AlignImage(arenaMB * 1024u * 1024u / 4u / kArenaWidth), NVR_EXT_SHARED_R32F, nullptr });
 		imageSizes.push_back({ imageDescs.back().Width, imageDescs.back().Height });
 		alphaOn = TheSettingManager->GetSettingI("Main.Main.RayTracing", "AlphaTested") != 0;
+		{	// UNOFFICIAL 2026-11-10 BlendedHair (a missing key, an older toml: on)
+			SettingManager::Configuration::ConfigNode node;
+			blendedHairOn = !TheSettingManager->Config.FillNode(&node, "Main.Main.RayTracing", "BlendedHair") || node.BoolValue;
+		}
 		hitTextures = TheSettingManager->GetSettingI("Main.Main.RayTracing", "HitTextures") != 0;
 		// 2026-10-30; (2026-11-07, RT-DETAIL-GAPS.md 6) PTRealtime turns it on too: read here and again each frame (Gather), so the menu's
 		// PTRealtime switch brings the grass without a restart
@@ -1216,6 +1250,24 @@ namespace {
 		shared->shaderCount = (uint32_t)(std::min<size_t>)(shaders.size(), NVR_RT_MAX_SHADERS);
 
 		std::wstring cmdLine = L"\"" + exe + L"\" --shm " + base;
+		{	// UNOFFICIAL 2026-11-10 [Main.Main.RayTracing] HelperWait (read at each helper start; a missing key: 0): 1 = the helper waits for the
+			// game's inputs on the CPU and submits with no GPU wait (NvrRtHelper.cpp --wait cpu), 0 = its submission waits on the GPU (as before)
+			SettingManager::Configuration::ConfigNode node;
+			bool cpuWait = TheSettingManager->Config.FillNode(&node, "Main.Main.RayTracing", "HelperWait") && node.IntValue != 0;
+			if (const char* e = getenv("NVR_RT_HELPER_WAIT")) cpuWait = !strcmp(e, "cpu");	// (bench A/B without touching the settings file: cpu / gpu)
+			cmdLine += cpuWait ? L" --wait cpu" : L" --wait gpu";
+			if (const char* e = getenv("NVR_RT_HELPER_PRIORITY")) if (!strcmp(e, "high")) cmdLine += L" --gpu-priority high";	// (bench only, 2026-11-10)
+			if (getenv("NVR_RT_HELPER_MEASURE")) cmdLine += L" --measure";
+			if (const char* e = getenv("NVR_RT_HELPER_SIGNAL")) if (!strcmp(e, "cpu")) cmdLine += L" --signal cpu";	// (bench only, 2026-11-10; with --wait cpu)
+			if (getenv("NVR_RT_HELPER_TIMER")) cmdLine += L" --timer-1ms";	// (bench only, 2026-11-10: the helper process's timer resolution 1 ms)
+			if (getenv("NVR_GAME_TIMER")) {	// (bench only: the game process's too; the DXVK submission thread's and the driver's waits tick on it)
+				typedef UINT(WINAPI* TimeBegin)(UINT);
+				const HMODULE winmm = LoadLibraryW(L"winmm.dll");
+				const TimeBegin begin = winmm ? (TimeBegin)GetProcAddress(winmm, "timeBeginPeriod") : nullptr;
+				Logger::Log("UNOFFICIAL Vegas Shaders DXVK: NVR_GAME_TIMER: the game process's timer resolution 1 ms: %s", begin && begin(1) == 0 ? "set" : "not set");
+			}	// (bench only: the helper's hand-over timing lines, needs --wait cpu)
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT helper start option HelperWait %d (%s)", cpuWait ? 1 : 0, cpuWait ? "the helper waits on the CPU" : "the GPU waits");
+		}
 		STARTUPINFOW si = { sizeof(si) };
 		PROCESS_INFORMATION pi = {};
 		if (!CreateProcessW(exe.c_str(), &cmdLine[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW | ABOVE_NORMAL_PRIORITY_CLASS, nullptr, helperDir.c_str(), &si, &pi)) {
@@ -1290,6 +1342,14 @@ namespace {
 	void Core::Stop(const char* why) {
 		SessionLog::StageScope stage("RT core: stopping the RT helper");	// (2026-11-07 perf-ptcost: STALL lines)
 		if (why && state != Idle && state != Off) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT helper stopped: %s.", why);
+		// UNOFFICIAL 2026-11-10 (PT early kick) an open SubmitEarly is dropped, not collected: step 1 below waits for every recorded frame
+		// (lastRecorded includes it) and the shared images go, so its copies out would read nothing. The user keeps last frame's picture.
+		if (pendingN) earlyCollectedAt[kAtStop]++;	// UNOFFICIAL 2026-11-11: a drop, counted apart from the collects
+		pendingOut.clear();
+		pendingN = 0;
+		earlyName = nullptr;
+		earlyRiders.clear();	// (2026-11-11 Q1) their copies went with pendingOut
+		submitOnly = false;
 		if (watchdog) {
 			InterlockedExchange(&watchStop, 1);
 			WaitForSingleObject(watchdog, 3000);
@@ -1383,6 +1443,8 @@ namespace {
 		images.clear();
 		DxvkCompute::Drop(inputsReady);
 		DxvkCompute::Drop(outputReady);
+		DxvkCompute::Drop(profileFlush);	// UNOFFICIAL 2026-11-11: made from share, so it goes before it
+		profileFlushValue = 0;
 		DxvkCompute::Drop(rt);
 		DxvkCompute::Drop(rtSkin);
 		DxvkCompute::Drop(rtSeq);
@@ -2518,6 +2580,19 @@ namespace {
 		NiAlphaProperty* alpha = pick.hasShaderAndData && !pick.skinned ? (NiAlphaProperty*)geo->GetProperty(NiProperty::PropertyType::kType_Alpha) : nullptr;
 		pick.hasAlphaProperty = alpha != nullptr;
 		pick.alphaFlags = alpha ? (uint16_t)alpha->flags : 0;
+		// UNOFFICIAL 2026-11-10 BlendedHair (seen on an RTX-class card with the UNMODDED game: people bald under the path tracer, a ghost of
+		// the hair's outline; the log: "'FaceGenHairNoHat' blended only (no alpha test)", hair parts in the traced scene 0 of 22683 hair
+		// draws). The game's own hair, brows and beards are alpha-BLENDED with no alpha test, and blended-only geometry stays out of the
+		// scene (glass, effects). A hair mod with alpha-tested hair went in, which is why this never showed on the bench. Hair (the Hair
+		// flag or a FaceGen hair name) that only blends is taken as a cut-out at half alpha, as the skinned path does (ActorAlphaRef).
+		bool hairBlendedOnly = false;
+		if (blendedHairOn && alphaOn && alpha && shaderProperty && (pick.alphaFlags & RtScenePick::kAlphaBlend) && !(pick.alphaFlags & RtScenePick::kAlphaTest) &&
+			((shaderProperty->ulFlags[0] & BSShaderProperty::Hair) || RtHairTint::HairName(geo->m_pcName))) {
+			pick.alphaFlags |= RtScenePick::kAlphaTest;
+			hairBlendedOnly = true;
+			static int told = 0;
+			if (told < 4) { told++; Logger::Log("RT CORE hair: '%s' only blends (alpha flags %04X, no alpha test): traced as a cut-out at alpha 128 (BlendedHair)", geo->m_pcName ? geo->m_pcName : "", (unsigned)alpha->flags); }
+		}
 		RtScenePick::Switches pickSwitches;
 		pickSwitches.cullAngle = cullAngle; pickSwitches.alphaTested = alphaOn; pickSwitches.leafCards = leafPlanes != 0;
 		pickSwitches.decals = decalsOn;
@@ -2661,7 +2736,7 @@ namespace {
 		// (2026-11-06) packed by RtScenePick::RecordFlags / InstanceMask / OpFlags (RtScenePick.h; tested bit for bit by tools/nvr-rt-host)
 		RtScenePick::Record pr;
 		pr.land = land && !pick.decal; pr.albedoKnown = albedo.known; pr.glowMap = HasGlowMap(shaderProperty);
-		pr.alphaTested = alphaTested; pr.alphaRef = alphaTested && alpha ? (UInt32)alpha->alphaTestRef : 0u;
+		pr.alphaTested = alphaTested; pr.alphaRef = alphaTested && alpha ? (hairBlendedOnly ? 128u : (UInt32)alpha->alphaTestRef) : 0u;	// (hairBlendedOnly: 2026-11-10 BlendedHair)
 		// (2026-11-07) a decal: alpha-tested whatever its alpha property (blended ones at 128, opaque ones at 0: RtScenePick::DecalAlphaRef)
 		pr.decal = pick.decal; pr.hidden = walkingPlayer && playerHidden;
 		if (pick.decal) pr.alphaRef = RtScenePick::DecalAlphaRef(pick.hasAlphaProperty, pick.alphaFlags, alpha ? (UInt32)alpha->alphaTestRef : 0u);
@@ -3075,7 +3150,7 @@ namespace {
 		// UNOFFICIAL 2026-11-07 (ptaaa-materials, RT-PATH-TRACING.md "materials") glass panes in the scene: only for the path tracer (every other
 		// shader passes them, RtAlpha.glsl), live; non-opaque instances, so they need the alpha test (AlphaTested + the atlas)
 		glassOn = alphaOn && atlasImage >= 0 && TheSettingManager->GetSettingI("Main.Main.RayTracing", "PTGlass") > 0 &&
-			(ptRealtime || TheSettingManager->GetSettingI("Main.Main.RayTracing", "ReferencePT") != 0);
+			(ptRealtime || RtPathTrace::ReferenceOn());	// (2026-11-11: ReferencePT as honoured)
 		if (glassTaken || skinParts || foliageCards) {
 			static UInt32 told = 0;
 			if (told < 6 && (TheFrameRateManager->FrameNumber % 600u) == 0u) {
@@ -3276,6 +3351,10 @@ namespace {
 	// (exchanges are recorded one after the other on the render thread), so the arena rule holds with two exchanges a frame.
 	bool Core::Exchange(IDirect3DDevice9* Device, const RtCore::User* only) {
 		Core& c = *this;
+		// UNOFFICIAL 2026-11-10 (PT early kick) an open SubmitEarly first: its wait and copies before this record, so the helper never has an
+		// unpaired frame and this exchange's geometry staging / copies in come after its WaitShared (the arena rule above). Only with
+		// NVR_RT_EARLY_PT set is anything ever pending.
+		if (c.pendingN) c.CollectEarly(Device, Core::kAtExchange);
 		// The ring slot: the helper must have copied out the record that used it last (normally long ago; a few ms at worst)
 		const UInt64 n = c.frame + 1;
 		{
@@ -3297,6 +3376,14 @@ namespace {
 		c.recording = true;
 		c.copiesOut.clear();
 
+		// UNOFFICIAL 2026-11-10, measurement only (F10 profile): the exchange's three parts on the game's GPU timeline. 'in' = what the game
+		// queues before the signal (scene data, the users' copies in), 'round trip' = from the signal to the first command after the wait
+		// (GPU idle + the helper's whole frame + the cross-process hand-over: minus the log's 'RT CORE: frame' GPU total = the hand-over),
+		// 'out' = the results copied back. Only the frame's own exchange (Point 0); the timers do nothing with the profile off.
+		static GpuTimer timerIn("  RT exchange: in (scene + copies)"), timerTrip("  RT exchange: helper round trip"), timerOut("  RT exchange: out (copies)");
+		const bool timedIn = !only && timerIn.Begin(Device);
+		static GpuTimer timerSubmit("  RT early: submit (scene + copies)");	// UNOFFICIAL 2026-11-10 (PT early kick): SubmitEarly's 'in'
+		const bool timedSubmit = c.submitOnly && timerSubmit.Begin(Device);
 		const UInt32 now = TheFrameRateManager->FrameNumber + 1;
 		if (c.gatheredFrame != now) {
 			c.glows.clear();
@@ -3324,8 +3411,23 @@ namespace {
 			for (uint32_t i = 0; i < f.instanceCount; i++) if (f.instances[i].customIndex & NVR_RT_CUSTOM_HIDDEN) hidden++;
 			c.hiddenInstances = hidden;
 		}
-		if (only) { if (only->Record) only->Record(Device); }
-		else for (const RtCore::User& user : c.users) if (user.Point == 0 && !c.Out(user) && user.Wants && user.Wants() && user.Record) user.Record(Device);
+		if (only) {
+			if (only->Record) only->Record(Device);
+			// UNOFFICIAL 2026-11-11 (PT-EARLY-KICK-BUDGET Q1) SubmitEarly: the RidesEarly users that trace this frame go in the same record, so
+			// their copies wait in pendingOut with the submitter's and Frame makes no second exchange for them (outdoors: RT fog visibility,
+			// 1.6 ms p50 round trip + a duplicate helper frame). By name: SubmitEarly's user may be a copy of the one in users.
+			if (c.submitOnly) {
+				c.earlyOwnPasses = f.passCount;
+				for (const RtCore::User& user : c.users)
+					if (user.RidesEarly && user.Point == 0 && user.Name && only->Name && strcmp(user.Name, only->Name) && !c.Out(user) &&
+						user.Wants && user.Wants() && user.Record) {
+						user.Record(Device);
+						c.earlyRiders.push_back(user.Name);
+					}
+			}
+		}
+		// (2026-11-10 PT early kick) a user whose Record went with this frame's SubmitEarly is not recorded again (its results are pending)
+		else for (const RtCore::User& user : c.users) if (user.Point == 0 && !c.Out(user) && user.Wants && user.Wants() && user.Record && !c.EarlyThisFrame(user.Name)) user.Record(Device);
 		const bool recorded = f.passCount > 0;
 
 		LARGE_INTEGER written;
@@ -3337,12 +3439,35 @@ namespace {
 		InterlockedExchange64((volatile LONG64*)&c.shared->latestFrame, (LONG64)n);
 		SetEvent(c.frameEvent);
 		InterlockedExchange64(&c.lastRecorded, (LONG64)n);
+		if (timedIn) timerIn.End();
+		if (timedSubmit) timerSubmit.End();
+		const bool timedTrip = !only && timerTrip.Begin(Device);
 		c.share->SignalShared(c.inputsReady, n);
-		c.share->WaitShared(c.outputReady, n);
-		for (const PendingCopy& copy : c.copiesOut) {
-			const RECT used = { 0, 0, (LONG)(copy.width ? copy.width : c.imageSizes[copy.image].first),
-				(LONG)(copy.height ? copy.height : c.imageSizes[copy.image].second) };
-			c.share->CopyFromShared(copy.target, 0, 0, c.images[copy.image], &used);
+		if (c.submitOnly) {
+			// UNOFFICIAL 2026-11-10 (PT early kick) SubmitEarly: no wait here; the copies out wait for CollectEarly (pendingOut), the helper
+			// traces while the game draws the world
+			c.pendingOut.swap(c.copiesOut);
+			c.pendingN = n;
+			LARGE_INTEGER signalled;
+			QueryPerformanceCounter(&signalled);
+			c.earlySignalQpc = signalled.QuadPart;
+		}
+		else {
+			// UNOFFICIAL 2026-11-10, BENCH ONLY (env NVR_RT_WAIT_PREV): the game waits for the PREVIOUS frame's results instead of this frame's, to
+			// measure what the two cross-process hand-overs cost a frame (the driver reported the helper's work done ~3 ms late on an L4). The
+			// copies below then read images the helper may still be writing: the picture is wrong, only the frame time counts.
+			static const bool waitPrev = getenv("NVR_RT_WAIT_PREV") != nullptr;
+			if (waitPrev) { static bool told = false; if (!told) { told = true; Logger::Log("UNOFFICIAL Vegas Shaders DXVK: NVR_RT_WAIT_PREV: the game waits for the PREVIOUS frame's ray tracing results (bench timing only: the pictures are wrong)"); } }
+			if (!waitPrev) c.share->WaitShared(c.outputReady, n);
+			else if (n > 1) c.share->WaitShared(c.outputReady, n - 1);
+			if (timedTrip) timerTrip.End();
+			const bool timedOut = !only && timerOut.Begin(Device);
+			for (const PendingCopy& copy : c.copiesOut) {
+				const RECT used = { 0, 0, (LONG)(copy.width ? copy.width : c.imageSizes[copy.image].first),
+					(LONG)(copy.height ? copy.height : c.imageSizes[copy.image].second) };
+				c.share->CopyFromShared(copy.target, 0, 0, c.images[copy.image], &used);
+			}
+			if (timedOut) timerOut.End();
 		}
 		c.copiesOut.clear();
 		c.recording = false;
@@ -3487,11 +3612,20 @@ namespace {
 
 void RtCore::Frame(IDirect3DDevice9* Device) {
 	Core& c = TheCore;
+	// UNOFFICIAL 2026-11-10 (PT early kick) an open SubmitEarly is collected here at the latest, even when no user exchanges below (the
+	// path tracer switched off after its submit: its copy targets may go soon). Normally RtPathTrace::CollectBeforeShow already did.
+	if (c.pendingN) c.CollectEarly(Device, Core::kAtFrame);
 	if (!c.Ready()) return;
 	// UNOFFICIAL 2026-10-28: only the Point-0 users exchange here; with none on, a Point-1 user's Exchange gathers the scene itself.
+	// (2026-11-10 PT early kick) a user submitted early this frame does not count: alone, it needs no second round trip here
+	// (2026-11-11 Q1) nor does a rider of that submit (EarlyThisFrame names both)
 	bool pointZero = false;
-	for (const User& user : c.users) pointZero = pointZero || (user.Point == 0 && !c.Out(user) && user.Wants && user.Wants());
+	const char* by = nullptr;
+	for (const User& user : c.users)
+		if (!pointZero && user.Point == 0 && !c.Out(user) && user.Wants && user.Wants() && !c.EarlyThisFrame(user.Name)) { pointZero = true; by = user.Name; }
 	if (!pointZero) return;
+	// UNOFFICIAL 2026-11-11 (measurement) a second exchange after this frame's early submit: the "RT early" line's count (should be 0)
+	if (c.earlyName && c.earlyFrame == TheFrameRateManager->FrameNumber + 1) { c.earlySecond++; c.earlySecondBy = by ? by : "?"; }
 	static GpuTimer timer("Ray tracing (copies + helper + waits)");
 	GpuProfileScope gpu(timer, Device);
 	c.Exchange(Device, nullptr);
@@ -3511,6 +3645,129 @@ bool RtCore::ExchangeEarly(IDirect3DDevice9* Device, const User& user) {	// UNOF
 	if (!c.Ready()) return false;
 	return Exchange(Device, user);
 }
+
+// UNOFFICIAL 2026-11-10 (PT early kick, docs/next/PT-EARLY-KICK-PLAN-2026-11-10.md; RtCore.h). Bench only: unset, nothing below runs.
+bool RtCore::EarlyPtWanted() {
+	static const bool wanted = getenv("NVR_RT_EARLY_PT") != nullptr;
+	static bool told = false;
+	if (wanted && !told) {
+		told = true;
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK: NVR_RT_EARLY_PT: the path tracer's exchange is signalled at the world's start and collected before its "
+			"show pass (no G-buffer inputs; grass left out of those frames' scene; last frame's lamp list)");
+	}
+	return wanted;
+}
+
+namespace {
+	bool Core::EarlyThisFrame(const char* name) const {
+		if (earlyFrame != TheFrameRateManager->FrameNumber + 1) return false;
+		if (earlyName && (earlyName == name || (name && !strcmp(earlyName, name)))) return true;
+		// UNOFFICIAL 2026-11-11 (Q1) a rider of that submit (earlyRiders is only filled for earlyFrame's submit; Stop clears it)
+		for (const char* rider : earlyRiders) if (rider == name || (name && !strcmp(rider, name))) return true;
+		return false;
+	}
+
+	void Core::CollectEarly(IDirect3DDevice9* Device, int site) {
+		if (!pendingN) return;
+		const UInt64 n = pendingN;
+		pendingN = 0;
+		if (site >= 0 && site < kAtCount) earlyCollectedAt[site]++;
+		LARGE_INTEGER now, freq;
+		QueryPerformanceCounter(&now);
+		QueryPerformanceFrequency(&freq);
+		earlyOverlapMs += 1000.0 * (double)(now.QuadPart - earlySignalQpc) / (double)freq.QuadPart;	// signal -> collect: the overlap window
+		earlyCollected++;
+		if (state != Running || !share || !outputReady) { pendingOut.clear(); return; }	// (Stop clears it first; belt and braces)
+		static GpuTimer timerCollect("  RT early: collect wait");
+		const bool timed = timerCollect.Begin(Device);
+		// UNOFFICIAL 2026-11-11 only while the GPU profiler runs (timed: GpuTimer::Enabled, not loading): SignalShared is the ext's one flush
+		// (it submits everything recorded so far), so the begin stamp above runs BEFORE the wait instead of in the list the wait gates. A scratch
+		// fence nobody waits on (the D3D9 event query's flush never reported done under the fork: Stop's note). Normal play: nothing changes.
+		if (timed) {
+			static bool noFence = false;	// (could not be made once: not tried again; the timer then reads 0 as before)
+			if (!profileFlush && !noFence && FAILED(share->CreateSharedFence(0, &profileFlush))) { profileFlush = nullptr; noFence = true; }
+			if (profileFlush) share->SignalShared(profileFlush, ++profileFlushValue);
+		}
+		share->WaitShared(outputReady, n);
+		if (timed) timerCollect.End();
+		for (const PendingCopy& copy : pendingOut) {
+			const RECT used = { 0, 0, (LONG)(copy.width ? copy.width : imageSizes[copy.image].first),
+				(LONG)(copy.height ? copy.height : imageSizes[copy.image].second) };
+			share->CopyFromShared(copy.target, 0, 0, images[copy.image], &used);
+		}
+		pendingOut.clear();
+	}
+}
+
+bool RtCore::SubmitEarly(IDirect3DDevice9* Device, const User* user) {
+	Core& c = TheCore;
+	if (!EarlyPtWanted()) return false;
+	auto refuse = [&](const char* why) { c.earlyRefused++; c.earlyRefusal = why; return false; };
+	auto logEvery300 = [&]() {
+		if ((c.earlySubmitted + c.earlyRefused) < 300) return;
+		// (2026-11-11) + riders a submit (RT fog visibility outdoors: 1.00 there), frames where Frame still exchanged after an early submit
+		// (Q1's fix: 0 of N), and which place collected the open submits (show = the path tracer's CollectBeforeShow; the rest are safety nets)
+		const UInt32* at = c.earlyCollectedAt;
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT early (NVR_RT_EARLY_PT): %u frames submitted early, %u refused (last: %s); signal -> collect %.3f ms avg CPU "
+			"(%u collected); riders %.2f a submit; second exchange in %u of %u early frames (last by: %s); collected at: show %u, Exchange %u, Frame %u, "
+			"SubmitEarly %u, dropped by Stop %u", c.earlySubmitted, c.earlyRefused, c.earlyRefusal, c.earlyCollected ? c.earlyOverlapMs / c.earlyCollected : 0.0,
+			c.earlyCollected, c.earlySubmitted ? (double)c.earlyRidden / c.earlySubmitted : 0.0, c.earlySecond, c.earlySubmitted, c.earlySecondBy,
+			at[Core::kAtShow], at[Core::kAtExchange], at[Core::kAtFrame], at[Core::kAtSubmit], at[Core::kAtStop]);
+		c.earlySubmitted = c.earlyRefused = c.earlyCollected = 0;
+		c.earlyOverlapMs = 0.0;
+		c.earlyRidden = c.earlySecond = 0;
+		c.earlySecondBy = "none";
+		for (UInt32& v : c.earlyCollectedAt) v = 0;
+	};
+	if (c.pendingN) c.CollectEarly(Device, Core::kAtSubmit);	// one frame in flight (a frame without the show pass left it open)
+	bool ok = false;
+	if (!user) refuse("no user");
+	// (unlike ExchangeEarly, no refusal outdoors with Grass on: Core::AddGrass takes only THIS frame's notes, which the world's draws have not
+	// made yet, so an early frame's scene has no grass (last frame's notes are cleared, not used: their geometry may be gone by now))
+	else if (!c.Ready()) refuse("helper not ready (starting, off, or the screen size changed)");
+	else if (c.Out(*user) || !user->Wants || !user->Wants()) refuse("the user does not trace this frame");
+	else if (c.EarlyThisFrame(user->Name)) refuse("already submitted this frame");
+	else {
+		// The user's Record runs now, before the world's first draw: whatever it reads from the frame's draws is last frame's (the ManyLamps
+		// lamp list, built at the first world draw), and it must take no G-buffer input (the path tracer: as with PTPrimary false).
+		c.submitOnly = true;
+		c.earlyRiders.clear();	// UNOFFICIAL 2026-11-11 (Q1) Exchange fills it with this submit's riders
+		c.earlyOwnPasses = 0;
+		const UInt64 before = c.frame;
+		c.Exchange(Device, user);
+		c.submitOnly = false;
+		// (2026-11-11) the user's OWN passes decide, not the record's: a record holding only a rider's pass is not the user's early frame
+		const bool recorded = c.earlyOwnPasses > 0;
+		if (c.frame == before) { c.earlyRiders.clear(); refuse("helper behind (ring slot not free)"); }	// Exchange returned before signalling: nothing pending
+		else if (!recorded) {
+			// signalled with no passes (the user's AddPass refused): paired now, as Exchange would, so nothing is left pending (not an
+			// overlap sample)
+			const UInt32 collected = c.earlyCollected;
+			const double overlap = c.earlyOverlapMs;
+			c.CollectEarly(Device);
+			c.earlyCollected = collected;
+			c.earlyOverlapMs = overlap;
+			// (2026-11-11 Q1) riders that went with it were traced and copied just now: still this frame's, so Frame does not trace them again
+			// (earlyName stays null: the user itself records at Frame as before)
+			c.earlyName = nullptr;
+			c.earlyFrame = c.earlyRiders.empty() ? c.earlyFrame : TheFrameRateManager->FrameNumber + 1;
+			refuse("the user recorded no pass");
+		}
+		else {
+			c.earlyName = user->Name;
+			c.earlyFrame = TheFrameRateManager->FrameNumber + 1;
+			c.earlySubmitted++;
+			c.earlyRidden += (UInt32)c.earlyRiders.size();
+			ok = true;
+		}
+	}
+	logEvery300();
+	return ok;
+}
+
+bool RtCore::EarlyPending() { return TheCore.pendingN != 0; }
+void RtCore::CollectEarly(IDirect3DDevice9* Device) { if (TheCore.pendingN) TheCore.CollectEarly(Device, Core::kAtShow); }	// (only caller: RtPathTrace::CollectBeforeShow)
+bool RtCore::SubmittedEarlyThisFrame(const User* user) { return user && TheCore.EarlyThisFrame(user->Name); }
 
 bool RtCore::Running() { return TheCore.state == Core::Running; }
 bool RtCore::OthersWant(const char* Name) {	// UNOFFICIAL 2026-11-07 (ptaaa-fog; RtCore.h)

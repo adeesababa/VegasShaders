@@ -1,6 +1,7 @@
 #pragma once
 #include "PassSums.h"
 #include "PbrPop.h"
+#include "BeatSeries.h"	// UNOFFICIAL 2026-11-11 the beat detector's per-frame series
 
 // UNOFFICIAL 2026-10-21 FoldHighlights ([Shaders.PBR.Main] FoldHighlights: compiled in at startup, live while compiled; ObjectTemplate.hlsl
 // NVR_FOLD; bench\deep-roadmap\evidence\pbrtiles\LOG.md).
@@ -118,7 +119,7 @@ namespace FoldHighlights {
 		if (PassSums::KindOf(pass->passEnum) != PassSums::Highlights) return false;
 		const UInt8* state = Slot(pass->geometry, false);
 		if (!state || *state != 1) return false;
-		Skipped++;
+		Skipped++; BeatSeries::Add(BeatSeries::HighlightsSkipped);
 		return true;
 	}
 
@@ -141,7 +142,7 @@ namespace FoldHighlights {
 			UInt8* state = Slot(geometry, true);
 			if (!state) return;	// table full this frame: drawn as before
 			*state = 1;
-			Folded++;
+			Folded++; BeatSeries::Add(BeatSeries::PassesFolded);
 		}
 		else {
 			UInt8* state = Slot(geometry, false);
@@ -162,7 +163,7 @@ namespace FoldHighlights {
 				device->GetSamplerState(0, type, &value);
 				TheRenderManager->SetSamplerState(kBaseStage, type, value);
 			}
-			LampsFolded++;
+			LampsFolded++; BeatSeries::Add(BeatSeries::PassesFolded);
 		}
 		fold = 1.0f;
 		vertexColor = (property->ulFlags[1] & BSShaderProperty::Vertex_Colors) ? 1.0f : 0.0f;

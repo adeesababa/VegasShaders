@@ -125,7 +125,10 @@ namespace {
 namespace RtFogVisibility {
 	void Register() {
 		shader = RtCore::AddShader("RtFogVisibility");
-		RtCore::AddUser({ kUserName, Wants, Setup, Record, 0, 2 });	// Order 2: set up after the others (the first left out when the images do not fit)
+		// Order 2: set up after the others (the first left out when the images do not fit). UNOFFICIAL 2026-11-11 RidesEarly: with
+		// NVR_RT_EARLY_PT its Record goes with the path tracer's world-start submit (it copies nothing in: camera, sun, settings only), so
+		// outdoors the frame needs no second exchange; its copy out lands in CollectEarly, before the volumetric light's grid reads it
+		RtCore::AddUser({ kUserName, Wants, Setup, Record, 0, 2, true });
 	}
 
 	D3DXVECTOR4 Constant(float GridDistance) {

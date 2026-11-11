@@ -186,6 +186,16 @@ bool TAAEffect::UpscaledThisFrame() {
 	return taa && (taa->Up.Upscaled || taa->Up.Deferred);	// UNOFFICIAL 2026-10-27 v2: also while the frame waits for its upscale
 }
 
+// UNOFFICIAL 2026-11-11 (TAA.h; RtLampShadows::Record before the world)
+bool TAAEffect::WorldDrawnSmall(UINT& renderWidth, UINT& renderHeight, D3DXVECTOR2& jitterUV) {
+	TAAEffect* taa = TheShaderManager ? TheShaderManager->Effects.TAA : nullptr;
+	if (!taa || !taa->Up.Active || !taa->Up.RenderWidth || !taa->Up.RenderHeight) return false;
+	renderWidth = taa->Up.RenderWidth;
+	renderHeight = taa->Up.RenderHeight;
+	jitterUV = taa->Up.Jittered ? D3DXVECTOR2(taa->Up.JitterX / (float)taa->Up.RenderWidth, -taa->Up.JitterY / (float)taa->Up.RenderHeight) : D3DXVECTOR2(0.0f, 0.0f);
+	return true;
+}
+
 void TAAEffect::NoteWorldDraw(bool firstPerson) {
 	TAAEffect* taa = TheShaderManager ? TheShaderManager->Effects.TAA : nullptr;
 	// UNOFFICIAL 2026-10-27 RenderScale v2: first-person passes while the frame waits for its upscale (the weapon into the same rect).

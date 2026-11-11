@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -24,6 +26,8 @@ namespace ShaderPrecompile {
 		ID3DXBuffer* SourceBuffer = nullptr;
 		ID3DXBuffer* ShaderBuffer = nullptr;
 		bool Preprocessed_ok = false;
+		double CompileMs = -1.0;	// UNOFFICIAL 2026-11-11 the compile's milliseconds (-1: a cache hit or no compile); read only once Done
+		bool CompileFailed = false;
 		std::atomic<bool> Done{ false };
 		bool Taken = false;
 	};
@@ -55,7 +59,8 @@ namespace ShaderPrecompile {
 		}
 		if (errors) { errors->Release(); errors = nullptr; }
 		job->Preprocessed_ok = true;
-		const bool fresh = ShaderProgram::CheckPreprocessResult(job->Preprocessed.c_str(), job->SourceBuffer);
+		bool fresh = ShaderProgram::CheckPreprocessResult(job->Preprocessed.c_str(), job->SourceBuffer);
+		if (!fresh) fresh = ShaderProgram::SeedFromShipped(job->Preprocessed.c_str(), job->Compiled.c_str(), ShaderProgram::PortableSource(job->SourceBuffer));	// UNOFFICIAL 2026-11-10 shipped cache
 		if (fresh) {
 			FILE* f = nullptr;
 			if (!fopen_s(&f, job->Compiled.c_str(), "rb") && f) {
@@ -70,6 +75,7 @@ namespace ShaderPrecompile {
 		}
 		const char* profile = strstr(job->Name.c_str(), ".vso") ? "vs_3_0" : "ps_3_0";
 		ID3DXConstantTable* table = nullptr;
+		const auto compileStart = std::chrono::steady_clock::now();	// UNOFFICIAL 2026-11-11 (LogCompileTimes)
 		D3DXCompileShader((const char*)job->SourceBuffer->GetBufferPointer(), job->SourceBuffer->GetBufferSize(), NULL, NULL, "main",
 			profile, NULL, &job->ShaderBuffer, &errors, &table);
 		// UNOFFICIAL 2026-10-29: out of temp registers (X4505): again with PREFER_FLOW_CONTROL, as ShaderRecord::LoadShader (see there)
@@ -81,6 +87,8 @@ namespace ShaderPrecompile {
 				profile, D3DXSHADER_PREFER_FLOW_CONTROL, &job->ShaderBuffer, &errors, &table);
 		}
 		if (table) table->Release();
+		job->CompileMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - compileStart).count();
+		job->CompileFailed = !job->ShaderBuffer;
 		if (errors) { job->Log += (char*)errors->GetBufferPointer(); errors->Release(); }
 		if (job->ShaderBuffer) {
 			FILE* f = nullptr;
@@ -142,7 +150,7 @@ namespace ShaderPrecompile {
 		static D3DXMACRO exteriorFit2[] = { { "INTERIOR_SHADOWS", "1" }, { "POINT_SHADOW_RT_ONLY", "1" }, { "SKIN_PT_LAMPS", "1" }, { NULL, NULL } };
 		auto addExteriorLamps = [&](const char* name, const ShaderTemplate& tmpl) {
 			const bool skin = tmpl.Name && strstr(tmpl.Name, "SkinTemplate") == tmpl.Name;
-			static const char* const folders[3] = { "ExteriorLamps\\", "ExteriorLamps\Fit1\\", "ExteriorLamps\Fit2\\" };
+			static const char* const folders[3] = { "ExteriorLamps\\", "ExteriorLamps\\Fit1\\", "ExteriorLamps\\Fit2\\" };	// (2026-11-11 BUG FIX: "\F" is no escape, so these were "ExteriorLampsFit1\\": the records went into folders nothing reads, and the two levels compiled again on the main thread, 5-10 s each on a cold start. ShaderManager.cpp reads "ExteriorLamps\Fit1\\".)
 			const D3DXMACRO* const sets[3] = { exteriorLamps, exteriorFit1, exteriorFit2 };
 			for (int level = 0; level < (skin ? 3 : 1); level++) {
 				const size_t before = Jobs.size();
@@ -228,5 +236,35 @@ namespace ShaderPrecompile {
 			Logger::Log("UNOFFICIAL ParallelShaderCompile: all %u taken, %.1f s after the start.", (unsigned)Jobs.size(), ((double)GetTickCount64() - StartTime) / 1000.0);
 		}
 		return true;
+	}
+
+	// UNOFFICIAL 2026-11-11 (docs/next/SHADER-COMPILE-TIMES-2026-11-11.md) log only: the start's game-shader compiles, slowest first. MainCompiles:
+	// ShaderRecord::LoadShader's own compiles (main thread only). LogCompileTimes: once, from ImGuiManager::Initialize (main thread); a job
+	// is read only once Done, as Take does.
+	inline std::vector<std::pair<double, std::string>> MainCompiles;
+	inline void LogCompileTimes() {
+		static bool logged = false;
+		if (logged) return;
+		logged = true;
+		std::vector<std::pair<double, std::string>> all;
+		double workerMs = 0.0, mainMs = 0.0;
+		unsigned workerCount = 0, running = 0;
+		for (Job* job : Jobs) {
+			if (!job->Done) { running++; continue; }
+			if (job->CompileMs < 0.0) continue;
+			workerMs += job->CompileMs; workerCount++;
+			all.emplace_back(job->CompileMs, job->Compiled + (job->CompileFailed ? " (worker, FAILED)" : " (worker)"));
+		}
+		for (const auto& c : MainCompiles) { mainMs += c.first; all.emplace_back(c.first, c.second + " (main thread)"); }
+		std::sort(all.begin(), all.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+		std::string top;
+		for (size_t i = 0; i < all.size() && i < 15; i++) {
+			const size_t at = all[i].second.rfind("Cache\\");
+			char ms[32]; sprintf_s(ms, " %.0f ms", all[i].first);
+			top += (i ? ", " : "") + (at == std::string::npos ? all[i].second : all[i].second.substr(at + 6)) + ms;
+		}
+		Logger::Log("UNOFFICIAL compile times: %u compiled on the worker threads (%.1f s of thread time), %u on the main thread (%.1f s, the start "
+			"waited for all of it), %u worker jobs still running; slowest: %s", workerCount, workerMs / 1000.0, (unsigned)MainCompiles.size(),
+			mainMs / 1000.0, running, top.empty() ? "(nothing compiled)" : top.c_str());
 	}
 }

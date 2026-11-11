@@ -75,6 +75,11 @@ public:
 	static bool			IsWorldViewport(const D3DVIEWPORT9& port);
 	static bool			UpscaledBeforeEffects();	// UNOFFICIAL 2026-10-28: upscaled already (LowResEffects off): the effects see the screen, not the rect
 	static bool			UpscaledThisFrame();		// this frame's world was drawn at the lower resolution and upscaled (TAA's resolve skips)
+	// UNOFFICIAL 2026-11-11 ([Shaders.ShadowsInteriors.RT] FollowRenderScale): true from BeginJitter to the end of the frame's first world
+	// scene while that scene is drawn at the lower internal resolution (Up.Active): its render size, and its jitter as a screen-uv offset
+	// (what LowResJitterUV gives once the frame waits for its upscale; a pixel of the small frame lies on the unjittered ray through
+	// uv + this). RenderRect is not on yet at that point (it begins with the effects). False: the outputs are untouched.
+	static bool			WorldDrawnSmall(UINT& renderWidth, UINT& renderHeight, D3DXVECTOR2& jitterUV);
 	static void			NoteWorldDraw(bool firstPerson = false);	// RenderPassStandard/SkinnedHook, world (and v2: first-person) passes: counts which viewport they drew with (a check)
 	static D3DXVECTOR4	RenderScaleConstant;		// TESR_RenderScale: xy = render size / screen size while the low-resolution world draws, else 1
 	// UNOFFICIAL 2026-10-28: in an FSR / DLSS LowResEffects frame whose world was jittered, the jitter as a screen-uv offset (a pixel of the

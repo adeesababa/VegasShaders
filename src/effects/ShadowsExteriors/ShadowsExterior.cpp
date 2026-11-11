@@ -602,6 +602,10 @@ void ShadowsExteriorEffect::UpdateSettings() {
 		forward.LampModelShadows = ShadowSettingI(section, "LampModelShadows") != 0;
 		forward.LampModelDistance = std::clamp(ShadowSettingF(section, "LampModelDistance"), 0.0f, 512.0f);
 		LampFixtures::OwnLightDistance = std::clamp(ShadowSettingF(section, "LampModelOwnDistance"), -1.0f, 128.0f);
+		// UNOFFICIAL SkipOwnFixture (2026-11-11): switched live, the cell's fixtures are listed (or dropped) at the next frame
+		forward.SkipOwnFixture = ShadowSettingI(section, "SkipOwnFixture") != 0;
+		forward.OwnFixtureDistance = std::clamp(ShadowSettingF(section, "OwnFixtureDistance"), 0.0f, 160.0f);
+		if (LampFixtures::WantFixtures != forward.SkipOwnFixture) { LampFixtures::WantFixtures = forward.SkipOwnFixture; LampFixtures::GlowListed = -1.0e9; }
 		{	// UNOFFICIAL NoShadowLampModels (2026-10-27): the whole text (GetSettingS cuts a string at 79 characters, as ClothWind reads its lists)
 			SettingManager::Configuration::ConfigNode node;
 			LampFixtures::SetNoShadowWords(TheSettingManager->Config.FillNode(&node, section, "NoShadowLampModels") ?

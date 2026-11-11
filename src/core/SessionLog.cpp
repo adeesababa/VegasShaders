@@ -749,6 +749,20 @@ void SessionLog::OnDevice(IDirect3DDevice9* device) {
 		present.BackBufferWidth, present.BackBufferHeight, mode, (unsigned)present.BackBufferFormat, (unsigned)present.MultiSampleType,
 		present.PresentationInterval == D3DPRESENT_INTERVAL_IMMEDIATE ? "immediate (no vsync)" : present.PresentationInterval == D3DPRESENT_INTERVAL_ONE ? "1 (vsync)" : "other",
 		present.FullScreen_RefreshRateInHz ? present.FullScreen_RefreshRateInHz : desktop.RefreshRate, desktop.Width, desktop.Height, desktop.RefreshRate);
+	{	// UNOFFICIAL 2026-11-11: the swap chain as it is (a period-3 picture beat is open: a rotation over the chain's buffers is one suspect)
+		static const char* const effects[] = { "?", "DISCARD", "FLIP", "COPY", "OVERLAY", "FLIPEX" };
+		const unsigned effect = (unsigned)present.SwapEffect;
+		IDirect3DSurface9* back = nullptr; IDirect3DSurface9* depth = nullptr;
+		D3DSURFACE_DESC b = {}, z = {};
+		if (device && SUCCEEDED(device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &back)) && back) { back->GetDesc(&b); back->Release(); }
+		if (device && SUCCEEDED(device->GetDepthStencilSurface(&depth)) && depth) { depth->GetDesc(&z); depth->Release(); }
+		Logger::Log("SESSION swap chain (as the device reports it): %u back buffer%s, swap effect %s (%u), multisample %u quality %u, flags 0x%X, auto depth-stencil %s format %u | "
+			"back buffer surface %ux%u format %u multisample %u quality %u | depth-stencil surface %ux%u format %u multisample %u quality %u",
+			present.BackBufferCount, present.BackBufferCount == 1 ? "" : "s", effect < 6 ? effects[effect] : "?", effect, (unsigned)present.MultiSampleType,
+			(unsigned)present.MultiSampleQuality, (unsigned)present.Flags, present.EnableAutoDepthStencil ? "yes" : "no", (unsigned)present.AutoDepthStencilFormat,
+			b.Width, b.Height, (unsigned)b.Format, (unsigned)b.MultiSampleType, (unsigned)b.MultiSampleQuality,
+			z.Width, z.Height, (unsigned)z.Format, (unsigned)z.MultiSampleType, (unsigned)z.MultiSampleQuality);
+	}
 	SettingManager* s = TheSettingManager;
 	Logger::Log("SESSION anti-aliasing / upscaling: TAA %s, FSR %s (version %d, RenderScale %.2f), DLSS %s (RenderScale %.2f, Ray Reconstruction %s), SMAA %s",
 		s->GetSettingI("Shaders.TAA.Status", "Enabled") ? "on" : "off", s->GetSettingI("Shaders.TAA.FSR", "Enabled") ? "on" : "off",

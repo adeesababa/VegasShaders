@@ -53,6 +53,10 @@ public:
 	static bool				FileExists(const char* FilePath);
 	static bool				CheckPreprocessResult(const char* CachedPath, ID3DXBuffer* Source);
 	static std::string		PortableSource(ID3DXBuffer* Source);
+	// UNOFFICIAL 2026-11-10 shipped shader cache (ShaderRecord.cpp): a stale or missing cache entry is filled from the release's own
+	// read-only copy (...\CacheShipped\) when that one was made from exactly this source. True = the cache entry is now fresh.
+	static bool				SeedFromShipped(const char* PreprocessedPath, const char* CompiledPath, const std::string& Text);
+	static long				ShippedSeeds();
 
 	// Drops the cached IDirect3DTexture9* for a named sampler so that SetCT re-resolves it
 	// on the next draw. MUST be called on every consumer of a texture that is released and
@@ -80,6 +84,7 @@ public:
 	static void				BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overrides);	// UNOFFICIAL: the defines LoadShader compiles with
 	static ShaderRecord*	LoadShader(const char* Name, const char* SubPath, ShaderTemplate Template = ShaderTemplate{},
 		const char* CacheSubPath = nullptr, const D3DXMACRO* Overrides = nullptr);
+	static void				LogCompileTimes();	// UNOFFICIAL 2026-11-11: once, the start's slowest game-shader compiles (ShaderPrecompile.h; log only)
 
 	const char*				Name;
 	bool					HasRenderedBuffer, HasDepthBuffer;

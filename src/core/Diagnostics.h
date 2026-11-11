@@ -42,6 +42,9 @@ class EffectRecord;
 namespace Diagnostics {
 	// NewVegas/Hooks/Render.cpp: the finished picture before the HUD, once a rendered frame (after the screenshot key)
 	void OnFinalPicture(IDirect3DDevice9* device, IDirect3DSurface9* picture);
+	// UNOFFICIAL 2026-11-11: at the start of the world scene (Render.cpp): one "SESSION world target" line the first time, and again when
+	// the target's or the depth buffer's size / format / multisampling changes (at most 8 lines). Reads two surface descriptions.
+	void WorldTargetNote(IDirect3DDevice9* device);
 	// SessionLog's HEARTBEAT (every 60 s in game): the minute's effect counts, the detector's counts and cost, cache and failure counts
 	void Heartbeat();
 	// UNOFFICIAL 2026-11-01 stage probes (above). StageAfterEffect: after every frame effect's Render (PixelInspector::AfterFrame's call

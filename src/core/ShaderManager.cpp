@@ -7,6 +7,7 @@
 #include "AlphaHash.h"	// UNOFFICIAL 2026-11-03 SmoothCutouts (TESR_AlphaHash)
 #include "Diagnostics.h"	// UNOFFICIAL 2026-11-01 the report burst's VL stages (Diagnostics::VLCapturing)
 #include "LampVisibility.h"	// UNOFFICIAL 2026-10-30 VisibleRanking
+#include "BeatSeries.h"	// UNOFFICIAL 2026-11-11 the beat detector's per-frame series
 #include "FlickerWatch.h"	// UNOFFICIAL 2026-10-23 test only
 #include "GpuProfiler.h"
 #include "HiZ.h"	// UNOFFICIAL 2026-10-26 (deep/fork-hiz)
@@ -1047,6 +1048,7 @@ void ShaderManager::GetNearbyLights(ShadowSceneLight* ShadowLightsList[], NiPoin
 	const float invisibleStrength = indoorsForward ? lampCfg->Forward.InvisibleLightShadowStrength : 1.0f;
 	const bool classifyLamps = indoorsForward && (invisibleStrength < 1.0f || lampCfg->Forward.InvisibleLightSize > 0.0f ||
 		!lampCfg->Forward.LampModelShadows || lampCfg->Forward.InvisibleShadowFromLamp > 0.0f || !LampFixtures::NoShadowWords.empty() || logLamps ||
+		lampCfg->Forward.SkipOwnFixture ||	// UNOFFICIAL 2026-11-11 (its fixture list)
 		(lampCfg->Forward.ShadowClusterEnabled && lampCfg->Forward.ShadowClusterInvisibleOnly));	// (they need the cell's lamps listed)
 	if (classifyLamps) LampFixtures::Update(Player->parentCell, logLamps);
 	LampFixtures::LogModels = logLamps;
@@ -1078,6 +1080,12 @@ void ShaderManager::GetNearbyLights(ShadowSceneLight* ShadowLightsList[], NiPoin
 		// Culled, or too dim to matter (lights placed with a near-black colour): skipped.
 		const bool isCulled = lamp->m_flags & NiAVObject::NiFlags::APP_CULLED;
 		const bool isLit = (lamp->Diff.r + lamp->Diff.g + lamp->Diff.b) * lamp->Dimmer > 5.0 / 255.0;
+		if (BeatSeries::On) {	// UNOFFICIAL 2026-11-11 BeatSeries: every lamp's on / off state for the main view this frame (read only)
+			const unsigned mask = node->data->bIsEnabled;
+			BeatSeries::Mix(BeatSeries::LampStateHash, BeatSeries::Item((uintptr_t)node->data, mask, (isCulled ? 1u : 0u) | (isLit ? 2u : 0u)));
+			if (mask == 0xFF) BeatSeries::Add(BeatSeries::LampsOffForView);
+			if (isCulled || !isLit) BeatSeries::Add(BeatSeries::LampsCulledOrDark);
+		}
 		if (isCulled || !isLit) {
 			if (GpuTimer::Enabled && ShadowHold::Continuous(node->data)) (isCulled ? ShadowHold::StatCulled : ShadowHold::StatDimmed)++;	// UNOFFICIAL 2026-10-30
 			note(node->data, isCulled ? 1 : 2, lamp->GetDistance(&Player->pos), 0.0f, lamp);
@@ -1197,6 +1205,7 @@ void ShaderManager::GetNearbyLights(ShadowSceneLight* ShadowLightsList[], NiPoin
 	// ShadowClusterDistance share one shadow. The brightest lamp of each group keeps its shadow; the others light exactly as
 	// before but without a shadow of their own, so a room of many bulbs no longer runs out of shadow slots. Off: as before.
 	std::vector<const void*> clusterMembers;
+	std::vector<const void*> clusterLeaders;	// UNOFFICIAL 2026-11-11 BeatSeries: clusterMembers[i] shares clusterLeaders[i]'s shadow (diagnostic only)
 	if (lampCfg->Forward.ShadowClusterEnabled && !TheShaderManager->GameState.isExterior && lampCfg->Forward.ShadowClusterDistance > 0.0f) {
 		struct Cand { const void* key; NiPointLight* light; float brightness; };
 		std::vector<Cand> cands;
@@ -1238,7 +1247,7 @@ void ShaderManager::GetNearbyLights(ShadowSceneLight* ShadowLightsList[], NiPoin
 				if (taken[m] || !mayJoin[m]) continue;
 				const NiPoint3& mp = cands[m].light->m_worldTransform.pos;
 				const float dx = mp.x - rp.x, dy = mp.y - rp.y, dz = mp.z - rp.z;
-				if (dx * dx + dy * dy + dz * dz < d2max) { taken[m] = true; clusterMembers.push_back(cands[m].key); }
+				if (dx * dx + dy * dy + dz * dz < d2max) { taken[m] = true; clusterMembers.push_back(cands[m].key); clusterLeaders.push_back(cands[r].key); }
 			}
 		}
 		static int logCountdown = 0;
@@ -1247,6 +1256,34 @@ void ShaderManager::GetNearbyLights(ShadowSceneLight* ShadowLightsList[], NiPoin
 			Logger::Log("ShadowCluster: %u candidate lamps, %u share a brighter neighbour's shadow (%u groups), distance %.0f",
 				(unsigned)cands.size(), (unsigned)clusterMembers.size(), (unsigned)(cands.size() - clusterMembers.size()), lampCfg->Forward.ShadowClusterDistance);
 		}
+	}
+
+	// UNOFFICIAL 2026-11-11 BeatSeries: the grouping as numbers for the beat detector, and a journal line when a lamp's group lamp is
+	// not last frame's (a flicker lamp crossing its neighbour's brightness, or a lamp switched off for the view, moves a shadow from
+	// one lamp to another with no slot change). Read only: the grouping above is used exactly as before.
+	if (BeatSeries::On) {
+		static std::vector<const void*> lastMembers, lastLeaders;
+		unsigned flips = 0;
+		int journalled = 0;
+		for (size_t m = 0; m < clusterMembers.size(); m++) {
+			BeatSeries::Mix(BeatSeries::ClusterHash, BeatSeries::Item((uintptr_t)clusterMembers[m], (unsigned)(uintptr_t)clusterLeaders[m]));
+			const void* before = nullptr;
+			for (size_t k = 0; k < lastMembers.size(); k++) if (lastMembers[k] == clusterMembers[m]) { before = lastLeaders[k]; break; }
+			if (before == clusterLeaders[m]) continue;
+			flips++;
+			if (journalled++ < 4) {
+				if (before) FRAME_JOURNAL("lamp shadow group: lamp %p now shares lamp %p's shadow (was lamp %p's)", clusterMembers[m], clusterLeaders[m], before);
+				else FRAME_JOURNAL("lamp shadow group: lamp %p now shares lamp %p's shadow (had its own or none)", clusterMembers[m], clusterLeaders[m]);
+			}
+		}
+		for (size_t k = 0; k < lastMembers.size(); k++) {
+			if (std::find(clusterMembers.begin(), clusterMembers.end(), lastMembers[k]) != clusterMembers.end()) continue;
+			flips++;
+			if (journalled++ < 4) FRAME_JOURNAL("lamp shadow group: lamp %p left lamp %p's group (its own shadow again, or out of the ranking)", lastMembers[k], lastLeaders[k]);
+		}
+		BeatSeries::Set(BeatSeries::ClusterMembers, (unsigned)clusterMembers.size());
+		BeatSeries::Set(BeatSeries::ClusterFlips, flips);
+		lastMembers = clusterMembers; lastLeaders = clusterLeaders;
 	}
 
 	auto v = rankedLamps.begin();

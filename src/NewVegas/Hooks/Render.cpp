@@ -49,6 +49,7 @@
 #include "../../core/NewGrass.h"	// UNOFFICIAL 2026-10-18 NewGrass: blade geometry in place of the early grass card draws (GrassFirst)
 #include "../../core/GrassShadows.h"	// UNOFFICIAL 2026-10-27 grass sun shadows: the early grass drawn again into the near sun shadow map (GrassFirst)
 #include "../../core/RtCore.h"	// UNOFFICIAL 2026-10-30 RT grass: each grass pass's tufts into the ray tracing scene (GrassFirst::NoteRtGrass)
+#include "../../core/RtPathTrace.h"	// UNOFFICIAL 2026-11-10 PT early kick (SubmitBeforeWorld)
 #include "../../effects/Grass/GpuGrass.h"	// UNOFFICIAL 2026-10-27 GPU grass (NVR DXVK 1.7-grass): strands placed and culled on the GPU from the early grass draws
 #include "../../core/HdrOutput.h"	// UNOFFICIAL 2026-10-26 HDR output (needs NVR DXVK 1.5-hdr)
 void HdrOutputNoteDesktop() { HdrOutput::NoteDesktop(); }	// UNOFFICIAL 2026-10-29: from NVSEPlugin_Load (see HdrOutput.h)
@@ -3600,6 +3601,7 @@ void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32
 	ClothWind::ForGeometry(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, false, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson);	// UNOFFICIAL cloth wind
 	PlantWind::ForGeometry(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, false, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson);	// UNOFFICIAL 2026-10-20 plant wind (cleaned by ClothWind::AfterDraw)
 	if (HiddenObjectCulling::Before(Pass, ShaderSplit::CurrentContext == ShaderSplit::World)) { ClothWind::AfterDraw(TheRenderManager->device); return; }	// UNOFFICIAL HiddenObjectCulling
+	if (ShaderSplit::CurrentContext == ShaderSplit::World) { BeatSeries::Add(BeatSeries::WorldPasses); if (HiddenObjectCulling::BoundLamp) BeatSeries::Add(BeatSeries::LampPasses); }	// UNOFFICIAL 2026-11-11 BeatSeries (the pass is drawn)
 	ReflectionProbe::OnObject(Pass, false);
 	MaterialRulesDraw::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL material rules
 	RmaosDraw::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL _rmaos maps
@@ -3688,6 +3690,7 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 	ClothWind::ForGeometry(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, false, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson);	// UNOFFICIAL cloth wind
 	PipboyFit::ForGeometry(((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson);	// UNOFFICIAL 2026-11-03 PipboyFit
 	if (HiddenObjectCulling::Before(Pass, ShaderSplit::CurrentContext == ShaderSplit::World)) { PipboyFit::AfterDraw(); ClothWind::AfterDraw(TheRenderManager->device); return; }	// UNOFFICIAL HiddenObjectCulling
+	if (ShaderSplit::CurrentContext == ShaderSplit::World) { BeatSeries::Add(BeatSeries::WorldPasses); if (HiddenObjectCulling::BoundLamp) BeatSeries::Add(BeatSeries::LampPasses); }	// UNOFFICIAL 2026-11-11 BeatSeries (the pass is drawn)
 	ReflectionProbe::OnObject(Pass, true);
 	MaterialRulesDraw::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL material rules
 	RmaosDraw::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL _rmaos maps
@@ -4013,12 +4016,17 @@ void __fastcall RenderWorldSceneGraphHook(Main* This, UInt32 edx, Sun* SkySun, U
 	if (FrameWorldCalls == 1) ShadowAtlas::WorldStart(TheRenderManager->device);	// UNOFFICIAL 2026-10-30 ShadowAtlas WorldStartConvert (test)
 	// UNOFFICIAL 2026-11-07 SameFrame RT lamp shadows: this frame's trace before the world's first draw (after the jitter: the rays use it)
 	if (FrameWorldCalls == 1) RtLampShadows::TraceBeforeWorld(TheRenderManager->device);
+	// UNOFFICIAL 2026-11-10 (PT early kick, env NVR_RT_EARLY_PT; a no-op without it) the path tracer's frame signalled now, collected before
+	// its show pass: the helper traces while the world draws. AFTER the lamps' ExchangeEarly: that one waits and collects anything open, so
+	// before it the submit would be collected at once; after it the submit reuses the scene it gathered.
+	if (FrameWorldCalls == 1) RtPathTrace::SubmitBeforeWorld(TheRenderManager->device);
 	{
 		// Game geometry drawn with NVR's replacement shaders, including per-object sun shadows.
 		static GpuTimer worldTimer("World scene (game)");
 		GpuProfileScope gpu(worldTimer, TheRenderManager->device);
 		ShaderSplit::BeginContext(ShaderSplit::World);
 		HiddenObjectCulling::BeginWorld();
+		Diagnostics::WorldTargetNote(TheRenderManager->device);	// UNOFFICIAL 2026-11-11: SESSION world target line (once, and when it changes)
 		GunFXSwitches::Update();
 		HandBlood::Update();	// UNOFFICIAL: blood on the first-person weapon and gloves (once a frame)
 		BarrelHaze::Reset();

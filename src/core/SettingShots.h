@@ -227,8 +227,11 @@ namespace SettingShots {
 				// (or, before the fix below, re-entered 117 times and crashed). player.moveto <a marker in the cell> works.
 				std::string head = rest.substr(start, rest.find_first_of(" 	", start) - start);
 				for (char& ch : head) ch = (char)tolower((unsigned char)ch);
-				if (head == "coc" || head == "cow" || head == "centeron") {
-					error = "line " + std::to_string(number) + ": coc/cow hang the game from a shot; use player.moveto <a reference in that cell>";
+				// 2026-11-11 (make-save lists: the test plugin's `# makesave` lists go to another cell): since 2026-10-20 the console
+				// commands run on the game's main loop (MainLoopSeen), where the player's own console runs them, so only the old
+				// render-hook path is refused. Unproven in game until the first make-save job: the lists keep long waits after it.
+				if ((head == "coc" || head == "cow" || head == "centeron") && !MainLoopSeen) {
+					error = "line " + std::to_string(number) + ": coc/cow hang the game from a shot's render hook (no main-loop message seen yet); use player.moveto <a reference in that cell>";
 					return false;
 				}
 				Change c; c.console = true; c.value = rest.substr(start);

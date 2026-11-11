@@ -43,6 +43,31 @@ in docs/next/FORK-RT-REFLECTIONS.md).
   read), `lastJitter` is kept with `lastView`. The RT denoiser's own reprojection is not shifted (not measured). Off: as before. Without
   TAA's Jitter the shift is 0. Wrong would look like the reflection drifting by a pixel each frame on a still camera with TAA on.
 
+## One helper round trip a frame: RideMainExchange, FollowRenderScale (2026-11-11; both default off, NOT yet run in a game)
+Cloud bench 029 (L4, 720p): RT reflections' helper pass costs 0.01-0.08 ms, but the effect made its own second exchange with the helper
+every frame ("Reflections RT (exchange)" 0.7-1.1 ms, beside the main "RT exchange: helper round trip" 1.1-2.6 ms).
+- **Why a second exchange**: the helper's inputs are RayGen's images (Rt.Dir, Rt.Ray), and RayGen ran in the Reflections step of the
+  chain, after RtCore::Frame, because its screen march reads the lit picture. With `RaysOnly` (default) the march is skipped; the rest
+  of RayGen reads the depth, normals, first-person depth / weapon mask, glass mask, TESR_MaterialBuffer, the ortho map and MaterialAware's
+  material buffer: all there before RtCore::Frame, except the material buffer, which CaptureMaterial fills at the chain's start.
+- **`[Shaders.Reflections.RT] RideMainExchange`**: `RtRideBeforeFrame` (EffectChain PreStep_RtCore, right before `RtCore::Frame`) runs
+  CaptureMaterial early (TESR_RenderedBuffer pointed at the game target's own texture for that pass; the chain's MaterialCapture step
+  then returns at once), draws RayGen (`RtRayGen`, RtTrace's first half) and arms a second core user, "RT reflections (main exchange)"
+  (Point 0, no Setup, added last so it never takes a pass from another effect). `RtCore::Frame` records it with the others; `RtTrace`
+  sees the frame rode and goes straight to Resolve. Same frame's data: no latency. Falls back to the old exchange (per frame) when:
+  RaysOnly off / an RT DebugView / SplitTest, the path tracer replacing the scene, the scene target not a single-level texture with
+  MaterialAware on, the main exchange's 8 passes full, the main exchange not run. Log: `Reflections: RideMainExchange: RayGen is drawn
+  before the frame's main RT exchange ...` or `... is on but not used now: <why>` (a line per change); with the F10 profile a count
+  line every 600 armed frames. Correct: the same picture as off, the "Reflections RT (exchange)" profiler line gone (no samples),
+  the helper log's "runs" per pass equal for ReflectionsRT* and the other passes. Wrong would look like: reflections on surfaces that
+  should not reflect / missing on mirrors (the early material capture read something else), or reflections lagging a frame.
+- **`FollowRenderScale`**: the trace, RayGen, Resolve, Temporal, the blurs and the composite have kept to the RenderScale rect since
+  2026-11-03 (the bench's own log: "RT traced in the RenderScale rect: 428x240 of 640x360"); what did not shrink is the round trip.
+  The key only makes the five image copies (Dir, Ray in; Hit, Shade, Bounce out) take the rect too. Log: `Reflections:
+  FollowRenderScale: the RT images are copied ... in the RenderScale rect only`. Still not in rect frames: the RT reflection denoiser
+  (its passes have no rect rules: reprojection, taps and history would need rectToScreen / screenToRect and a rect clamp in all seven
+  RtReflDenoise*.frag), MirrorJitter, weapon rays.
+
 ## MaterialAware: what owns the scene's alpha (2026-11-07, perf-mirrorfix)
 The per-pixel material (MaterialAware, core/ReflMaterial.h) lives in the world target's alpha: 2 + 0.25 x metal + 0.24 x roughness,
 written by the first pass of an object with an `_rmaos` map; [2, 3) reads as a material (CaptureMaterial, technique 7), anything else

@@ -237,7 +237,7 @@ namespace PointShadowForward {
 		// UNOFFICIAL 2026-10-30 ExteriorForward: outdoors too while the traced lamp shadows run (no cube maps there: LightPoints lamps,
 		// not the screen pass's 12; rtlamp-30: Novac's walkway lamps were not among the 12)
 		if (exterior) return CompiledIn && !Refused && !ExteriorRecords.empty() && RtLampShadows::ExteriorForwardOn() && RtCore::Running() &&
-			TheSettingManager->GetSettingI(RtLampShadows::kSection, "Live") != 0;
+			RtLampShadows::LiveNow();	// (2026-11-11: Enabled switched off while the game runs counts as Live false)
 		return CompiledIn && !Refused && TheShaderManager->Effects.ShadowsExteriors->Settings.Interiors.Forward.Enabled;
 	}
 	// UNOFFICIAL ExteriorLightPoints (2026-10-13): outdoors above 12, every slot up to it has a shadow, the screen-space pass
