@@ -3861,17 +3861,40 @@ static void RenderLutPicker(LUTEffect* lut, const char* label, const char* key, 
 	ImGui::SameLine();
 	const float arrowW = ImGui::GetFrameHeight();
 	const float nameW = ImMax(width - arrowW * 2.0f - ImGui::GetStyle().ItemSpacing.x * 2.0f, arrowW);
-	const float nameX = ImGui::GetCursorPosX();
-	ImGui::AlignTextToFramePadding();
-	ImGui::TextUnformatted(lut->LUTFiles[index].c_str());
-	ImGui::SameLine(0.0f, 0.0f);
-	ImGui::SetCursorPosX(nameX + nameW + ImGui::GetStyle().ItemSpacing.x);
+	// UNOFFICIAL 2026-11-11: the name is a drop-down list of every LUT file (with a filter box: LUT packs hold a hundred and more);
+	// the arrows still step to the neighbour, to flick through looks.
+	int pick = -1;
+	ImGui::SetNextItemWidth(nameW);
+	if (ImGui::BeginCombo("##list", lut->LUTFiles[index].c_str(), ImGuiComboFlags_HeightLarge)) {
+		static char filter[64] = "";
+		if (ImGui::IsWindowAppearing()) { filter[0] = 0; ImGui::SetKeyboardFocusHere(); }
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		ImGui::InputTextWithHint("##lutfilter", "Type to filter...", filter, sizeof(filter));
+		for (int i = 0; i < (int)lut->LUTFiles.size(); i++) {
+			const std::string& name = lut->LUTFiles[i];
+			if (filter[0]) {	// case-insensitive "contains"
+				bool hit = false;
+				const size_t n = strlen(filter);
+				for (size_t at = 0; at + n <= name.size() && !hit; at++) hit = _strnicmp(name.c_str() + at, filter, n) == 0;
+				if (!hit) continue;
+			}
+			const bool selected = i == index;
+			if (ImGui::Selectable(name.c_str(), selected)) pick = i;
+			if (selected && ImGui::IsWindowAppearing()) ImGui::SetScrollHereY(0.5f);
+		}
+		ImGui::EndCombo();
+	}
+	ImGui::SameLine();
 	if (ImGui::ArrowButton("##next", ImGuiDir_Right)) step = 1;
 	ImGui::EndGroup();
 	if (ImGui::IsItemHovered() && (gMenu.plusKey || gMenu.minusKey)) step = gMenu.plusKey ? 1 : -1;
 	if (MenuWidgets::ResetButton("~", changed, "Revert to value at session start"))
 		lut->LoadLUT(slot, atOpen.c_str());	// LoadLUT puts index and the texture in step (AssignLUTSlot)
-	if (step) {
+	if (pick >= 0 && pick != index) {
+		index = pick;
+		lut->LoadLUT(slot, lut->LUTFiles[index].c_str());
+	}
+	else if (step) {
 		const int count = (int)lut->LUTFiles.size();
 		index = ((index + step) % count + count) % count;
 		lut->LoadLUT(slot, lut->LUTFiles[index].c_str());

@@ -4,6 +4,7 @@
 #include "FrameWorker.h"	// UNOFFICIAL 2026-11-03 SkyOnWorker
 #include "Sm6Pass.h"	// UNOFFICIAL 2026-10-26 (deep/fork-sm6)
 #include "RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
+#include "DrawState.h"	// UNOFFICIAL 2026-11-11 SharedDrawState::OwnPass (the lamp registers' restore keeps off an effect's constants)
 #include "GpuDebug.h"	// UNOFFICIAL 2026-10-26: GpuDebugLabels (each effect is a named group in a capture)
 #include "PixelInspector.h"	// UNOFFICIAL 2026-10-26 (debugging tool)
 #include "Diagnostics.h"	// UNOFFICIAL 2026-11-01 the flash detector's self-test (SelfTestSkip)
@@ -471,6 +472,9 @@ void EffectRecord::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTar
 		return;
 	}
 	EffectStatus::Note(StatusSlot, Name, EffectStatus::Drawn);	// UNOFFICIAL 2026-11-01 (core/EffectStatus.h)
+	// UNOFFICIAL 2026-11-11 (the "black stain", core/DrawState.h): from here to the return every pixel-constant upload is this effect's
+	// (D3DX's, at BeginPass): ManyLamps / LandLamps must not put their lamp registers back over them.
+	SharedDrawState::OwnPass ownPass;
 
 	// UNOFFICIAL 2026-10-26 pixel inspector ([Main.Develop.PixelInspector]): when this effect has drawn, the picture after it (or its
 	// own target) is recorded at the inspected pixel. Off: one bool test at the end of the call.

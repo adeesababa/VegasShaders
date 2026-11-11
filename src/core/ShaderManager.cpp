@@ -1944,6 +1944,10 @@ void ShaderManager::RenderDepthAndNormals(IDirect3DSurface9* RenderTarget) {
 }
 
 void ShaderManager::RenderEffectsPreTonemapping(IDirect3DSurface9* RenderTarget) {
+	// UNOFFICIAL 2026-11-11 (the "black stain", core/DrawState.h): nothing below is one of the game's object draws, so no pixel-constant
+	// upload in here is "the game writing over the lamp registers": ManyLamps / LandLamps leave them alone (many effects draw their D3DX
+	// passes themselves, not through EffectRecord::Render).
+	SharedDrawState::OwnPass ownPass;
 	SkyProjection::Join();	// UNOFFICIAL 2026-11-03 SkyOnWorker: every effect below may read the sky's results (some copy them by name)
 	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction (core/Upscaler.h; off by default: nothing changes): once a frame, before anything below
 	// (the RT point first of all), last frame's RR result becomes what the RT effects' denoisers go by this frame (RayReconstructionWantsRaw),
@@ -2058,6 +2062,7 @@ static void LogActiveSwitches(bool force) {
 * The post-tonemap chain, once a frame (and before it the per-frame bookkeeping: session log, F10 profile, frame interval).
 */
 void ShaderManager::RenderEffects(IDirect3DSurface9* RenderTarget) {
+	SharedDrawState::OwnPass ownPass;	// UNOFFICIAL 2026-11-11 (as RenderEffectsPreTonemapping: the effects' constants are their own)
 	SkyProjection::Join();	// UNOFFICIAL 2026-11-03 SkyOnWorker (as RenderEffectsPreTonemapping)
 	VolumetricSmoke::FrameNumber++;   // the smoke is fetched once a frame (VolumetricSmoke::Fetch)
 	SessionLog::OnFrame();	// UNOFFICIAL 2026-11-01: heartbeat, cell / weather / loading lines, setting changes, the frame journal switch (SessionLog.h)
