@@ -724,6 +724,21 @@ PS_OUTPUT main(PS_INPUT pin) {
     // with tessellation the normal its evaluation shader passes on), before the layers' normal maps. Alpha 1 also with terrain blending's
     // Smooth fade (the land drawn blended over objects): the land's normal replaces what is there, with its depth.
     po.capturedNormal = CapturedNormalOut(pin.nrmO.xyz, camPos);
+    // UNOFFICIAL 2026-11-12 CapturedCoverage (Includes/CapturedNormals.hlsl; audit item 7): in terrain blending's Smooth fade the land is
+    // drawn blended over the objects with alpha = its share (terrainKeep). The land's records replace the object's only where the land is
+    // half or more of the pixel; below, alpha 0 = the object's records stay (with the object's distance). A land draw that is not blended,
+    // and alpha 1 (all the land away from the seams): x 1, as before. Only with terrain blending compiled in (without it the alpha is 1),
+    // and NOT in the 6- and 7-layer land shaders: with the blend they have no temp register left (fxc, PREFER_FLOW_CONTROL: X4505 with
+    // any form of this, 2026-11-12; ShaderRecord's note of 2026-10-29 on the same shaders), and a land shader that fails to compile is
+    // the game's own land. Their seam strips record the land over the whole strip, as before.
+    #if CAPTURED_NORMALS_ON >= 3 && TERRAIN_BLEND_ACTIVE && TEX_COUNT <= 5
+    {
+        const float capKeep = CapturedCoverage(po.finalCol.a);
+        po.capturedPad1.a *= capKeep;
+        po.capturedPad2.a *= capKeep;
+        po.capturedNormal.a *= capKeep;
+    }
+    #endif
 #endif
 
     return po;

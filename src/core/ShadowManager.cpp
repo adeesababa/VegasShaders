@@ -1303,6 +1303,7 @@ void ShadowManager::RenderShadowSpotlight(NiSpotLight** Lights, UInt32 LightInde
 	if (light == NULL || !light->CastShadows) return;
 
 	ShadowsExteriorEffect* shadows = TheShaderManager->Effects.ShadowsExteriors;
+	if (!shadows->Textures.ShadowSpotlightSurface[LightIndex] || !shadows->Textures.ShadowCubeMapDepthSurface) return;	// (2026-11-11: no map to draw into)
 	ShadowsExteriorEffect::InteriorsStruct* interiors = &shadows->Settings.Interiors;
 	IDirect3DDevice9* dev = TheRenderManager->device;
 	NiDX9RenderState* state = TheRenderManager->renderState;
@@ -1360,6 +1361,8 @@ void ShadowManager::RenderShadowSpotlight(NiSpotLight** Lights, UInt32 LightInde
 	D3DXMatrixLookAtRH(&view, &eye, &target, &up);
 	shadows->Constants.ShadowViewProj = view * proj;
 	TheShaderManager->SpotLightWorldToLightMatrix[LightIndex] = (shadows->Constants.ShadowViewProj);
+	// (UNOFFICIAL 2026-11-11) the frame this map and matrix belong to: FlashlightDeferred::ShadowMap hands the map out only in that frame
+	if (LightIndex == 0) TheShaderManager->Effects.Flashlight->ShadowMapFrame = (unsigned)TheFrameRateManager->FrameNumber;
 
 	dev->SetRenderTarget(0, shadows->Textures.ShadowSpotlightSurface[LightIndex]);
 	dev->SetDepthStencilSurface(shadows->Textures.ShadowCubeMapDepthSurface);
@@ -2316,8 +2319,14 @@ void ShadowManager::RenderShadowMaps() {
 	bool sunShadowsOn = exteriorCell && TheShaderManager->Effects.ShadowsExteriors->Enabled && extCfg->Enabled;
 	bool lampShadowsOn = !exteriorCell && TheShaderManager->Effects.ShadowsInteriors->Enabled;
 
+	// UNOFFICIAL 2026-11-11 (BUG FIX; a tester: "flashlight not casting shadows"): the flashlight's shadow map is drawn at the end of this
+	// function, but the early out below left before it whenever the cell's own shadows were off (indoors: the ShadowsInteriors effect off;
+	// outdoors: the sun shadows off and no ortho map wanted), so [Shaders.Flashlight.Deferred] Shadows did nothing there and the light pass
+	// read an old map through an old matrix. The flashlight's map is a reason to stay now (nearSpots[0]: the light is on, GetNearbyLights).
+	const FlashlightEffect* torch = TheShaderManager->Effects.Flashlight;
+	const bool flashlightMapOn = torch && torch->Enabled && torch->spotLightActive && torch->WantsShadowMap() && nearSpots[0];
 	// early out in case shadow rendering is not required
-	if (!sunShadowsOn && !lampShadowsOn && !TheShaderManager->orthoRequired && !TheShaderManager->orthoSkyRequired || !ShadowShadersLoaded) {
+	if (!sunShadowsOn && !lampShadowsOn && !flashlightMapOn && !TheShaderManager->orthoRequired && !TheShaderManager->orthoSkyRequired || !ShadowShadersLoaded) {
 		return;
 	}
 	if (!Player->parentCell) return;

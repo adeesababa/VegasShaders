@@ -3,6 +3,7 @@
 #include "../../core/TestTools.h"	// NVR_TEST_TOOLS (FogReferenceTest)
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
 #include "../../core/RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
+#include "../../core/RtFogVisibility.h"	// UNOFFICIAL 2026-11-12 LampHazeShadows (RtFogLamps)
 
 extern D3DXVECTOR4 NvrGameMultisample;	// UNOFFICIAL 2026-11-05 Hooks/Settings.cpp (TESR_GameMultisample: x samples, y shares made, z MsaaEdgeFix)
 
@@ -252,6 +253,12 @@ void VolumetricFogEffect::UpdateSettings(){
 		lampHazeAnisotropy = lampF("LampHazeAnisotropy", 0.3f, 0.0f, 0.9f);
 		lampHazeCore = lampF("LampHazeCore", 0.1f, 0.05f, 1.0f);
 		lampHazeMaxLamps = (int)lampF("LampHazeMaxLamps", 8.0f, 0.0f, (float)LampHazeMax);
+		// UNOFFICIAL 2026-11-12 LampHazeShadows (off by default, also for a toml without the key): the lamps' light in the air shadowed
+		// by the room (core\RtFogVisibility.h RtFogLamps). Cell is read by the tracer at the RT helper's start, the others every frame.
+		lampHazeShadows = TheSettingManager->Config.FillNode(&lampNode, "Shaders.VolumetricFog.Interiors", "LampHazeShadows") && lampNode.BoolValue;
+		lampHazeShadowCell = (int)lampF("LampHazeShadowCell", 8.0f, 4.0f, 32.0f);
+		lampHazeShadowSamples = (int)lampF("LampHazeShadowSamples", 4.0f, 1.0f, 8.0f);
+		lampHazeShadowTemporal = lampF("LampHazeShadowTemporal", 0.8f, 0.0f, 0.95f);
 	}
 
 	// Own section (not Main/Interiors-switched via SettingCategory), so it gets its own settings-UI
@@ -377,6 +384,7 @@ void VolumetricFogEffect::RegisterConstants(){
 */
 void VolumetricFogEffect::SetLampHaze(IDirect3DDevice9* Device) {
 	Constants.Lamps = D3DXVECTOR4(0.0f, 0.0f, lampHazeAnisotropy, lampHazeCore);
+	lampShadowTexture = nullptr;	// UNOFFICIAL 2026-11-12 LampHazeShadows (set below, only while a lamp carries a tile code)
 	if (!(lampHaze > 0.0f) || lampHazeMaxLamps <= 0 || TheShaderManager->GameState.isExterior || IsLegacy() || IsClassic()) return;
 	ShaderManager* sm = TheShaderManager;
 	const float radiusMult = (std::max)(sm->Effects.ShadowsExteriors->Settings.Interiors.LightRadiusMult, 0.01f);
@@ -403,6 +411,31 @@ void VolumetricFogEffect::SetLampHaze(IDirect3DDevice9* Device) {
 	std::sort(lamps, lamps + found, [](const Lamp& a, const Lamp& b) { return a.distance < b.distance; });
 	const int count = (std::min)(found, (std::min)(lampHazeMaxLamps, (int)LampHazeMax));
 	if (count <= 0) return;
+	// UNOFFICIAL 2026-11-12 LampHazeShadows: the frame's lamps to the RT core's rider (it traces them at the next frame's RT point), and
+	// each lamp's tile in its last trace into the colour's w (row 1 alpha; LampHazeLight reads the lamp's visibility along the view
+	// there). Off, or nothing traced lately (no RT GPU, the RT core not running, native D3D9): w stays 0 and the shader's branch is
+	// not taken, the fog exactly as before. A lamp the trace does not hold yet: -1, no light in the air for that frame.
+	if (lampHazeShadows) {
+		D3DXVECTOR4 world[LampHazeMax];
+		for (int i = 0; i < count; i++) world[i] = D3DXVECTOR4(lamps[i].pos.x + camera.x, lamps[i].pos.y + camera.y, lamps[i].pos.z + camera.z, lamps[i].pos.w);
+		RtFogLamps::Submit(world, count);
+		IDirect3DTexture9* tiles = gridTexture ? nullptr : RtFogLamps::Texture();	// (stage 11 is the grid's while it is bound: outdoors only)
+		if (tiles) {
+			for (int i = 0; i < count; i++) lamps[i].colour.w = RtFogLamps::Code(world[i]);
+			lampShadowTexture = tiles;
+		}
+		static bool shadowsLogged = false;
+		if (!shadowsLogged && tiles) {
+			shadowsLogged = true;
+			Logger::Log("UNOFFICIAL LampHazeShadows: the lamps' light in the indoor fog is shadowed by the traced visibility (%d lamp(s) this frame; stage 11).", count);
+		}
+		static bool waitingLogged = false;
+		if (!waitingLogged && !tiles) {
+			waitingLogged = true;
+			Logger::Log("UNOFFICIAL LampHazeShadows: on, but nothing is traced yet (it needs the ray tracing core running for another RT effect, e.g. the RT lamp shadows): "
+				"the lamps' light in the fog is unshadowed until then.");
+		}
+	}
 	if (!lampTexture && FAILED(Device->CreateTexture(LampHazeMax, 2, 1, D3DUSAGE_DYNAMIC, D3DFMT_A32B32G32R32F, D3DPOOL_DEFAULT, &lampTexture, nullptr))) {
 		lampTexture = nullptr;
 		static bool failLogged = false;
@@ -880,6 +913,21 @@ void VolumetricFogEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Re
 		}
 		~LampBinding() { if (bound) { device->SetTexture(14, nullptr); TheRenderManager->renderState->NoteDeviceTexture(14, nullptr); } }
 	} lampBinding(Device, Constants.Lamps.x > 0.0f ? lampTexture : nullptr);
+	// UNOFFICIAL 2026-11-12 LampHazeShadows: the lamps' traced visibility tiles on stage 11 (NVR_FogGrid's sampler, linear, clamp) while
+	// the fog draws. Only indoors with the lamp term on and a recent trace (SetLampHaze), where the volumetric light's grid is never
+	// bound (gridTexture: outdoors only; SetLampHaze checks it all the same); taken off again when this returns.
+	struct LampShadowBinding {
+		IDirect3DDevice9* device; bool bound;
+		LampShadowBinding(IDirect3DDevice9* d, IDirect3DTexture9* t) : device(d), bound(t != nullptr) {
+			if (!bound) return;
+			device->SetTexture(11, t);
+			TheRenderManager->renderState->NoteDeviceTexture(11, t);
+			const DWORD states[][2] = { {D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP}, {D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP},
+				{D3DSAMP_MAGFILTER, D3DTEXF_LINEAR}, {D3DSAMP_MINFILTER, D3DTEXF_LINEAR}, {D3DSAMP_MIPFILTER, D3DTEXF_NONE} };
+			for (const auto& s : states) TheRenderManager->SetSamplerState(11, (D3DSAMPLERSTATETYPE)s[0], s[1]);
+		}
+		~LampShadowBinding() { if (bound) { device->SetTexture(11, nullptr); TheRenderManager->renderState->NoteDeviceTexture(11, nullptr); } }
+	} lampShadowBinding(Device, Constants.Lamps.x > 0.0f ? lampShadowTexture : nullptr);
 
 	// UNOFFICIAL: the fog's density noise, a 3D texture on stage 9 (NVR_FogNoise in the effect), for every path below;
 	// taken off again when this returns, so nothing drawn later finds it there.

@@ -38,6 +38,8 @@ float4 TESR_ReciprocalResolution;
 float4 NVR_ALLayout;            // xy: half-resolution size / full size, zw: 1 / half-resolution size
 float4 NVR_ALFlags;             // x: apply the sun shadows here (ShaderManager skips their own pass), y: NoEdgeOutline (UNOFFICIAL 2026-10-21), z: 1 = NVR_ALAlbedo holds this frame's albedo (UNOFFICIAL 2026-10-31 AlbedoBuffer), w: 1 = EdgeReject (UNOFFICIAL 2026-11-01, Apply)
 float4 NVR_ALInterior;          // UNOFFICIAL 2026-10-18 (ambfix2): x 1 = indoor balance (InteriorBalance), y 1 = last frames' balance usable, z InteriorBounceShare, w share of last frames' balance kept per frame
+                                // UNOFFICIAL 2026-11-12 AmbientReplaceInterior (RoomGI): indoors x = 1 + q, q = AmbientReplaceInterior x (1 - AmbientFloorInterior), the share of the room's ambient Apply takes out (0: x = 1, as before)
+float4 NVR_ALRoom;              // UNOFFICIAL 2026-11-12 AmbientReplaceInterior: x = 1 - the scale the lit shaders put on the ambient (LIN_SCALE_AMBIENT) while the replace mode runs with the real albedo, else 0 (never set = 0 = scale 1; Apply, indoors)
 float4 NVR_ALReach;             // UNOFFICIAL 2026-11-01 MinReach: x 1 = every read at least y texels from the pixel (Estimate; y MinReachTexels, 2026-11-02)
 float4 NVR_ALScene;             // UNOFFICIAL 2026-10-18 (ambfix): rgb the light every surface gets (linear, on a white surface: the cell's ambient + half its directional indoors, the sky's ambient outdoors), w: share of the grid light's colour kept (GridColour)
 float4 NVR_ALTemporal;          // x: share of last frame's bounce kept (0 none), y: moved pixels that halve it, z: frame number (0-1023),
@@ -467,7 +469,8 @@ AccumulateOut Accumulate(VSOUT IN) {
 			tex2Dlod(NVR_ALHistory, float4((base + 1.5f) * NVR_ALLayout.zw, 0.0f, 0.0f)).rgb * weight.w) / max(found, 1.0e-4f);
 		float3 marginC = (highC - lowC) * 0.25f;
 		bounceHistory = clamp(bounceHistory, lowC - marginC, highC + marginC);
-		OUT.bounce = float4(lerp(current.rgb, bounceHistory, keep), viewZ);
+		// UNOFFICIAL 2026-11-11 (sungi) GISingleHistory (NVR_ALGI.w, STUDY F7): the RT denoiser's GI has its own history; keep 0 here
+		OUT.bounce = float4(lerp(current.rgb, bounceHistory, NVR_ALGI.w > 0.5f ? 0.0f : keep), viewZ);
 	}
 	return OUT;
 }
@@ -1050,9 +1053,21 @@ float4 Apply(VSOUT IN, uniform bool sky) : COLOR0 {
 	[branch] if (DebugView > 2.5f) return float4(tex2Dlod(NVR_ALBuffer, float4(IN.UVCoord, 0.0f, 0.0f)).rgb, 1.0f);
 	[branch] if (DebugView > 0.5f) return delinearize(float4(DebugView < 1.5f ? ao.xxx : gridBounce * albedo, 1.0f));	// 2: the bounce (the light grid's)
 	// UNOFFICIAL 2026-10-18 (ambfix2): indoors the occlusion takes only from the ambient share (see above StatsSample).
-	[branch] if (NVR_ALInterior.x > 0.5f) lin = lin - (1.0f - ao) * min(lin, albedo * NVR_ALScene.rgb) + gridBounce * albedo;
+	// UNOFFICIAL 2026-11-12 AmbientReplaceInterior (RoomGI; AmbientReplace's interior counterpart, in the same branch: no new boolean register): A = the
+	// room's ambient share of the pixel, q = NVR_ALInterior.x - 1 the share of it the traced bounce replaces: lit = lin - A + (1 - q) A ao
+	// = lin - ((1 - ao) + ao q) A, so the occlusion darkens only the ambient that stays and the RT bounce (giLight, below) fills the rest. With q = 0 and
+	// NVR_ALRoom.x = 0 (the key off) (1 - ao) + ao * 0 and A * (1 - 0) are the old values exactly. The balance passes (StatsAt) are unchanged: the grid's
+	// bounce still gives back at most what the occlusion alone took.
+	[branch] if (NVR_ALInterior.x > 0.5f) lin = lin - ((1.0f - ao) + ao * max(NVR_ALInterior.x - 1.0f, 0.0f)) * min(lin, albedo * NVR_ALScene.rgb * (1.0f - NVR_ALRoom.x)) + gridBounce * albedo;
 	else {
-		float3 lit = lin * ao;
+		// UNOFFICIAL 2026-11-11 (sungi) ExteriorBalance (NVR_ALInterior.w > 0 outdoors = the ambient scale): the occlusion darkens only the
+		// ambient share of the pixel (as indoors), not the direct sun: lit = lin * ao took the sun's light out of every crease.
+		// UNOFFICIAL 2026-11-12 (sungi p2b) ExteriorBalance + AmbientReplace in ONE branch-free select (the p2 [branch] if on uniforms took ps_3_0's 16 bool
+		// registers: X4550, the whole effect failed): outdoors (.w > 0) A = the game's ambient share, k = 1 - r (1 - floor) (.y = r, .z = AmbientFloor):
+		// lit = lin - A + k A ao. With r = 0, k = 1 and this is ExteriorBalance's lin - (1 - ao) A exactly; .w = 0: lin * ao as before.
+		float3 ambShare = min(lin, albedo * NVR_ALScene.rgb * NVR_ALInterior.w);
+		float keepShare = 1.0f - NVR_ALInterior.y * (1.0f - NVR_ALInterior.z);
+		float3 lit = NVR_ALInterior.w > 0.0f ? lin - ambShare + keepShare * ambShare * ao : lin * ao;
 		if (sky) lit = SkyTake(lit, skyFactor.x, skyFactor.y, TESR_AmbientOcclusionSky5.x, TESR_AmbientOcclusionSky5.w);	// (UNOFFICIAL 2026-10-20 skyamb)
 		lin = lit + gridBounce * albedo;	// (the screen bounce removed 2026-10-14: the light grid is the bounce)
 	}

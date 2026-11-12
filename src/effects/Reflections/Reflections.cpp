@@ -71,6 +71,7 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.GlassReflect = std::clamp(TheSettingManager->GetSettingF(section, "GlassReflect"), 0.0f, 2.0f);	// UNOFFICIAL 2026-10-29 (core/GlassMask.h)
 	Settings.MaterialBufferRoughness = TheSettingManager->GetSettingI(section, "MaterialBufferRoughness") != 0;	// UNOFFICIAL 2026-10-30
 	Settings.CloudSky = TheSettingManager->GetSettingI(section, "CloudSky") != 0;	// UNOFFICIAL 2026-10-30
+	Settings.ReplaceForward = TheSettingManager->GetSettingI(section, "ReplaceForward") != 0;	// UNOFFICIAL 2026-11-12 (a missing key reads 0: the env-map pass as before)
 	// UNOFFICIAL 2026-10-25 Reflectivity: the PBR section's one reflectivity control reaches the floor reflections too (a missing key: 1).
 	SettingManager::Configuration::ConfigNode node;
 	Settings.ReflectivityExterior = TheSettingManager->Config.FillNode(&node, "Shaders.PBR.Main", "ReflectivityExterior") ? std::clamp(node.FloatValue, 0.0f, 3.0f) : 1.0f;
@@ -634,6 +635,7 @@ void ReflectionsEffect::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_ReflectionsMaterial", &Constants.Material);
 	TheShaderManager->RegisterConstant("TESR_RTWaterData", &Constants.WaterData);	// UNOFFICIAL 2026-10-31 RT water (the water shaders)
 	TheShaderManager->RegisterConstant("TESR_RTWaterReproject", (D3DXVECTOR4*)&Constants.WaterReproject);
+	TheShaderManager->RegisterConstant("TESR_ReflReplace", (D3DXVECTOR4*)ReflMaterial::ForwardReplace);	// UNOFFICIAL 2026-11-12 ReplaceForward (EnvTemplate.hlsl; core/ReflMaterial.h keeps it 0 outside the world scene)
 }
 
 void ReflectionsEffect::RegisterTextures() {
@@ -781,6 +783,10 @@ void ReflectionsEffect::BindMaterial() {
 
 bool ReflectionsEffect::ShouldRender() {
 	if (cubeOnly || materialOnly) return true;	// RenderCubeOnly's / CaptureMaterial's own passes
+	// UNOFFICIAL 2026-11-12 [Main.Main.RayTracing] PTReflectionsOff (docs/next/PT-COMPAT-AUDIT-2026-11-12.md item 11; off, to test on an RTX
+	// card): the path traced picture has its own reflections, and this effect's composite still drew its screen-space / cube / RT ones
+	// over it (wet roads, polished floors and metal reflecting twice). On: no Reflections pass while the traced picture replaces the scene.
+	if (RtPathTrace::Replacing() && TheSettingManager->GetSettingI("Main.Main.RayTracing", "PTReflectionsOff") != 0) return false;
 	const NormalsEffect* normals = TheShaderManager->Effects.Normals;
 	const bool surfaces = Constants.Data.x > 0.0f || Constants.Data.y > 0.0f || (Constants.Material.x > 0.0f && Constants.Material.z > 0.0f);
 	// UNOFFICIAL 2026-11-04 (tester: no RT gun reflection): the first-person weapon's RT reflection is traced inside this pass, so on
@@ -1016,6 +1022,45 @@ void ReflectionsEffect::UpdateWaterConstants() {
 		}
 	}
 	Constants.WaterData = D3DXVECTOR4(valid ? 1.0f : 0.0f, valid && Settings.RtWaterSkipPlanar ? 1.0f : 0.0f, 1.0f, valid ? rtWaterScaleX : 1.0f);
+
+	// UNOFFICIAL 2026-11-12 [Shaders.Reflections.Main] ReplaceForward (README "Replace, not add"). The composite lays the reflection over the
+	// lit picture by its Fresnel share only (4 % on stone or glass looking straight on), so the game's env-map pass, an additive cube map at
+	// the artist's strength drawn before it, stayed almost whole under it: two reflections on one surface. That pass is drawn in the world
+	// scene, before this frame's trace, so (as the water above) it reads LAST frame's Buffer: its alpha is how much of each pixel's
+	// reflection the trace answered (the screen, the rays, the cube / grid / sky fallbacks; 0 where nothing reflects or nothing was found),
+	// and the pass takes that share out of its cube map (EnvTemplate.hlsl). So the traced reflection is THE reflection where there is one
+	// and the game's cube map stays as the probe where there is none. Same screen place, not reprojected (a pixel-wide fringe at outlines
+	// while turning). Usable only right after a frame whose composite drew from that Buffer. Off: not entered, the constant stays 0.
+	if (Settings.ReplaceForward || ReflMaterial::ForwardReplaceFrame[0] != 0.0f) {
+		static UINT replaceFrame = 0xFFFFFFFF;
+		if (replaceFrame != now) { replaceFrame = now; ReflMaterial::ForwardReplaceWorldUsed = false; }	// (this runs twice a frame)
+		const char* why = nullptr;
+		if (!Settings.ReplaceForward) why = "the key is off";
+		else if (!Enabled || !Effect) why = "the Reflections effect is off";
+		else if (!Textures.BufferTexture || !TheRenderManager->width || !TheRenderManager->height) why = "no reflection buffer";
+		else if (Settings.DebugView != 0 || Settings.RtDebugView != 0 || Settings.RtDenoiserDebugView != 0) why = "a Reflections DebugView is on (the buffer holds diagnostic colours)";
+		else if (RtPathTrace::Replacing()) why = "the path tracer replaces the scene";
+		else if (TheShaderManager->GameState.isUnderwater) why = "under water";
+		else if (lastRenderedFrame == 0 || lastRenderedFrame + 1 != now) why = "the reflections were not drawn last frame";
+		else {
+			const double jump[3] = { (double)invView._41 - lastInvView._41, (double)invView._42 - lastInvView._42, (double)invView._43 - lastInvView._43 };
+			if (TheShaderManager->GameState.isCameraCut || jump[0] * jump[0] + jump[1] * jump[1] + jump[2] * jump[2] >= 500.0 * 500.0) why = "the camera jumped";
+		}
+		const bool on = why == nullptr;
+		ReflMaterial::ForwardReplaceFrame[0] = on ? 1.0f : 0.0f;
+		ReflMaterial::ForwardReplaceFrame[1] = 0.0f;
+		ReflMaterial::ForwardReplaceFrame[2] = on ? 1.0f / (float)TheRenderManager->width : 0.0f;	// one pixel of the scene target (the pass's VPOS -> Buffer's UV; a
+		ReflMaterial::ForwardReplaceFrame[3] = on ? 1.0f / (float)TheRenderManager->height : 0.0f;	// RenderScale rect frame keeps to the same top-left part in both)
+		static const char* told = nullptr;	// one line per change (the literals above: compared by address)
+		static int toldCount = 0;
+		const char* state = on ? "on" : why;
+		if (state != told && toldCount < 32) {
+			told = state;
+			toldCount++;
+			if (on) Logger::Log("UNOFFICIAL Reflections ReplaceForward: on (the game's env-map pass leaves out the share of its cube map that last frame's reflection covered)");
+			else Logger::Log("UNOFFICIAL Reflections ReplaceForward: not used now: %s (the env-map pass is drawn in full)", why);
+		}
+	}
 }
 
 // UNOFFICIAL 2026-10-31 SkyPanorama ([Shaders.Reflections.RT], docs/next/FORK-RT-REFLECTIONS.md "Sky at a miss"): the sky as seen,

@@ -16,6 +16,7 @@
 #include "../../core/PointShadowForward.h"
 #include "../../core/ShaderWarmUp.h"
 #include "../../core/GlassMask.h"	// UNOFFICIAL 2026-10-29 glass reflections (RenderBlendedHook)
+#include "../../core/WaterMask.h"	// UNOFFICIAL 2026-11-12 PTWaterMask: the game's water pixels for the path tracer (RenderPassStandardHook)
 #include "../../core/ShaderWarmUp2.h"
 #include "../../core/GrassTiming.h"	// UNOFFICIAL 2026-11-09 grass-cache study (test builds)
 #include "../../core/IOWorker2.h"	// UNOFFICIAL 2026-10-20: second loading thread (its once-a-minute log line)
@@ -65,6 +66,10 @@ void HdrOutputNoteDesktop() { HdrOutput::NoteDesktop(); }	// UNOFFICIAL 2026-10-
 #include "../../core/ReactiveMask.h"	// UNOFFICIAL 2026-10-30 ReactiveMask: FSR's reactive mask from the world's alpha draws
 #include "../../core/SkyCoverage.h"	// UNOFFICIAL 2026-11-04 SkyCoverage: the game's MSAA, exact sky shares
 #include "../../core/WeaponMask.h"	// UNOFFICIAL 2026-11-09 WeaponMask: the weapon's own pixels of the first-person model (RT weapon reflections, not the hands)
+#include "../../core/ScopeOverlay.h"	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] KeepOverlayBlack / FullFrame: the game's own rifle scope overlay
+#include <intrin.h>	// _ReturnAddress (ScopeScene below)
+#include "../../core/ScopeCamera.h"	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Detect / OwnCamera / ...: the picture-in-picture scope's scene (ScopeScene below)
+#include "../../core/ScopeFog.h"	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] PostEffects 1: distance fog on that picture
 #include "../../core/ForwardCloudShadows.h"	// UNOFFICIAL 2026-11-04 ForwardCloudShadows: the clouds' shadow in the surface shaders
 
 namespace RmaosDraw { static void Upload(); }	// UNOFFICIAL _rmaos maps (below)
@@ -93,7 +98,11 @@ static void EndPreSceneTimer() {
 // longest stall between two binds (the draws of a pass happen between its bind and the next one, so a
 // driver compiling a shader at its first draw shows up there).
 namespace ShaderSplit {
-	enum Context : unsigned char { World, Reflections, FirstPerson, ContextCount, Outside = ContextCount };
+	// UNOFFICIAL 2026-11-12 ExtraCamera ([Main.Main.Scope] Detect, core/ScopeCamera.h): the world drawn once more by another camera, by a
+	// plugin, outside the game's own passes (B42 Optics' picture-in-picture scope; ScopeScene below opens and closes it). Its value is
+	// past Outside on purpose: every table sized by ContextCount and every `== World / Reflections / FirstPerson` test goes on treating
+	// it as "other", exactly as before; OnBind counts it as Outside; the rules for draws outside the passes ask NotAPass().
+	enum Context : unsigned char { World, Reflections, FirstPerson, ContextCount, Outside = ContextCount, ExtraCamera };
 	static const char* const ContextNames[ContextCount + 1] = { "world scene", "reflections", "first person", "other" };
 	static const unsigned MaxLabels = 32; // label 0: from the start of the pass to its first shader bind
 	static_assert(ContextCount * MaxLabels * 2 <= GpuTimeline::KeyCount, "split keys do not fit the timeline");
@@ -105,6 +114,11 @@ namespace ShaderSplit {
 
 	static unsigned char CurrentContext = Outside;
 	static unsigned char CurrentKey = GpuTimeline::NoKey;
+	// Outside the world / reflection / first-person passes (an extra camera's scene included).
+	static bool NotAPass() { return CurrentContext >= Outside; }
+	// The world's pass, or an extra camera's scene of the world while the lamp-shadow lookups are right in it ([Main.Main.Scope]
+	// OwnCamera; not outdoors while the traced lamp shadows are the only ones: their result is the main view's screen).
+	static bool WorldOrScope() { return CurrentContext == World || (CurrentContext == ExtraCamera && ScopeCamera::Shadows && !PointShadowForward::ExteriorActive); }
 	static unsigned char SavedContext[8], SavedKey[8];
 	static unsigned Depth = 0;
 
@@ -429,9 +443,10 @@ namespace ShaderSplit {
 		if (Depth < 8) { SavedContext[Depth] = CurrentContext; SavedKey[Depth] = CurrentKey; RecSaved[Depth] = RecKey; }
 		Depth++;
 		CurrentContext = context;
-		CurrentKey = Timeline.InFrame() ? KeyOf(context, 0, false) : GpuTimeline::NoKey;
+		// (ExtraCamera has no timeline keys: KeyOf would run past them. Its GPU time is the "Scope scene" timer's.)
+		CurrentKey = Timeline.InFrame() && context < ContextCount ? KeyOf(context, 0, false) : GpuTimeline::NoKey;
 		Timeline.Mark(CurrentKey);
-		RecMark(KeyOf(context, 0, false));
+		RecMark(context < ContextCount ? KeyOf(context, 0, false) : (unsigned char)GpuTimeline::NoKey);
 	}
 
 	static void EndContext() {
@@ -445,7 +460,7 @@ namespace ShaderSplit {
 
 	// Called from SetShadersHook once the pixel shader for the pass is chosen. Start: when the hook began.
 	static void OnBind(const NiD3DPixelShader* shader, const IDirect3DPixelShader9* previous, double start) {
-		const unsigned char context = CurrentContext;
+		const unsigned char context = CurrentContext > Outside ? (unsigned char)Outside : CurrentContext;	// (ExtraCamera: counted as "other", as before)
 		const IDirect3DPixelShader9* handle = shader ? shader->ShaderHandle : nullptr;
 		const bool nvr = handle && handle != (const IDirect3DPixelShader9*)shader->ShaderHandleBackup;
 		bool firstUse = false;
@@ -764,7 +779,9 @@ void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTe
 		TheShaderManager->Effects.SkinScattering->BeginFrame();
 	UpdateFaceGenInteriorFlag();
 	ShaderSplit::BeginFrame(TheRenderManager->device);
+	ScopeOverlay::BeginWorld();	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] FullFrame (core/ScopeOverlay.h): nothing unless it is on and the scope is up
 	Render(This, RenderedTexture, Arg2, Arg3);
+	ScopeOverlay::EndWorld();
 	SkyProjection::Join();	// UNOFFICIAL 2026-11-03 SkyOnWorker: never past the frame it was started in
 	ShaderSplit::EndFrame();
 	EndPreSceneTimer();
@@ -780,6 +797,9 @@ void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTe
 // bind is told that no pixel shader is bound: an NVR shader then uploads even if the game keeps the one
 // already bound. Nothing else changes (the game still sets the device shader itself).
 static bool ForcePixelConstants = false;
+// UNOFFICIAL 2026-11-12 [Main.Main.Scope] OwnCamera: the same for the vertex shader (the camera's matrices live in both). Set with the
+// flag above before and after an extra camera's scene (ScopeScene below), whose camera constants differ from the frame's.
+static bool ForceVertexConstants = false;
 
 // ReducedQuality CheapReflections: the water reflection map is drawn without the forward sun-shadow
 // lookup (TESR_ShadowForwardData.x = 1, the forward path's own off switch) and without terrain parallax
@@ -3122,13 +3142,18 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 	// uploaded below. In the reflection pass, the clouds note its target, depth buffer and camera (DrawIntoReflection).
 	if (VolumetricCloudsEffect* clouds = TheShaderManager->Effects.VolumetricClouds) {
 		const bool reflections = ShaderSplit::CurrentContext == ShaderSplit::Reflections;
-		clouds->Constants.Hide.x = reflections ? clouds->HideGameCloudsInReflection : clouds->HideGameClouds;
+		// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Clouds: in an extra camera's picture (a picture-in-picture scope) the game's layers
+		// stay: the volumetric clouds are a post effect of the main view and are never drawn there (the lens had a cloudless sky).
+		const bool scopeClouds = ShaderSplit::CurrentContext == ShaderSplit::ExtraCamera && ScopeCamera::Clouds;
+		clouds->Constants.Hide.x = reflections ? clouds->HideGameCloudsInReflection : scopeClouds ? 0.0f : clouds->HideGameClouds;
 		if (reflections && clouds->HideGameCloudsInReflection > 0.0f) clouds->CaptureReflection(TheRenderManager->device);
 	}
 
 	// 2026-11-03: only shaders NVR made are set up (ShaderRecord.h ShaderOwnership: Real Time Reflections' own env shaders stay its own)
 	if (VertexShader) {
-		if (ShaderOwnership::MaySetUp(VertexShader, "vertex")) VertexShader->SetupShader(VertexShader2);
+		// (UNOFFICIAL 2026-11-12 ForceVertexConstants: as ForcePixelConstants below, round an extra camera's scene)
+		if (ShaderOwnership::MaySetUp(VertexShader, "vertex")) VertexShader->SetupShader(ForceVertexConstants ? nullptr : VertexShader2);
+		ForceVertexConstants = false;
 	}
 	else
 		Logger::Log("Error getting vertex shader for pass %s", Pointers::Functions::GetPassDescription(PassIndex));
@@ -3167,11 +3192,29 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 		if (VertexShader && VertexShader->ShaderHandleBackup) VertexShader->ShaderHandle = (IDirect3DVertexShader9*)VertexShader->ShaderHandleBackup;
 		if (PixelShader && PixelShader->ShaderHandleBackup) PixelShader->ShaderHandle = (IDirect3DPixelShader9*)PixelShader->ShaderHandleBackup;
 	}
+	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Shaders 2 / Water 1 (core/ScopeCamera.h): in an extra camera's picture (a picture-in-picture
+	// scope) every draw (Shaders 2: the cheapest picture), or the water's alone (Water 1: this mod's water shaders read the main view's
+	// depth and reflection by screen position, which is not the picture's), takes the game's own pair, by the same switch as the
+	// reflection's above (the next bind picks this mod's again). The water shader binds are counted for the Scope WATER log line.
+	if (ShaderSplit::CurrentContext == ShaderSplit::ExtraCamera) {
+		const bool water = PixelShader && PixelShader->Name && !strncmp(PixelShader->Name, "WATER", 5);
+		if (water) {
+			ScopeCamera::WaterBinds++;
+			if (PixelShader->ShaderHandleBackup && PixelShader->ShaderHandle != PixelShader->ShaderHandleBackup && !ScopeCamera::GameShaders && !ScopeCamera::GameWater) ScopeCamera::WaterBindsOurs++;
+		}
+		if (ScopeCamera::GameShaders || (ScopeCamera::GameWater && water)) {
+			if (VertexShader && VertexShader->ShaderHandleBackup) VertexShader->ShaderHandle = (IDirect3DVertexShader9*)VertexShader->ShaderHandleBackup;
+			if (PixelShader && PixelShader->ShaderHandleBackup) PixelShader->ShaderHandle = (IDirect3DPixelShader9*)PixelShader->ShaderHandleBackup;
+		}
+	}
 	// UNOFFICIAL 2026-10-27 race menu face (tester report): skin drawn outside the world scene, first person and reflections --
 	// the character creation menu's head (its own camera, lights and picture; no world scene is drawn while it is open) and
 	// other 3D menu views -- gets the game's own skin shaders. NVR's skin shaders take the world camera's shadow, sky and lamp
 	// data, which do not belong to that picture: the face came out invisible outdoors (Novac) and yellow indoors (Doc Mitchell's).
-	if (ShaderSplit::CurrentContext == ShaderSplit::Outside && PixelShader && PixelShader->Name && !strncmp(PixelShader->Name, "SKIN", 4)) {
+	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Skin (core/ScopeCamera.h): not in an extra camera's picture of the world while its constants
+	// are that camera's (OwnCamera): the world's shadow, sky and lamp data do belong to that picture, so its skin takes this mod's skin
+	// shaders like the world's (no screen-space blur there: its targets are bound in the world scene only, as for the first-person arms).
+	if (ShaderSplit::NotAPass() && !(ShaderSplit::CurrentContext == ShaderSplit::ExtraCamera && ScopeCamera::OurSkin) && PixelShader && PixelShader->Name && !strncmp(PixelShader->Name, "SKIN", 4)) {
 		static bool announced = false;
 		const bool nvrPixel = PixelShader->ShaderHandleBackup && PixelShader->ShaderHandle != PixelShader->ShaderHandleBackup;
 		const bool nvrVertex = VertexShader && VertexShader->Name && !strncmp(VertexShader->Name, "SKIN", 4) &&
@@ -3190,7 +3233,7 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 	// the menu's own lights are not in it, ManyLamps skips them), ambient and light scales made for a frame the tone chain finishes. While
 	// the character creation / face menu is open, everything it draws outside the world scene takes the game's own shaders, as a pair
 	// (as GameShadersInReflections above). Other 'Outside' pictures (a scope lens) keep the mod's.
-	if (GameShadersInMenus && ShaderSplit::CurrentContext == ShaderSplit::Outside && TheShaderManager->GameState.FaceMenuIsOn) {
+	if (GameShadersInMenus && ShaderSplit::NotAPass() && TheShaderManager->GameState.FaceMenuIsOn) {
 		const bool nvrPixel = PixelShader && PixelShader->ShaderHandleBackup && PixelShader->ShaderHandle != PixelShader->ShaderHandleBackup;
 		const bool nvrVertex = VertexShader && VertexShader->ShaderHandleBackup && VertexShader->ShaderHandle != VertexShader->ShaderHandleBackup;
 		if (nvrPixel) PixelShader->ShaderHandle = (IDirect3DPixelShader9*)PixelShader->ShaderHandleBackup;
@@ -3201,6 +3244,21 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 			Logger::Log("UNOFFICIAL GameShadersInMenus: the character creation menu's 3D view is drawn with the game's own shaders (first: %s + %s)",
 				VertexShader && VertexShader->Name ? VertexShader->Name : "?", PixelShader && PixelShader->Name ? PixelShader->Name : "?");
 		}
+	}
+	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] KeepOverlayBlack (core/ScopeOverlay.h; user: "the game's base scope texture seems to get lightened by
+	// our effects on the edges ... It's supposed to be black but it looks almost grey"): the game draws its scope overlay (a 3D model under
+	// HUDMainMenu::spScopeModel) after the whole effect chain, so no post effect touches it. The grey was the mod's OBJECT shaders on the
+	// overlay's one lit quad (New Vegas' reticle scopes: the black mask round the lens, with the reticle): they add highlights and the sky's
+	// reflection by the normal map's gloss channel (highest at the quad's edges), made for the world camera, where the game's own shader
+	// leaves a black texture black. Every draw of that model takes the game's own pair, as the menu's 3D view above (the next bind picks the
+	// mod's again). Asked only outside the world / first-person / reflection passes, and the model is walked only while the game says the
+	// scope is up. B42 Optics' lens is drawn in the first-person pass: untouched. false = the mod's shaders there, as before.
+	if (ScopeOverlay::KeepBlack && ShaderSplit::CurrentContext == ShaderSplit::Outside && ScopeOverlay::InDraw(Geometry)) {
+		const bool nvrPixel = PixelShader && PixelShader->ShaderHandleBackup && PixelShader->ShaderHandle != PixelShader->ShaderHandleBackup;
+		const bool nvrVertex = VertexShader && VertexShader->ShaderHandleBackup && VertexShader->ShaderHandle != VertexShader->ShaderHandleBackup;
+		if (nvrPixel) PixelShader->ShaderHandle = (IDirect3DPixelShader9*)PixelShader->ShaderHandleBackup;
+		if (nvrVertex) VertexShader->ShaderHandle = (IDirect3DVertexShader9*)VertexShader->ShaderHandleBackup;
+		ScopeOverlay::Note(nvrPixel || nvrVertex, VertexShader ? VertexShader->Name : nullptr, PixelShader ? PixelShader->Name : nullptr);
 	}
 	// UNOFFICIAL 2026-10-27 [Shaders.PBR.Main] GameShaderEyes (user: "pbr seems to apply to eyeballs and can darken them in some areas. it
 	// looks a bit odd. can we skip eyeballs?"): an eyeball is a small sphere, and NVR's object shaders light it as one -- the sun's and the
@@ -3281,7 +3339,7 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 	CasterView::OnBind(TheRenderManager->device);	// UNOFFICIAL 2026-10-28, diagnostic
 	LinearSceneCensus::OnBind(PixelShader ? PixelShader->ShaderHandle : nullptr, PixelShader ? PixelShader->Name : nullptr, PointShadowForward::LastPixelShaderNvr, PassIndex);	// UNOFFICIAL 2026-10-28, diagnostic
 #endif
-	PointShadowForward::SetForDraw(PixelShader, ShaderSplit::CurrentContext == ShaderSplit::World,
+	PointShadowForward::SetForDraw(PixelShader, ShaderSplit::WorldOrScope(),	// (UNOFFICIAL 2026-11-12 [Main.Main.Scope] OwnCamera: lamp shadows in a scope's picture too)
 		ShaderSplit::CurrentContext == ShaderSplit::FirstPerson,
 		PixelShader && PointShadowForward::LastPixelShaderNvr && ManyLamps::IsOurs(PixelShader->Name) && ManyLamps::Active() ?
 			ManyLamps::Steady(*(const PointShadowForward::RenderPassView**)0x011F91E0) : nullptr);	// UNOFFICIAL 2026-10-31 SteadyLampShadows
@@ -3314,6 +3372,15 @@ namespace ScopeSunShadows {
 	static bool Overridden = false;
 	static unsigned LensFrame = 0;		// PointShadowForward::Frame when a B42 lens was last drawn
 	static bool Announced = false;
+	static unsigned LensLogs = 0;
+
+	// ScopeScene::Draw, when an extra camera's scene ends: its last draw may have left the off switch on the device.
+	static void Reset() {
+		ShadowsExteriorEffect* shadows = TheShaderManager->Effects.ShadowsExteriors;
+		if (!Overridden || !shadows) return;
+		TheRenderManager->device->SetPixelShaderConstantF(133, (const float*)&shadows->Constants.ForwardData, 1);
+		Overridden = false;
+	}
 
 	static void ForDraw(const PointShadowForward::RenderPassView* pass) {
 		ShadowsExteriorEffect* shadows = TheShaderManager->Effects.ShadowsExteriors;
@@ -3324,8 +3391,33 @@ namespace ScopeSunShadows {
 			if (context == ShaderSplit::FirstPerson) {
 				suppress = PointShadowForward::IsLens(pass);
 				if (suppress) LensFrame = PointShadowForward::Frame;
+				// UNOFFICIAL 2026-11-12 (the open question of a reactive mask for the lens, core/ScopeCamera.h report): how the lens shapes are
+				// drawn, said for the first four draws. A shape that writes depth is inside the first-person depth mask, which FSR / DLSS
+				// already take as rendered ([Shaders.TAA.FSR] WeaponReactive, [Shaders.TAA.DLSS] WeaponMask).
+				if (suppress && LensLogs < 4 && pass && pass->geometry) {
+					LensLogs++;
+					DWORD zwrite = 0, blend = 0, ztest = 0;
+					TheRenderManager->device->GetRenderState(D3DRS_ZWRITEENABLE, &zwrite);
+					TheRenderManager->device->GetRenderState(D3DRS_ALPHABLENDENABLE, &blend);
+					TheRenderManager->device->GetRenderState(D3DRS_ZENABLE, &ztest);
+					Logger::Log("UNOFFICIAL Scope lens: the B42 lens shape '%s' (pass %03X) is drawn in the first-person pass with depth test %s, depth write %s, alpha blending %s.",
+						pass->geometry->m_pcName ? pass->geometry->m_pcName : "?", (unsigned)pass->passEnum, ztest ? "on" : "off", zwrite ? "on" : "off", blend ? "on" : "off");
+				}
 			}
-			else if (context != ShaderSplit::Reflections && LensFrame && PointShadowForward::Frame - LensFrame <= 2) {
+			else if (context == ShaderSplit::ExtraCamera) {
+				// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Detect / OwnCamera (core/ScopeCamera.h): the picture is known exactly (ScopeScene
+				// below), from its first frame on and without waiting for a lens draw. With its own camera's constants the shaders rebuild
+				// the right positions and the cascades are moved to its camera: the sun shadows stay ON. Without (OwnCamera false, or the
+				// game's shaders): off there, as before.
+				suppress = !ScopeCamera::Shadows;
+				if (suppress && !Announced) {
+					Announced = true;
+					Logger::Log("UNOFFICIAL ScopeFix: the scope picture (an extra camera's scene) is drawn without sun shadows ([Main.Main.Scope] OwnCamera is off or not in effect).");
+				}
+			}
+			// (while the hooks see the scope's scene, the size guess below is not used: the scene's own context answers above. Detect off, or
+			// no such scene seen in the last frames: the guess, as before)
+			else if (!ScopeCamera::Exact() && context != ShaderSplit::Reflections && LensFrame && PointShadowForward::Frame - LensFrame <= 2) {
 				const D3DVIEWPORT9& port = TheRenderManager->m_kD3DPort;
 				if (!TAAEffect::IsWorldViewport(port)) {	// UNOFFICIAL 2026-10-27: RenderScale's world viewport is the world's too
 					suppress = true;
@@ -3348,6 +3440,211 @@ namespace ScopeSunShadows {
 			Overridden = false;
 		}
 	}
+}
+
+// UNOFFICIAL 2026-11-12 [Main.Main.Scope] (core/ScopeCamera.h has the whole story): the picture-in-picture scope's scene, recognised at
+// the two game functions a plugin draws it with (JIP LN's ProjectExtraCamera for B42 Optics), both __cdecl, checked in the machine code
+// of FalloutNV 1.4.0.525:
+//  - BSShaderUtil::AccumulateScene 0x00B6BEE0 (camera, scene, culling process): walks the scene for the camera;
+//  - BSShaderUtil::RenderScene 0x00B6C0D0 (camera, accumulator, unused): makes the camera current (NiRenderer::SetCurrentCamera
+//    0x004E9BB0) and draws what was accumulated.
+// The game calls both itself (the world's own scene, the screen splatter, menus' 3D views, cube maps): those calls come from inside
+// FalloutNV.exe and end here at one compare each. A call from a plugin (return address outside the exe) with a camera that is not the
+// world's, over the world's own scene graph, is an extra camera's picture of the world: AccumulateSceneHook notes its camera, and the
+// RenderScene call that follows with the same camera is drawn inside ShaderSplit::ExtraCamera, with that camera's constants
+// (OwnCamera), the cheap switches (Shaders), the "Scope scene" timers and, after its last draw, the fog (PostEffects).
+// Installed inside AttachHooks' Detours transaction while Detect is on at startup; Detect off later = both pass straight through.
+namespace ScopeScene {
+	typedef void (__cdecl* AccumulateSceneFn)(NiCamera*, NiAVObject*, void*, UInt32);
+	typedef void (__cdecl* RenderSceneFn)(NiCamera*, void*, UInt32);
+	static AccumulateSceneFn AccumulateSceneNext = (AccumulateSceneFn)Hooks::AccumulateScene;
+	static RenderSceneFn RenderSceneNext = (RenderSceneFn)Hooks::RenderScene;
+	static unsigned DetectLogs = 0, OtherSceneLogs = 0;
+	static UInt32 LoggedSignature = 0;
+
+	// The scene a plugin walks is the world's: the world's ShadowSceneNode itself, a node above it or one below it.
+	static bool WorldRooted(const NiAVObject* scene) {
+		const NiAVObject* world = (const NiAVObject*)BSShaderManager::GetShadowSceneNode(BSShaderManager::BSSM_SSN_WORLD);
+		if (!scene || !world) return false;
+		const NiAVObject* node = world;
+		for (int depth = 0; node && depth < 8; depth++, node = node->m_parent) if (node == scene) return true;
+		node = scene->m_parent;
+		for (int depth = 0; node && depth < 16; depth++, node = node->m_parent) if (node == world) return true;
+		return false;
+	}
+
+	static void NotePlugin(NiCamera* camera, NiAVObject* scene, UInt32 caller) {
+		if (!WorldRooted(scene)) {
+			if (OtherSceneLogs < 3) {
+				OtherSceneLogs++;
+				char module[MAX_PATH];
+				CpuSplit::ModuleName(caller, module, sizeof(module));
+				Logger::Log("UNOFFICIAL Scope Detect: %s draws a scene that is not the world's (root '%s') with its own camera '%s': left alone.",
+					module, scene && scene->m_pcName ? scene->m_pcName : "?", camera->m_pcName ? camera->m_pcName : "?");
+			}
+			return;
+		}
+		ScopeCamera::Pending = camera;
+		ScopeCamera::PendingCaller = caller;
+	}
+
+	static void __cdecl AccumulateSceneHook(NiCamera* camera, NiAVObject* scene, void* culler, UInt32 flag) {
+		// The game's own walk of the world ends at the camera compare, its other walks at the address test.
+		if (ScopeCamera::Detect && camera && WorldSceneGraph && camera != WorldSceneGraph->camera) {
+			const UInt32 caller = (UInt32)_ReturnAddress();
+			if (!CpuSplit::InExe(caller)) NotePlugin(camera, scene, caller);
+		}
+		AccumulateSceneNext(camera, scene, culler, flag);
+	}
+
+	// Shaders 1: the picture's cheap switches, each the documented "off" of a setting, put back when the scene ends. Terrain parallax
+	// (TESR_TerrainParallaxData.x 0, as CheapReflections does for the water's reflection) and the contact-hardening search of the sun
+	// shadows (TESR_ContactHardeningData.x 0 = plain filtering). The per-object extras (wind, material rules, _rmaos maps, the
+	// specular fade) are left running: each sets a constant the next draw would otherwise inherit from the main view's last draw.
+	struct CheapScope {
+		float* Parallax = nullptr;
+		float* Hardening = nullptr;
+		float SavedParallax = 0.0f, SavedHardening = 0.0f;
+		explicit CheapScope(bool on) {
+			if (!on) return;
+			if (TerrainShaders* terrain = TheShaderManager->Shaders.Terrain) {
+				Parallax = &terrain->ParallaxConstants.Data.x;
+				SavedParallax = *Parallax;
+				*Parallax = 0.0f;
+			}
+			if (TheShadowManager) {
+				Hardening = &TheShadowManager->ContactHardeningData.x;
+				SavedHardening = *Hardening;
+				*Hardening = 0.0f;
+			}
+		}
+		~CheapScope() {
+			if (Parallax) *Parallax = SavedParallax;
+			if (Hardening) *Hardening = SavedHardening;
+		}
+	};
+
+	// The log's proof, when the picture, its camera or what is done with it changes (at most 8 times a session).
+	static void LogScene(NiCamera* camera, UINT width, UINT height, D3DFORMAT format, bool own, const D3DXVECTOR4& mainPosition) {
+		const UInt32 signature = (width << 16) ^ height ^ ((UInt32)format << 8) ^ (own ? 0x80000000u : 0u) ^ ((UInt32)ScopeCamera::Shaders << 28) ^
+			((UInt32)ScopeCamera::PostEffects << 26) ^ ((UInt32)ScopeCamera::Water << 25) ^ (ScopeCamera::Clouds ? 0x01000000u : 0u) ^ (ScopeCamera::OurSkin ? 0x02000000u : 0u);
+		if (signature == LoggedSignature || DetectLogs >= 8) return;
+		LoggedSignature = signature;
+		DetectLogs++;
+		char module[MAX_PATH];
+		CpuSplit::ModuleName(ScopeCamera::PendingCaller, module, sizeof(module));
+		const NiFrustum& frustum = camera->Frustum;
+		Logger::Log("UNOFFICIAL Scope Detect: an extra camera's scene of the world: camera '%s', drawn by %s into a %ux%u target (format %d), field of view %.2f x %.2f degrees, near %.1f, far %.0f. Shaders %d, Clouds %s, Water %d, PostEffects %d.",
+			camera->m_pcName ? camera->m_pcName : "?", module, width, height, (int)format,
+			D3DXToDegree(2.0f * atanf(0.5f * (frustum.Right - frustum.Left))), D3DXToDegree(2.0f * atanf(0.5f * (frustum.Top - frustum.Bottom))), frustum.Near, frustum.Far,
+			ScopeCamera::Shaders, ScopeCamera::Clouds ? "on" : "off", ScopeCamera::Water, ScopeCamera::PostEffects);
+		if (own) {
+			const NiPoint3& at = camera->m_worldTransform.pos;
+			const float dx = at.x - mainPosition.x, dy = at.y - mainPosition.y, dz = at.z - mainPosition.z;
+			Logger::Log("UNOFFICIAL Scope OwnCamera: the picture is drawn with its own camera's constants (camera at %.0f %.0f %.0f, %.1f units from the main camera of the last frame; reciprocal resolution 1/%u x 1/%u): sun shadows and interior lamp shadows are ON in it, skin takes %s shaders.",
+				at.x, at.y, at.z, sqrtf(dx * dx + dy * dy + dz * dz), width, height, ScopeCamera::OurSkin ? "this mod's" : "the game's");
+		}
+		else
+			Logger::Log("UNOFFICIAL Scope OwnCamera: NOT in effect (%s): the picture is drawn with the main camera's constants, without sun and lamp shadows, as before.",
+				ScopeCamera::GameShaders ? "Shaders 2: the game's own shaders" : !ScopeCamera::OwnCamera ? "OwnCamera is off" : "the camera's frustum cannot be used");
+	}
+
+	// The Scope WATER line ([Main.Main.Scope] Water): what the last 300 pictures showed about water, then the counts start again.
+	static void WaterReport() {
+		if (++ScopeCamera::WaterScenes < 300) return;
+		static unsigned lines = 0;
+		if (lines < 6) {
+			lines++;
+			Logger::Log("UNOFFICIAL Scope WATER: in the last %u scope pictures: %u water shader binds inside the picture (%u with this mod's water shaders), %u water reflection renders by the game in those frames (%u of them for the picture's camera).",
+				ScopeCamera::WaterScenes, ScopeCamera::WaterBinds, ScopeCamera::WaterBindsOurs, ScopeCamera::ReflectionCalls, ScopeCamera::ReflectionCallsExtra);
+		}
+		ScopeCamera::WaterScenes = ScopeCamera::WaterBinds = ScopeCamera::WaterBindsOurs = ScopeCamera::ReflectionCalls = ScopeCamera::ReflectionCallsExtra = 0;
+	}
+
+	static void Draw(NiCamera* camera, void* accumulator, UInt32 flag) {
+		SessionLog::StageScope stage("the scope picture");
+		IDirect3DDevice9* device = TheRenderManager->device;
+		// The picture's target: the plugin made it current before the walk.
+		UINT width = 0, height = 0;
+		D3DFORMAT format = D3DFMT_UNKNOWN;
+		IDirect3DSurface9* target = nullptr;
+		if (SUCCEEDED(device->GetRenderTarget(0, &target)) && target) {
+			D3DSURFACE_DESC desc = {};
+			if (SUCCEEDED(target->GetDesc(&desc))) { width = desc.Width; height = desc.Height; format = desc.Format; }
+			target->Release();
+		}
+		static GpuTimer gpuTimer("Scope scene");
+		static CpuTimer cpuTimer("Scope scene (CPU)");
+		CpuProfileScope cpu(cpuTimer);
+		GpuProfileScope gpu(gpuTimer, device);
+
+		const D3DXVECTOR4 mainPosition = TheRenderManager->CameraPosition;
+		ScopeCamera::InScene = true;
+		ScopeCamera::Camera = camera;
+		ScopeCamera::GameShaders = ScopeCamera::Shaders == 2;
+		ScopeCamera::GameWater = ScopeCamera::Water == 1;
+		D3DXMATRIX projection;
+		D3DXMatrixIdentity(&projection);
+		// Its own camera's constants (not for a picture drawn with the game's shaders: they read none of them).
+		const bool own = ScopeCamera::OwnCamera && !ScopeCamera::GameShaders && TheShaderManager->BeginExtraCamera(camera, width, height, &projection);
+		ScopeCamera::Own = own;
+		ScopeCamera::Shadows = own;
+		ScopeCamera::OurSkin = own && ScopeCamera::Skin;
+		{
+			CheapScope cheap(ScopeCamera::Shaders == 1);
+			// The constants reach a shader only when its handle changes: the scene's first bind uploads whatever was bound before.
+			ForcePixelConstants = ForceVertexConstants = true;
+			ShaderSplit::BeginContext(ShaderSplit::ExtraCamera);
+			RenderSceneNext(camera, accumulator, flag);
+			ShaderSplit::EndContext();
+			ScopeSunShadows::Reset();
+			// The picture's fog, while its target, depth buffer and camera are still current.
+			if (own && ScopeCamera::PostEffects >= 1) ScopeFog::Draw(device, projection, width, height, ScopeCamera::FogStrength);
+		}
+		if (own) TheShaderManager->EndExtraCamera();
+		// ... and the frame's first bind uploads the main camera's again (ConstantFilter compares with what the device holds: none is skipped).
+		ForcePixelConstants = ForceVertexConstants = true;
+		LogScene(camera, width, height, format, own, mainPosition);
+		ScopeCamera::InScene = ScopeCamera::Own = ScopeCamera::Shadows = ScopeCamera::GameShaders = ScopeCamera::OurSkin = ScopeCamera::GameWater = false;
+		ScopeCamera::Camera = nullptr;
+		ScopeCamera::LastCamera = camera;
+		ScopeCamera::LastSceneFrame = ScopeCamera::FrameNumber();
+		ScopeCamera::ScenesDrawn++;
+		WaterReport();
+	}
+
+	static void __cdecl RenderSceneHook(NiCamera* camera, void* accumulator, UInt32 flag) {
+		// The game's own calls end here: no plugin walked the world for this camera just before.
+		if (camera != ScopeCamera::Pending || !camera) { RenderSceneNext(camera, accumulator, flag); return; }
+		ScopeCamera::Pending = nullptr;
+		if (!ScopeCamera::Detect || ScopeCamera::InScene || CpuSplit::InExe((UInt32)_ReturnAddress())) { RenderSceneNext(camera, accumulator, flag); return; }
+		Draw(camera, accumulator, flag);
+	}
+}
+
+// Inside AttachHooks' Detours transaction (Hooks.cpp). Each function is hooked only where its first bytes are the game's, or a jump
+// another plugin put there (Detours then chains through that plugin's hook).
+void AttachScopeCameraHooks() {
+	ScopeCamera::ReadSettings(true);
+	if (!ScopeCamera::Detect) {
+		Logger::Log("UNOFFICIAL Scope Detect: off at startup: the extra-camera hooks are not installed; a scope's picture is recognised by its viewport, as before (restart to change).");
+		return;
+	}
+	const UInt8* accumulate = (const UInt8*)Hooks::AccumulateScene;
+	const UInt8* render = (const UInt8*)Hooks::RenderScene;
+	const bool accumulateKnown = (accumulate[0] == 0x6A && accumulate[1] == 0xFF && accumulate[2] == 0x68) || accumulate[0] == 0xE9;	// PUSH -1; PUSH handler
+	const bool renderKnown = (render[0] == 0x8B && render[1] == 0x0D && render[6] == 0x56) || render[0] == 0xE9;	// MOV ECX,[renderer]; PUSH ESI
+	if (!accumulateKnown || !renderKnown) {
+		Logger::Log("UNOFFICIAL Scope Detect: the code at %08X / %08X is not the game's (first bytes %02X %02X / %02X %02X; another plugin?): not hooked; a scope's picture is recognised by its viewport, as before.",
+			Hooks::AccumulateScene, Hooks::RenderScene, accumulate[0], accumulate[1], render[0], render[1]);
+		return;
+	}
+	const LONG first = DetourAttach(&(PVOID&)ScopeScene::AccumulateSceneNext, &ScopeScene::AccumulateSceneHook);
+	const LONG second = first == NO_ERROR ? DetourAttach(&(PVOID&)ScopeScene::RenderSceneNext, &ScopeScene::RenderSceneHook) : first;
+	ScopeCamera::HooksIn = first == NO_ERROR && second == NO_ERROR;
+	Logger::Log("UNOFFICIAL Scope Detect: BSShaderUtil::AccumulateScene / RenderScene %s (%ld, %ld)%s: a plugin's extra camera drawing the world (B42 Optics' picture-in-picture scope) %s.",
+		ScopeCamera::HooksIn ? "hooked" : "NOT hooked", first, second, accumulate[0] == 0xE9 || render[0] == 0xE9 ? ", through another plugin's hook" : "",
+		ScopeCamera::HooksIn ? "is recognised exactly ([Main.Main.Scope])" : "is recognised by its viewport, as before");
 }
 
 // UNOFFICIAL, diagnostic (2026-10-13, with [Shaders.ShadowsInteriors.Forward] LogLamps): how many lamps the game gives each
@@ -3538,7 +3835,7 @@ static void ForwardShadowsForPass(void* Pass) {
 	const PointShadowForward::RenderPassView* lamps = ManyLamps::Bound ? ManyLamps::Steady((const PointShadowForward::RenderPassView*)Pass) : (const PointShadowForward::RenderPassView*)Pass;
 	ManyLamps::ForPass(lamps, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-10-27 ManyLampsOnePass: the object's lamps in c37-c63
 	LampsInOnePass::GlowForPass((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL ManyLampsGlow: the glow map on s4
-	PointShadowForward::OnRenderPass(lamps, ShaderSplit::CurrentContext == ShaderSplit::World,
+	PointShadowForward::OnRenderPass(lamps, ShaderSplit::WorldOrScope(),	// (UNOFFICIAL 2026-11-12 [Main.Main.Scope] OwnCamera, as SetForDraw)
 		ShaderSplit::CurrentContext == ShaderSplit::FirstPerson);
 	ManyLamps::ParityCheck((const PointShadowForward::RenderPassView*)Pass, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-10-31 TableLampsParity (a test)
 	ScopeSunShadows::ForDraw((const PointShadowForward::RenderPassView*)Pass);
@@ -3576,6 +3873,90 @@ void InstallSoftParticleHook() {
 		return;
 	}
 	NoLightingConstantsDetour.ReplaceVirtualFunc(0x010BB2AC, &NoLightingConstantsHook);
+}
+
+// UNOFFICIAL 2026-11-12 PTWaterMask ([Main.Main.RayTracing] PTWaterMask; core/WaterMask.h, docs/next/PT-COMPAT-AUDIT-2026-11-12.md item 4):
+// the game's water draws of the frame's world scene, each drawn once more into the path tracer's water mask. The game draws its water
+// pass groups (0x28A and up; 0x288 / 0x289 are the water's stencil-only passes) after the opaque groups and before the blended stage
+// (0x00B65C60), each pass through RenderPassStandardHook below. For a pass whose geometry carries a water shade property, in the first
+// world scene of the frame, on the world's own depth surface (noted as the scene starts: never the water reflection render, a cube map
+// or another off-screen scene drawn in between) and writing colour, DrawIndexedPrimitive (device table slot 82) is hooked for the length
+// of that one pass, as RenderBlendedHook does for its stage, and put back after it. Nothing is noted, compared or hooked unless a path
+// traced frame asked for the mask in the last two frames (WaterMask::Wanted) and the camera is above water: one null check a pass.
+namespace WaterMaskDraw {
+	typedef HRESULT (STDMETHODCALLTYPE* DrawIndexedPrimitiveFn)(IDirect3DDevice9*, D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT);
+	static DrawIndexedPrimitiveFn Next = nullptr;
+	static IDirect3DSurface9* WorldDepth = nullptr;	// the depth surface bound as the frame's first world scene starts, while the mask is wanted (compared only)
+	static bool InPass = false, Stuck = false;
+
+	static HRESULT STDMETHODCALLTYPE DrawHook(IDirect3DDevice9* Device, D3DPRIMITIVETYPE Type, INT Base, UINT MinIndex, UINT Vertices, UINT Start, UINT Count) {
+		const HRESULT result = Next(Device, Type, Base, MinIndex, Vertices, Start, Count);
+		if (InPass && SUCCEEDED(result)) {
+			// a draw that shows water: colour written, depth tested (the mask takes the draw's own z test: nothing behind a wall)
+			DWORD colour = 0, ztest = D3DZB_FALSE;
+			Device->GetRenderState(D3DRS_COLORWRITEENABLE, &colour);
+			Device->GetRenderState(D3DRS_ZENABLE, &ztest);
+			if (colour != 0 && ztest != D3DZB_FALSE)
+				WaterMask::Redraw(Device, TheFrameRateManager->FrameNumber, [&]() { return Next(Device, Type, Base, MinIndex, Vertices, Start, Count); });
+		}
+		return result;
+	}
+
+	static void BeginWorld(bool firstWorldOfFrame) {
+		WorldDepth = nullptr;
+		// (the camera under water: left as it was, the surface seen from below is not masked)
+		if (Stuck || !firstWorldOfFrame || !TheFrameRateManager || !WaterMask::Wanted(TheFrameRateManager->FrameNumber) || TheShaderManager->GameState.isUnderwater) return;
+		IDirect3DSurface9* depth = nullptr;
+		TheRenderManager->device->GetDepthStencilSurface(&depth);
+		WorldDepth = depth;
+		if (depth) depth->Release();
+	}
+
+	static void EndWorld() { WorldDepth = nullptr; }
+
+	static bool IsWaterPass(const PointShadowForward::RenderPassView* pass) {
+		if (!WorldDepth || ShaderSplit::CurrentContext != ShaderSplit::World || !pass || !pass->geometry) return false;
+		if (pass->passEnum == 0x288 || pass->passEnum == 0x289) return false;	// the water's stencil passes: no water colour of their own
+		NiShadeProperty* shade = (NiShadeProperty*)pass->geometry->GetProperty(NiProperty::kType_Shade);
+		if (!shade || shade->m_eShaderType != NiShadeProperty::kProp_Water) return false;
+		IDirect3DDevice9* device = TheRenderManager->device;
+		IDirect3DSurface9* depth = nullptr;
+		device->GetDepthStencilSurface(&depth);
+		if (depth) depth->Release();
+		return depth == WorldDepth;
+	}
+
+	// Round one water pass's RenderPassStandard: its draws go out through DrawHook.
+	struct PassScope {
+		bool hooked = false;
+		explicit PassScope(const PointShadowForward::RenderPassView* pass) {
+			if (!IsWaterPass(pass)) return;
+			void** table = *(void***)TheRenderManager->device;
+			if (table[82] == (void*)&DrawHook) return;	// (never nested: left to the outer scope)
+			DWORD old = 0;
+			if (!VirtualProtect(&table[82], sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) return;
+			Next = (DrawIndexedPrimitiveFn)table[82];
+			table[82] = (void*)&DrawHook;
+			VirtualProtect(&table[82], sizeof(void*), old, &old);
+			hooked = InPass = true;
+		}
+		~PassScope() {
+			if (!hooked) return;
+			InPass = false;
+			void** table = *(void***)TheRenderManager->device;
+			DWORD old = 0;
+			if (table[82] == (void*)&DrawHook && VirtualProtect(&table[82], sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) {
+				table[82] = (void*)Next;
+				VirtualProtect(&table[82], sizeof(void*), old, &old);
+			}
+			else {
+				// something else put its own entry there during the pass (or the page could not be written): ours may stay under it, passing
+				// every draw on (InPass false). Hooking again on top would call round in a ring: no mask for the rest of the session.
+				Stuck = true;
+				Logger::Log("[WARNING] UNOFFICIAL RT path trace: PTWaterMask: the draw hook could not be taken out after a water pass: the water mask is off for the session.");
+			}
+		}
+	};
 }
 
 void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 Arg4) {
@@ -3641,7 +4022,10 @@ void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32
 	GameEyes::Before((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL GameShaderEyes, per draw
 	DisplaceHeight::Geometry = ((const PointShadowForward::RenderPassView*)Pass)->geometry;	// UNOFFICIAL 2026-11-01 SameHeight
 	AlphaHash::ForPass(((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World, TheRenderManager->device);	// UNOFFICIAL 2026-11-03 SmoothCutouts
-	RenderPassStandard(Pass, Arg2, Arg3, Arg4);
+	{
+		WaterMaskDraw::PassScope waterMask((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL 2026-11-12 PTWaterMask: a water pass's draws once more into the path tracer's water mask (nothing otherwise)
+		RenderPassStandard(Pass, Arg2, Arg3, Arg4);
+	}
 	RmaosDraw::AfterObject();	// UNOFFICIAL 2026-11-09 FromGameData: nothing inherited by the next draw
 	AlphaHash::AfterPass(TheRenderManager->device);
 	FlashlightLamp::AfterPass();	// UNOFFICIAL 2026-11-04 the flashlight's game lamp back to its own dimmer
@@ -4035,6 +4419,7 @@ void __fastcall RenderWorldSceneGraphHook(Main* This, UInt32 edx, Sun* SkySun, U
 		// UNOFFICIAL the skin blur: its targets are bound only for skin drawn inside the world scene.
 		if (TheShaderManager->Effects.SkinScattering) TheShaderManager->Effects.SkinScattering->InWorldScene = true;
 		SandstormGlass::BeginWorld();	// UNOFFICIAL sandport: ThroughBlended (RenderBlendedHook)
+		WaterMaskDraw::BeginWorld(FrameWorldCalls == 1);	// UNOFFICIAL 2026-11-12 PTWaterMask: this scene's water draws into the path tracer's mask (nothing unless it asked)
 		// UNOFFICIAL 2026-10-20 MaterialAware reflections (core/ReflMaterial.h): blended passes keep off the scene's alpha.
 		ReflMaterial::BeginWorld(TheRenderManager->renderState, TheRenderManager->device, ReflMaterial::CompiledIn() && TheSettingManager->GetSettingI("Shaders.Reflections.Main", "MaterialAware") > 0);
 		// UNOFFICIAL 2026-11-03 SmoothCutouts (core/AlphaHash.h): alpha-tested objects hashed while TAA / FSR / DLSS jitter this scene.
@@ -4043,6 +4428,7 @@ void __fastcall RenderWorldSceneGraphHook(Main* This, UInt32 edx, Sun* SkySun, U
 		AlphaHash::EndWorld(TheRenderManager->device);
 		ReflMaterial::EndWorld(TheRenderManager->renderState, TheRenderManager->device);
 		SandstormGlass::EndWorld();
+		WaterMaskDraw::EndWorld();	// UNOFFICIAL 2026-11-12 PTWaterMask
 		PassSums::EndWorld(TheRenderManager->device);	// UNOFFICIAL ExactPassSums: a run still open at the world's end is folded in here
 		// UNOFFICIAL the skin blur: the SkinShader hooks unbind the targets after every skin draw; this only guarantees
 		// nothing after the world scene ever draws into it.
@@ -4163,6 +4549,12 @@ using RenderReflectionsMethod = void(__thiscall*)(WaterManager*, NiCamera*, Shad
 RenderReflectionsMethod RenderReflections = reinterpret_cast<RenderReflectionsMethod>(Hooks::RenderReflections);
 void __fastcall RenderReflectionsHook(WaterManager* This, UInt32 edx, NiCamera* Camera, ShadowSceneNode* SceneNode) {
 	SessionLog::StageScope stage("the water reflection");
+	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Water: the game's reflection renders in a frame a scope's picture was drawn for, and
+	// whether any is for the picture's camera (the Scope WATER log line). The picture is drawn just before the frame number advances.
+	if (ScopeCamera::ScenesDrawn && ScopeCamera::FrameNumber() - ScopeCamera::LastSceneFrame == 1) {
+		ScopeCamera::ReflectionCalls++;
+		if ((const void*)Camera == ScopeCamera::LastCamera) ScopeCamera::ReflectionCallsExtra++;
+	}
 	ReflectionProbe::HookCamera = Camera;
 	// UNOFFICIAL 2026-10-31 RT water ([Shaders.Reflections.RT] WaterSkipPlanar): the water shaders read the RT reflection this frame,
 	// not the planar map, so the planar pass is not drawn (ReflectionsEffect::UpdateWaterConstants decides, once a frame).

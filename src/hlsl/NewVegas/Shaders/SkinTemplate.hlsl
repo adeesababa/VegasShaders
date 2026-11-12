@@ -583,7 +583,7 @@ PS_OUTPUT main(PS_INPUT pin) {
         pout.capturedNormal = CAPTURED_NORMAL_INVALID;
     #else
         pout.capturedNormal = CapturedNormalOut(pin.normal.xyz, worldPos);
-        #if CAPTURED_NORMALS_ON == 2
+        #if CAPTURED_NORMALS_ON >= 2   // (2026-11-11: was == 2. With AlbedoBuffer on the define is 3, so skin kept alpha 2.0, SkinFill (clip(a - 2.02)) wrote nothing and skin pixels kept the MaterialBuffer class, roughness and metal of whatever was drawn before them)
             // UNOFFICIAL 2026-10-31 MaterialBufferSkin (core/CapturedNormals.h SkinFill): the skin's roughness rides in the alpha (2.05 + 0.4 x it;
             // worn gear stays 2), copied into MaterialBuffer as class 6 after the list (this template's COLOR2 is the skin blur's)
             [flatten] if (pout.capturedNormal.a > 1.5f) pout.capturedNormal.a = 2.05f + 0.4f * saturate(skinRoughness);

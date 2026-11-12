@@ -787,6 +787,13 @@ void SessionLog::NoteIni(const GameSetting* setting) {
 	}
 }
 
+// UNOFFICIAL 2026-11-12 (docs/next/PT-COMPAT-AUDIT-2026-11-12.md item 12): the loaded grid's size for RtCore's far-LOD-land test
+int SessionLog::GridsToLoad() {
+	for (size_t i = 0; i < sizeof(IniNames) / sizeof(IniNames[0]); i++)
+		if (!_stricmp(IniNames[i], "uGridsToLoad:General")) { const int n = IniValues[i].empty() ? 5 : atoi(IniValues[i].c_str()); return n < 5 ? 5 : n > 21 ? 21 : n; }
+	return 5;
+}
+
 void SessionLog::OnDeferredInit() {
 	StageScope stage("the session header at DeferredInit");
 	std::vector<std::string> ini;

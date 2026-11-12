@@ -204,3 +204,42 @@ docs/next/RT-PATH-TRACING.md "Team perf-reflfix4" has the facts (each checked ag
   and NPCs' hair in the colour the game draws it. Wrong: the room orange in the mirror again (an old ReflectionsComposite.spv: the log
   line says so); blocks in the gold (an old ReflectionsRTResolve.spv); white hair with `tint from none` in the hair lines (the property
   held no written colour: the line shows what it held).
+
+
+## Replace, not add: ReplaceForward (2026-11-12; default off, NOT yet run in a game)
+What the frame already holds when the composite runs, and what the composite does with it (`lin = mix(lin, reflected, share)`, share =
+saturate(amount x the split-sum Fresnel of the material's F0 and roughness) x the trace's coverage; ReflectionsComposite.frag / the .fx):
+- **The game's env-map pass** (SLS2057 / SLS2058 = `Shaders/EnvTemplate.hlsl`, an additive pass after the object's lit pass: its cube map x
+  the mask x the artist's strength, by the light with `[Shaders.PBR.EnvMaps]`). DOUBLE-COUNTED: the mix only takes `share` of it away,
+  and on stone, tile or glass seen straight on that is about 4 %, so the painted cube map stayed almost whole under the real reflection.
+- **Metal's surroundings** (`Includes/Object.hlsl` getMetalAmbient, added in ObjectTemplate.hlsl's lit pass: sky / ambient / the live cube x
+  EnvBRDFApprox). Mostly replaced already: on metal the share is its F0 (0.5-0.95), so 5-50 % of it is left under the reflection. Not
+  changed here (the object shaders are at their instruction limits and have no per-pixel knowledge of the reflection).
+- **The Specular effect's sky reflection** (`Effects/Specular.fx.hlsl` SkyStrength, outdoors, the chain step before this one). Same as
+  metal: (1 - share) of it is left; at glancing angles, where it is strongest, the share is near 1. Not changed here (another effect).
+- Lamp and sun highlights are lights, not the environment: the mix dims them by the share too (KeepFlashlight puts the flashlight's back).
+- A ray that finds nothing: the surroundings cube, the light grid, then the sky fill the missing share (the trace / Resolve); what they
+  cannot fill stays out of the alpha, so the surface keeps its own colour there (never black).
+
+**`[Shaders.Reflections.Main] ReplaceForward`** (live): the env-map pass reads LAST frame's Buffer at its own pixel (the pass is drawn
+before this frame's trace, as the water with RT Water) and leaves out `alpha` of its cube map: where the effect answered the reflection
+(screen, rays, its fallbacks) the surface shows that one reflection; where it did not (the surface does not reflect for this effect: no
+material, too rough, past DrawDistance; or nothing was found) the game's cube map stays as the probe. The composite is unchanged.
+- C++: `UpdateWaterConstants` makes the frame's value (TESR_ReflReplace: x 1, zw one scene pixel in UV) when last frame's composite drew
+  from that Buffer (the effect on, drawn last frame, no camera jump, no DebugView, not under water, not while the path tracer replaces the
+  scene); `core/ReflMaterial.h` hands it to the shaders only inside the frame's first world scene and the first-person scene (the planar
+  water reflection and any other scene get 0). Log, a line per change: `UNOFFICIAL Reflections ReplaceForward: on ...` / `... not used now: <why>`.
+- Off: the constant is 0, the shader's branch is not taken, the picture is as before. The pass itself is a little larger than before
+  (one constant, one sampler on s11, a skipped branch); `REFL_REPLACE_FORWARD 0` compiles it out byte for byte.
+- What correct looks like: the Ultra-Luxe's marble, polished counters, glass and chrome props show the room once (the real reflection),
+  not the room over a painted sheen; the same things at a distance / in a rough spot / with the Reflections effect off keep the game's
+  sheen. With RT Weapon the gun shows the traced room without its painted chrome under it.
+- What wrong would look like: an env-mapped surface gone matte where the effect reflects weakly (by design where the material is nearly
+  too rough: MaterialMaxRoughness's fade; and where SpecularOcclusion dims the reflection: lower it with this on); a thin bright or dark
+  outline on shiny props for one frame while turning (the mask is a frame old, half resolution, not reprojected); the sheen flickering
+  (the log line then alternates between `on` and `not used now`).
+- Energy: the composite's weight already follows the material's Fresnel and roughness and is a mix (never more than 1); only ReflectAdd
+  (default 0) adds on purpose. Nothing was changed there.
+- What a reflection shows (RT hits out of view): the sun through a shadow ray (`[Shaders.Reflections.RT] SunShadows`, default on), or
+  indoors / at night the lamp that lights the hit most through one (`HitLamps`, reflecting surfaces under roughness 0.25); the other 11
+  lamps and the flashlight unshadowed, the ambient from the light grid at the hit. `Rt/ReflectionsRTBody.glsl` ShadeHit.

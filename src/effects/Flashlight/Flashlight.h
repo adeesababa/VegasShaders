@@ -49,6 +49,9 @@ public:
 	};
 	DeferredSettingsStruct	Deferred = {};
 	bool	WantsShadowMap() const { return Deferred.Shadows; }
+	// UNOFFICIAL 2026-11-11 TheFrameRateManager->FrameNumber of the last frame the shadow map was drawn (ShadowManager::RenderShadowSpotlight,
+	// with SpotLightWorldToLightMatrix[0]); FlashlightDeferred::ShadowMap gives the map only in that frame (an old map + matrix = wrong shadows)
+	unsigned	ShadowMapFrame = ~0u;
 
 	// The Pip-Boy light while the flashlight is on: the flashlight's game lamp (GameLight) or, with GameLight off, darkened (else the game
 	// could still hand it to the objects round the player as one of their few lamps). Its own values, put back when the flashlight is off.

@@ -1890,6 +1890,7 @@ PS_OUTPUT main(PS_INPUT IN) {
         pout.color.a = ReflMaterialAlpha(surface.a);	// UNOFFICIAL MaterialAware reflections (Object.hlsl)
     #else
         pout.color.a = ReflMaterialAlpha(surface.a * AmbientColor.a);
+        #define CAP_COVERAGE (surface.a * AmbientColor.a)	// UNOFFICIAL 2026-11-12 CapturedCoverage: the draw's own alpha, before the material code (the one-pass records only: a light-only pass's alpha is the texture's alone)
     #endif
     #ifdef ONLY_SPECULAR
         pout.highlightCopy = pout.color;   // UNOFFICIAL NewSkin: alpha too, so any blend the pass uses adds alike to both targets
@@ -1940,6 +1941,16 @@ PS_OUTPUT main(PS_INPUT IN) {
         pout.capturedNormal = CapturedNormalOut(ShadowPlainNormal(float2(IN.lightDistSq.w, IN.lightDir.w), IN.vertexColor.a), IN.shadowWorldPos.xyz);
     #else
         pout.capturedNormal = CAPTURED_NORMAL_INVALID;	// SmoothObjectNormals off: no vertex normal here
+    #endif
+    // UNOFFICIAL 2026-11-12 CapturedCoverage (Includes/CapturedNormals.hlsl): a blended draw (fading in, a rubble skirt's vertex alpha)
+    // records only where its own alpha is 0.5 or more; below, alpha 0 = the texels stay as they were. An opaque draw: x 1, as before.
+    #if CAPTURED_NORMALS_ON >= 3 && defined(CAP_COVERAGE) && !defined(DIFFUSE) && !defined(ONLY_SPECULAR)
+    {
+        const float capKeep = CapturedCoverage(CAP_COVERAGE);
+        pout.capturedPad1.a *= capKeep;
+        pout.capturedPad2.a *= capKeep;
+        pout.capturedNormal.a *= capKeep;
+    }
     #endif
 #endif
     pout.color.rgb = LinearSceneOut(pout.color.rgb);	// UNOFFICIAL 2026-10-28 LinearScene (includes/LinearLight.hlsl)
@@ -2318,6 +2329,16 @@ PS_OUTPUT main(PS_INPUT IN) {
         pout.capturedNormal = CapturedNormalOut(ShadowPlainNormal(IN.uv.zw, IN.vertexColor.a), SHADOW_WP_LOAD(IN));
     #else
         pout.capturedNormal = CAPTURED_NORMAL_INVALID;
+    #endif
+    // UNOFFICIAL 2026-11-12 CapturedCoverage (Includes/CapturedNormals.hlsl; as in the LIGHTS < 4 variant): x 1 on an opaque draw.
+    // Not in the slot-tight six-lamp shader (it sits at the slot count drivers refuse): it records the whole polygon, as before.
+    #if CAPTURED_NORMALS_ON >= 3 && !defined(NVR_SLOT_TIGHT)
+    {
+        const float capKeep = CapturedCoverage(baseColor.a * AmbientColor.a);
+        pout.capturedPad1.a *= capKeep;
+        pout.capturedPad2.a *= capKeep;
+        pout.capturedNormal.a *= capKeep;
+    }
     #endif
 #endif
     #if LAMPS_DEFERRED && defined(MANY_LAMPS) && INTERIOR_SHADOWS

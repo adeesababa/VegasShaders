@@ -504,7 +504,13 @@ bool TAAEffect::RayReconstruct(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 	const D3DXMATRIX& viewMatrix = *(const D3DXMATRIX*)view;	// TheRenderManager->viewMatrix
 	const float nearZ = cameraData->x, farZ = cameraData->y;
 	// The chain's curve (TESR_ToneMapping.w, what the game's tonemap decodes with); 2.2 if it is not there.
-	const float linearization = toneMapping && toneMapping->w > 0.0f ? toneMapping->w : 2.2f;
+	// UNOFFICIAL 2026-11-12 RRTracedCurve (docs/next/PT-COMPAT-AUDIT-2026-11-12.md item 10): while the path traced picture replaces the scene, the
+	// scene holds it as linear^(1 / 2.2) (RtPathTraceShow.frag) whatever [Shaders.Tonemapping.Main] Linearization is. Decoded with another
+	// curve (a tester ran 1.0), RR got a picture that was not linear and albedo guides that did not divide it: flat, over-smoothed textures.
+	// The same exponent encodes RR's output again below, so the final picture's curve is unchanged either way.
+	static bool tracedCurve = true;
+	{ static unsigned n = 0; if ((n++ % 120) == 0) { SettingManager::Configuration::ConfigNode on; tracedCurve = !TheSettingManager->Config.FillNode(&on, "Shaders.TAA.DLSS", "RRTracedCurve") || on.BoolValue; } }
+	const float linearization = tracedCurve && RtPathTrace::Replacing() ? 2.2f : toneMapping && toneMapping->w > 0.0f ? toneMapping->w : 2.2f;
 	// The material buffer's roughness ([Main.Main.Quality] MaterialBuffer) only when it holds this frame's, at the screen's size.
 	bool materialOn = materialData && materialData->x > 0.5f && material && material->GetType() == D3DRTYPE_TEXTURE;
 	if (materialOn) {

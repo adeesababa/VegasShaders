@@ -26,7 +26,34 @@ struct PS_INPUT {	// vertex to pixel
     float4 shadowWorldPos: TEXCOORD4;	// w flags whether the vertex shader filled it in
 };
 
-struct PS_OUTPUT { float4 color: COLOR0; };
+// UNOFFICIAL 2026-11-12 leaf records (docs/next/PT-COMPAT-AUDIT-2026-11-12.md item 9; Includes/CapturedNormals.hlsl CAPTURED_FOLIAGE;
+// core/CapturedNormals.h LeafWriters, [Main.Main.Quality] CapturedLeaves): with the AlbedoBuffer compiled in, the leaf shaders write
+// their own colour, material and normal records (COLOR1-3) where the capture binds them. Without it they are exactly as before. The four
+// STLEAF pixel shaders include Shadow.hlsl first (CapturedNormalOut needs its ShadowEncodeNormal).
+#if defined(CAPTURED_NORMALS_ON) && CAPTURED_NORMALS_ON >= 3
+    #ifdef __INTELLISENSE__
+        #include "CapturedNormals.hlsl"
+    #else
+        #include "includes/CapturedNormals.hlsl"
+    #endif
+#endif
+
+struct PS_OUTPUT {
+    float4 color: COLOR0;
+#ifdef CAPTURED_FOLIAGE
+    CAPTURED_FOLIAGE_OUTPUTS	// (discarded where nothing is bound there)
+#endif
+};
+
+// Call from main's top level, after OUT.color (the face normal takes gradients). The leaf texture's colour, decoded (the vertex shader
+// hands over light, not a tint); class 5 (plants) with a matte roughness; the card's own face normal (the leaf vertex shaders pass no
+// normal on: the one the sun shadow lookup uses) with the camera distance. Written only with Vegas Shaders' leaf vertex shader (the
+// position is its); the cut-out's holes write nothing anywhere (the game's alpha test).
+#ifdef CAPTURED_FOLIAGE
+    #define LeafRecords(OUT, leaf, albedo) {         const float leafWritten = SHADOW_VS_PRESENT((leaf).shadowWorldPos.w) ? 1.0f : 0.0f;         (OUT).capturedPad1 = CapturedFoliageAlbedo(saturate(LinColor((albedo).rgb)), leafWritten);         (OUT).capturedPad2 = CapturedFoliageMaterial(0.85f, leafWritten);         (OUT).capturedNormal = CapturedFoliageNormal(GetShadowGeometricNormal((leaf).shadowWorldPos.xyz), (leaf).shadowWorldPos.xyz, leafWritten); }
+#else
+    #define LeafRecords(OUT, leaf, albedo)
+#endif
 
 // Call from main's top level only (the shadow lookup takes gradients, which dynamic branches would forbid).
 float3 LeafLighting(PS_INPUT leaf) {

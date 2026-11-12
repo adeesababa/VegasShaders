@@ -491,6 +491,7 @@ void ShaderManager::PreStep_ShadowPasses(ChainContext& ctx) {
 			}
 #endif
 		}
+		RtPathTrace::MaskShadowBuffer(Device, Effects.ShadowsExteriors->Textures.ShadowPassSurface);	// UNOFFICIAL 2026-11-12 PTOwnShadows: no deferred shadow over the traced pixels (off / no path tracing: nothing)
 	}
 	else {
 		// Nothing above ran this frame, so ShadowPassSurface keeps whatever it last

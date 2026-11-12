@@ -35,6 +35,37 @@ public:
 	IDirect3DSurface9*	occlusionHistorySurface[2] = {};
 	int					historyIndex = 0;		// the one holding last frame's
 	bool				historyValid = false;
+	bool				exteriorBalance = true;	// UNOFFICIAL 2026-11-11 (sungi) [Shaders.AmbientLight.Main] ExteriorBalance (Apply)
+	bool				giSingleHistory = true;	// UNOFFICIAL 2026-11-11 (sungi) [Shaders.AmbientLight.Main] GISingleHistory (GI accumulate)
+	float				debugGIExposure = 1.0f;	// UNOFFICIAL 2026-11-12 [Shaders.AmbientLight.Main] DebugGIExposure (0.01-64; 1 = off): a factor on the bounce-light test views 13-15 only (Render)
+	float				ambientReplace = 0.0f;	// UNOFFICIAL 2026-11-11 (sungi p2) [Shaders.AmbientLight.Main] AmbientReplace (0-1; 0 = off)
+	float				ambientFloor = 0.15f;	// UNOFFICIAL 2026-11-11 (sungi p2) [Shaders.AmbientLight.Main] AmbientFloor (0-1)
+	// UNOFFICIAL 2026-11-12 (sungi nights) [Shaders.AmbientLight.Main] AmbientReplaceNight / AmbientFloorNight (-1 = the day value; 0-1): the two at night,
+	// blended by the game's day-night curve; AmbientReplaceNow / AmbientFloorNow are the values in use outdoors (Render, AmbientReplaceActive)
+	float				ambientReplaceNight = -1.0f, ambientFloorNight = -1.0f;
+	float				AmbientReplaceNow() const;
+	float				AmbientFloorNow() const;
+	// UNOFFICIAL 2026-11-12 (sungi p4) SunGI ([Shaders.AmbientLight.Main] SunGI, in memory only): UpdateSettings keeps the toml's keys apart from the values in use
+	// (gridBounceKey / ambientReplaceKey; ambientReplace and gridBounce are the values in use) and SunGIFrame, once a frame, applies the parts that depend on
+	// the RT core running (the grid fallback) and on being outdoors; sunGiForced = SunGI has Status Enabled on (the user's switch is off): ShouldRender then
+	// keeps the effect off indoors.
+	bool				sunGi = false, sunGiForced = false, settingsOutdoors = true;
+	float				gridBounceKey = 0.0f, ambientReplaceKey = 0.0f, ambientReplaceSunGI = 0.8f;
+	int					sunGiState = 0;
+	void				SunGIFrame();
+	// UNOFFICIAL 2026-11-12 RoomGI ([Shaders.AmbientLight.Main] RoomGI, in memory only): SunGI's interior counterpart, on the same plumbing. UpdateSettings keeps
+	// the toml's keys apart (interiorBalanceKey, albedoBufferKey, ambientReplaceInteriorKey); RoomGIFrame (from SunGIFrame, once a frame) puts the forced values
+	// in use only while the player is indoors AND the RT core runs (roomGiOn), else the keys: without the ray-traced bounce nothing is new. AmbientReplaceInterior
+	// / AmbientFloorInterior: AmbientReplace / AmbientFloor indoors (Render: NVR_ALInterior.x = 1 + replace x (1 - floor), NVR_ALRoom.x = 1 - the ambient scale).
+	bool				roomGi = false, roomGiForced = false, roomGiOn = false;
+	bool				interiorBalanceKey = true, albedoBufferKey = false;
+	float				ambientReplaceInterior = 0.0f, ambientReplaceInteriorKey = 0.0f, ambientFloorInterior = 0.3f;
+	int					roomGiState = 0;
+	bool				roomShareSet = false;	// NVR_ALRoom was set last frame (Render sets it back to 0 once after)
+	CachedHandle		paramRoom;
+	void				RoomGIApply(bool room);
+	void				RoomGIFrame(bool outdoors, bool rt);
+	bool				AmbientReplaceActive() const;	// UNOFFICIAL 2026-11-11 (sungi p2) outdoors and AmbientReplace > 0 (AmbientOcclusion forces the sky-miss weight)
 	bool				temporal = true;
 	D3DXMATRIX			lastView, lastInvView, lastProj;
 	double				lastTime = 0.0;

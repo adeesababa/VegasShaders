@@ -28,7 +28,10 @@
 #include "RtSunShadows.h"	// UNOFFICIAL 2026-10-28 RT sun shadows
 #include "Upscaler.h"	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction (RayReconstructionFrameBegin)
 #include "EffectChain.h"	// UNOFFICIAL 2026-11-02 the post-process chain as step tables
+#include "ScopeOverlay.h"	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] (its settings, read below)
+#include "ScopeCamera.h"	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] the picture-in-picture scope (its settings; BeginExtraCamera below)
 #include "FailOnce.h"	// UNOFFICIAL 2026-11-02 RetryFailedEffects: the cell serial its latches wait for
+#include "ShaderFallback.h"	// UNOFFICIAL 2026-11-12 ShaderFallback (the family's members loaded again after a drop)
 #include <unordered_map>	// UNOFFICIAL 2026-10-27 RenderScale v2 (RenderRect::RescaleRegistered)
 extern D3DXVECTOR4 NvrGameMultisample;	// UNOFFICIAL 2026-11-04 Hooks/Settings.cpp (TESR_GameMultisample)
 
@@ -384,6 +387,124 @@ void ShaderManager::ClearShaderSamplers(const char* textureName, size_t byteCoun
 void ShaderManager::RegisterConstant(const char* constantName, D3DXVECTOR4* value) { ConstantsTable[constantName] = value; }
 
 
+// UNOFFICIAL 2026-11-12 [Main.Main.Scope] OwnCamera (core/ScopeCamera.h; Render.cpp ScopeScene calls these round the scene).
+// A picture-in-picture scope is the world drawn again by another camera, with this mod's shaders bound, outside the frame's own passes.
+// The shaders take their camera from the memory the TESR_ constants point at, uploaded when a shader's handle changes
+// (ShaderRecord::SetCT). For the length of that scene the memory holds the scene's camera:
+//  - RenderManager::SetupExtraCamera: the view / projection / inverse matrices, camera position and direction, camera and FOV data;
+//  - TESR_ReciprocalResolution: the picture's size (the sky's view direction is rebuilt from the pixel: Includes/Sky.hlsl);
+//  - TESR_RenderScale: 1 (the picture is never drawn into a part of its target);
+//  - TESR_ViewSpaceLightDir / TESR_ScreenSpaceLightDir: the sun through this camera, as UpdateConstants makes them;
+//  - the sun shadow cascades, the ortho map, the cross-fade's old cascades and the character map: their matrices take positions
+//    relative to the camera they were drawn for, and their centres are relative to it too. Each is moved to this camera's position
+//    (T(this camera - that camera) x matrix, centre minus the same), exactly as ShadowManager moves a cascade it keeps for a frame.
+//    The maps themselves are the last drawn ones (the picture is drawn before the frame's own shadow maps): what they cover round the
+//    player is shaded in the picture, what lies past the last cascade behaves as it does in the main view at that distance.
+// Everything is saved first and put back as it was by EndExtraCamera (plain copies: the main frame's values are bit-identical). The
+// caller forces the next shader bind to upload again after each call (Render.cpp ForcePixelConstants / ForceVertexConstants): the
+// uploads pass ConstantFilter like any other, which compares them with what the device holds, so nothing stale is skipped.
+// Not handled (they stay the main camera's; small or unused in a scope's picture): TESR_WetnessCamera, TESR_DustOrigin and the
+// clouds' shadow origin (patterns anchored to the world, off by the distance between the two cameras), TESR_DepthConstants and
+// every screen-space buffer a shader reads by pixel position (soft particles' depth, terrain blending, the reflection buffer).
+namespace {
+	struct ExtraCameraSave {
+		bool						active = false, shadows = false;
+		RenderManager::CameraState	camera;
+		D3DXVECTOR4					reciprocal, viewLight, screenLight, renderScale;
+		D3DXMATRIX					cascade[5];
+		D3DXVECTOR4					centre[5];
+		D3DXMATRIX					oldCascade[4];
+		D3DXVECTOR4					oldCentre[4];
+		D3DXMATRIX					character;
+		D3DXVECTOR4					characterCentre;
+	};
+	ExtraCameraSave ExtraSave;
+
+	// A matrix that takes positions relative to the camera at `from`, changed to take positions relative to the camera at `to`
+	// (row vectors: p_from = p_to + (to - from), so T(to - from) x matrix), and its camera-relative centre moved the same way.
+	// A map never drawn has no camera position yet (not a number, or far off): left alone.
+	void MoveCameraRelative(D3DXMATRIX& matrix, D3DXVECTOR4& centre, const D3DXVECTOR3& from, const D3DXVECTOR3& to) {
+		const D3DXVECTOR3 delta = to - from;
+		if (!(D3DXVec3LengthSq(&delta) < 1.0e14f)) return;
+		D3DXMATRIX translation;
+		D3DXMatrixTranslation(&translation, delta.x, delta.y, delta.z);
+		matrix = translation * matrix;
+		centre.x -= delta.x;
+		centre.y -= delta.y;
+		centre.z -= delta.z;
+	}
+}
+
+bool ShaderManager::BeginExtraCamera(NiCamera* camera, UINT width, UINT height, D3DXMATRIX* projection) {
+	ExtraCameraSave& s = ExtraSave;
+	if (s.active || !camera || !width || !height || !projection) return false;
+	TheRenderManager->SaveCameraState(&s.camera);
+	if (!TheRenderManager->SetupExtraCamera(camera, projection)) return false;	// (it changed nothing)
+	s.active = true;
+
+	s.reciprocal = ShaderConst.ReciprocalResolution;
+	s.viewLight = ShaderConst.ViewSpaceLightDir;
+	s.screenLight = ShaderConst.ScreenSpaceLightDir;
+	s.renderScale = TAAEffect::RenderScaleConstant;
+	// x, y: one pixel of the picture in uv; z: its aspect ratio; w: kept (the field of view value CameraManager puts there)
+	ShaderConst.ReciprocalResolution = D3DXVECTOR4(1.0f / (float)width, 1.0f / (float)height, (float)width / (float)height, s.reciprocal.w);
+	TAAEffect::RenderScaleConstant = D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
+	D3DXVec4Transform(&ShaderConst.ScreenSpaceLightDir, &ShaderConst.SunDir, &TheRenderManager->ViewProjMatrix);
+	D3DXVec4Normalize(&ShaderConst.ScreenSpaceLightDir, &ShaderConst.ScreenSpaceLightDir);
+	D3DXVec4Transform(&ShaderConst.ViewSpaceLightDir, &ShaderConst.SunDir, &TheRenderManager->ViewMatrix);
+	D3DXVec4Normalize(&ShaderConst.ViewSpaceLightDir, &ShaderConst.ViewSpaceLightDir);
+
+	ShadowsExteriorEffect* shadows = Effects.ShadowsExteriors;
+	s.shadows = shadows != nullptr;
+	if (shadows) {
+		const NiPoint3& at = camera->m_worldTransform.pos;
+		const D3DXVECTOR3 eye(at.x, at.y, at.z);
+		for (int i = ShadowsExteriorEffect::MapNear; i <= ShadowsExteriorEffect::MapOrtho; i++) {
+			ShadowsExteriorEffect::ShadowMapSettings& map = shadows->ShadowMaps[i];
+			s.cascade[i] = map.ShadowCameraToLight;
+			s.centre[i] = map.ShadowMapCascadeCenterRadius;
+			MoveCameraRelative(map.ShadowCameraToLight, map.ShadowMapCascadeCenterRadius, map.CameraTranslation, eye);
+		}
+		// The cross-fade's old cascades were set relative to the main camera of the last frame: the near cascade's camera position
+		// is that one (ShadowManager sets it every frame, drawn or kept).
+		const D3DXVECTOR3 mainEye = shadows->ShadowMaps[ShadowsExteriorEffect::MapNear].CameraTranslation;
+		for (int i = 0; i < 4; i++) {
+			s.oldCascade[i] = shadows->Constants.OldCameraToLight[i];
+			s.oldCentre[i] = shadows->Constants.OldCenter[i];
+			MoveCameraRelative(shadows->Constants.OldCameraToLight[i], shadows->Constants.OldCenter[i], mainEye, eye);
+		}
+		s.character = shadows->Constants.CharacterCameraToLight;
+		s.characterCentre = shadows->Constants.CharacterCenter;
+		if (shadows->Constants.CharacterData.w > 0.0f)	// (0: the map is not read: the first-person pass leaves it so)
+			MoveCameraRelative(shadows->Constants.CharacterCameraToLight, shadows->Constants.CharacterCenter, shadows->CharacterMap.CameraTranslation, eye);
+	}
+	return true;
+}
+
+void ShaderManager::EndExtraCamera() {
+	ExtraCameraSave& s = ExtraSave;
+	if (!s.active) return;
+	s.active = false;
+	TheRenderManager->RestoreCameraState(&s.camera);
+	ShaderConst.ReciprocalResolution = s.reciprocal;
+	ShaderConst.ViewSpaceLightDir = s.viewLight;
+	ShaderConst.ScreenSpaceLightDir = s.screenLight;
+	TAAEffect::RenderScaleConstant = s.renderScale;
+	ShadowsExteriorEffect* shadows = Effects.ShadowsExteriors;
+	if (!s.shadows || !shadows) return;
+	for (int i = ShadowsExteriorEffect::MapNear; i <= ShadowsExteriorEffect::MapOrtho; i++) {
+		shadows->ShadowMaps[i].ShadowCameraToLight = s.cascade[i];
+		shadows->ShadowMaps[i].ShadowMapCascadeCenterRadius = s.centre[i];
+	}
+	for (int i = 0; i < 4; i++) {
+		shadows->Constants.OldCameraToLight[i] = s.oldCascade[i];
+		shadows->Constants.OldCenter[i] = s.oldCentre[i];
+	}
+	shadows->Constants.CharacterCameraToLight = s.character;
+	shadows->Constants.CharacterCenter = s.characterCentre;
+}
+
+
 void ShaderManager::InitializeConstants() {
 	ShaderConst.pWeather = nullptr;	// no weather seen yet
 
@@ -422,6 +543,9 @@ void ShaderManager::UpdateConstants() {
 		SettingManager::Configuration::ConfigNode node;
 		GameShadersInMenus = !TheSettingManager->Config.FillNode(&node, "Shaders.PBR.Main", "GameShadersInMenus") || node.BoolValue;
 	}
+	ScopeOverlay::ReadSettings();	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] KeepOverlayBlack, FullFrame (core/ScopeOverlay.h; Render.cpp SetShadersHook, RenderHook)
+	ScopeOverlay::UpscalerSmall = Effects.TAA && Effects.TAA->Enabled && Effects.TAA->FSRSettings.Enabled && Effects.TAA->FSRSettings.RenderScale < 0.999f;	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] KeepRenderScale
+	ScopeCamera::ReadSettings();	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Detect, OwnCamera, ... (core/ScopeCamera.h; live, read every 30th frame)
 	GameShaderEyes = TheSettingManager->GetSettingI("Shaders.PBR.Main", "GameShaderEyes") != 0;	// UNOFFICIAL 2026-10-27 (Render.cpp SetShadersHook)
 	EyeShaderOld = TheSettingManager->GetSettingI("Shaders.PBR.Main", "EyeShaderOld") != 0;	// UNOFFICIAL 2026-11-09 (Render.cpp GameEyes)
 	NvrMsaaWarningTick();
@@ -813,6 +937,56 @@ void ShaderManager::ReloadShaders() {
 }
 
 /*
+* UNOFFICIAL 2026-11-12 ShaderFallback (core/ShaderFallback.h, ShaderRecord::LoadShader): at the end of every game shader's load. When
+* that load made a template family lose an optional feature (a shader of it was too long for the driver on native Direct3D 9), the
+* family's members made BEFORE the drop still hold the feature: ground with it next to ground without. They are loaded again here, as
+* ReloadShaders does it (their shorter builds are in the cache by now: ShaderRecord.cpp FallbackPrepareFamily). A load in here may drop
+* one more feature: the loop goes round again. Nothing dropped this session: two tests and out.
+*/
+static void ShaderFallbackAfterLoad(ShaderManager* manager) {
+	if (!ShaderFallback::Reload && !ShaderFallback::Mask[ShaderFallback::Land]) return;
+	// The C++ side follows what the land shaders hold: no depth copy and no shadow drop for a blend that is not compiled in
+	// (TerrainShaders::UpdateSettings keeps it so afterwards; Wetness Effects: WetnessEffectsShaders::UpdateConstants).
+	if (manager->Shaders.Terrain && ShaderFallback::Dropped(ShaderFallback::TerrainBlend, ShaderFallback::Land))
+		manager->Shaders.Terrain->BlendingSettings.Enabled = false;
+	static bool busy = false;
+	if (busy || !ShaderFallback::Reload) return;	// (busy: a load below dropped one more; the loop below takes it)
+	busy = true;
+	auto timer = TimeLogger();
+	GameEyesForgetRecords();
+	unsigned loaded = 0;
+	while (ShaderFallback::Reload) {
+		const unsigned families = ShaderFallback::Reload;
+		ShaderFallback::Reload = 0;
+		for (const auto& Named : manager->ShaderNames) {
+			ShaderCollection* collection = Named.second ? *Named.second : nullptr;
+			if (!collection) continue;
+			const auto affected = [&](const char* name) {
+				return name && ((families >> (unsigned)ShaderFallback::FamilyOf(collection->GetTemplate(name).Name)) & 1u) != 0;
+			};
+			// taken out of the family's lists first: LoadShader puts each back
+			std::vector<NiD3DVertexShaderEx*> vertex;
+			std::vector<NiD3DPixelShaderEx*> pixel;
+			for (NiD3DVertexShaderEx* s : collection->VertexShaderList) if (affected(s->Name)) vertex.push_back(s);
+			for (NiD3DPixelShaderEx* s : collection->PixelShaderList) if (affected(s->Name)) pixel.push_back(s);
+			for (NiD3DVertexShaderEx* s : vertex) {
+				auto& members = collection->VertexShaderList;
+				members.erase(std::remove(members.begin(), members.end(), s), members.end());
+			}
+			for (NiD3DPixelShaderEx* s : pixel) {
+				auto& members = collection->PixelShaderList;
+				members.erase(std::remove(members.begin(), members.end(), s), members.end());
+			}
+			for (NiD3DVertexShaderEx* s : vertex) { s->DisposeShader(); manager->LoadShader(s); loaded++; }
+			for (NiD3DPixelShaderEx* s : pixel) { s->DisposeShader(); manager->LoadShader(s); loaded++; }
+		}
+	}
+	busy = false;
+	Logger::Log("ShaderFallback: %u shaders made before the drop loaded again without the dropped features", loaded);
+	timer.LogTime("ShaderManager ShaderFallbackAfterLoad");
+}
+
+/*
 * A game vertex shader's replacements: the generic record and the exterior/interior ones, each where its file exists.
 * Returns the family's switch (false when the shader belongs to no family, or the sets are not made yet).
 */
@@ -841,6 +1015,7 @@ bool ShaderManager::LoadShader(NiD3DVertexShader* Shader) {
 		collection->VertexShaderList.push_back(vertex);
 		Logger::Log("Loaded %s Vertex Shader %s", collection->Name, vertex->Name);
 	}
+	ShaderFallbackAfterLoad(this);	// UNOFFICIAL 2026-11-12 ShaderFallback: a feature dropped while this one loaded
 	return familyOn;
 }
 
@@ -977,6 +1152,7 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 		family->PixelShaderList.push_back(pixel);
 		Logger::Log("Loaded %s Pixel Shader %s", family->Name, pixel->Name);
 	}
+	ShaderFallbackAfterLoad(this);	// UNOFFICIAL 2026-11-12 ShaderFallback: a feature dropped while this one loaded
 	return familyOn;
 }
 

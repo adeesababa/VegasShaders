@@ -243,12 +243,34 @@ float gMirrorSurface = 0.0;   // (2026-11-09 pt-mirrors) frame row texel 26.y (R
 // pane's own lit share: x the key (0-1), the share = the pane texture's alpha x it (GlassShare). 0: the clear glass as before.
 const int kGlassSurfaceTexel = 289;
 float gGlassSurface = 0.0;
+// (2026-11-12 PTAlbedoGamma, frame row texel 291.y; docs/next/PT-COMPAT-AUDIT-2026-11-12.md item 6) the AlbedoBuffer holds texture^G, G the
+// game shaders' linear gamma ([Shaders.PBR.Linear] Gamma / NightGamma, 1 with Linear off); every other colour here is texture^2.2. With G
+// not 2.2 the whole traced picture came out paler (G < 2.2) and a surface had two looks (the screen's record against its traced record).
+// The exponent 2.2 / G, made by the C++; 0 (an older DLL, the key off, G = 2.2): none, as before.
+float gAlbedoGamma = 0.0;
+// (2026-11-12 PTScreenOwnNarrow, frame row texel 292.x; audit "A pattern") 1: a marked pixel (PTScreenOwn) takes the traced hit's record only
+// where that hit is hair (a TINTED record), skin, or any cut-out over a person; every other sure-marked pixel is the game's own pixel.
+// 0 (an older DLL, the key off): the 2026-11-11 rule (any traced hit at the pixel's depth takes over).
+float gOwnNarrow = 0.0;
+// (2026-11-12 PTHairOverSky, frame row texel 292.y; audit item 5) hair with nothing recorded behind it (the sky, far land, grass): the
+// pixel counted as "the game drew something else here" and kept the game's bright raster hair, so one head had two looks (traced where
+// a wall is behind it, raster against the sky). 1: a camera ray that meets a TINTED hair record at the depth buffer's distance there
+// keeps its traced hit. 0: as before.
+float gHairSky = 0.0, gElseDist = 0.0;
+// (2026-11-12 PTGlowTexel, frame row texel 293.x; audit item 8) PTGlowFromFrame tested the MESH's glow flag: a whole lamp fixture, terminal
+// or sign stayed the game's raster pixel, flat and too bright in a dark room, though only its bulb or screen glows. > 0: only where the
+// glow map's texel at the hit is at least this bright (luminance, linear); the rest of the mesh is path traced. 0: the mesh's flag, as before.
+float gGlowTexel = 0.0;
 void LoadMatKeys() {
 	const bool on = (uint(p.accum.w) & 1024u) != 0u;
 	gMatKeys = on ? vec4(FrameTexel(24), FrameTexel(25)) : vec4(0.0);
 	gMatSheen = on ? FrameTexel(26).x : 0.0;
 	gMirrorSurface = on ? FrameTexel(26).y : 0.0;   // (2026-11-09 pt-mirrors) PTDenoiseMirrorSurface: the roughness under which it applies (0 off)
 	gGlassSurface = on ? clamp(FrameTexel(kGlassSurfaceTexel).x, 0.0, 1.0) : 0.0;   // (2026-11-11 PTGlassSurface; a NaN clamps to 0 on most drivers: guarded again at use)
+	{ const float e = on ? FrameTexel(kGlassSurfaceTexel + 2).y : 0.0; gAlbedoGamma = e > 0.2 && e < 5.0 ? e : 0.0; }   // (2026-11-12 PTAlbedoGamma)
+	gOwnNarrow = on && FrameTexel(kGlassSurfaceTexel + 3).x > 0.5 ? 1.0 : 0.0;   // (2026-11-12 PTScreenOwnNarrow)
+	gHairSky = on && FrameTexel(kGlassSurfaceTexel + 3).y > 0.5 ? 1.0 : 0.0;   // (2026-11-12 PTHairOverSky)
+	{ const float g = on ? FrameTexel(kGlassSurfaceTexel + 4).x : 0.0; gGlowTexel = g > 0.0 && g < 1.0e3 ? g : 0.0; }   // (2026-11-12 PTGlowTexel)
 }
 vec4 MatKeys() { return gMatKeys; }
 // ---- UNOFFICIAL 2026-11-09 PTBounceRoughen (the frame row's texel 27.x; core\RtPathTrace.cpp): path regularisation. A path that has
@@ -315,6 +337,51 @@ const int kEarlyLookTexel = 288;
 float gEarlyLook = 0.0;
 float gFirstViewZ = 0.0;      // (set at the first hit by Path)
 bool gFirstGlowMark = false;  // (set by Path: the camera saw a glowing mesh the game draws)
+// ---- UNOFFICIAL 2026-11-11 (pt-emissive-cost) PTEmissive's cost keys: the frame row's texels 289.y-291.x (core\RtPathTrace.cpp kEmCostTexel:
+// keep them equal; with the lamp image, flag 1024; without it, and in a row that leaves them 0 (the RT host's older scenes), all off =
+// PTEmissive exactly as before). Measured on an NVIDIA L4 at 1280 x 720: PTEmissive cost 12.8 / 19.8 / 12.7 ms of a ~36 ms pass sum, most
+// of it at Goodsprings at NOON where nothing glows on screen. Why: EmWeight had no lower bound, so every glowing mesh of the frame was a
+// candidate at every hit however far and dim; ReSTIR DI then held an emissive sample in EVERY pixel's reservoir (by day, with no lamp in
+// reach, it holds nothing without PTEmissive and its reuse steps trace no ray at all) and paid the canonical ray, the temporal rays and
+// two rays a neighbour for light far under a thousandth of the sun's.
+//   289.y gEmFloorBase, 290.x gEmFloorSun (PTEmissiveCut, PTEmissiveFloor; in EmWeight's units = light x pi / PTGlow, made by the C++):
+//         an emissive instance is a light-sample candidate at a hit only where its weight (its power x the share of its bound above the
+//         surface / max(d^2, r^2): an estimate of the light it can give there) is at least base + sun x max(dot(n, sun), 0). Under it
+//         the instance's weight there is 0, in EmPick, in EmPdfAt and (LightAt) for a reservoir's reused sample alike, so its glow is
+//         simply left to the bounce rays there, which then count it in full (their MIS weight sees density 0): UNBIASED, the same
+//         picture on average, only noisier where a weak emitter is the main light and the floor is set too high. RtEmissiveBuild.comp
+//         gets the base too and lists an instance as unusable when it cannot pass anywhere (one read here instead of six).
+//   290.y gEmHits (PTEmissiveHits): 0 every hit takes an emissive sample (before); n >= 1 only the path's first n hits (1 = the first
+//         hit, the one ReSTIR DI serves); a deeper hit takes none and its bounce ray counts the glow it meets in full: unbiased.
+//   291.x gEmRoulette (PTEmissiveRoulette): 0 off; k > 0: an emissive candidate whose unshadowed light is under k x the hit's other
+//         unshadowed direct light (sun + sky + lamps, through the BRDF) is kept with chance its light / that bound and scaled up by the
+//         inverse, else dropped before its shadow ray (Russian roulette: unbiased). At ReSTIR DI's canonical candidate and at Direct's
+//         plain sample (not PTBounceLights 0's pick, which already traces one ray by weight).
+// Replays (no frame row keys in a capture): -DPT_TEST_EM_BASE=x -DPT_TEST_EM_SUN=x -DPT_TEST_EM_HITS=n -DPT_TEST_EM_ROULETTE=k compile them in.
+const int kEmCostTexel = 289;
+float gEmFloorBase = 0.0, gEmFloorSun = 0.0, gEmHits = 0.0, gEmRoulette = 0.0;
+bool gEmFloor = false;   // (either floor > 0: LightAt's extra EmWeight test is only paid then)
+float gEmRef = 0.0;      // (Direct -> RestirDirect) PTEmissiveRoulette: the hit's unshadowed sun + sky light through the BRDF (luminance)
+float EmKey(float v, float hi) { return v > 0.0 ? min(v, hi) : 0.0; }   // (a NaN or a negative float: 0, off)
+void LoadEmCostKeys() {
+	if ((uint(p.accum.w) & 1024u) != 0u) {
+		const vec2 a = FrameTexel(kEmCostTexel), b = FrameTexel(kEmCostTexel + 1), c = FrameTexel(kEmCostTexel + 2);
+		gEmFloorBase = EmKey(a.y, 1.0e30); gEmFloorSun = EmKey(b.x, 1.0e30); gEmHits = EmKey(b.y, 64.0); gEmRoulette = EmKey(c.x, 1.0);
+	}
+#ifdef PT_TEST_EM_BASE
+	gEmFloorBase = float(PT_TEST_EM_BASE);
+#endif
+#ifdef PT_TEST_EM_SUN
+	gEmFloorSun = float(PT_TEST_EM_SUN);
+#endif
+#ifdef PT_TEST_EM_HITS
+	gEmHits = float(PT_TEST_EM_HITS);
+#endif
+#ifdef PT_TEST_EM_ROULETTE
+	gEmRoulette = float(PT_TEST_EM_ROULETTE);
+#endif
+	gEmFloor = gEmFloorBase > 0.0 || gEmFloorSun > 0.0;
+}
 void LoadCostKeys() {
 #ifdef PT_TEST_RR
 	gRouletteFrom = float(PT_TEST_RR);   // (replay experiments: the key compiled in)
@@ -818,6 +885,24 @@ float LampSpot(int k, vec3 toPoint) {
 	const float angle = radians(float(c >> 18u));
 	return smoothstep(cos(angle), cos(0.5 * angle), dot(normalize(d), toPoint));
 }
+// UNOFFICIAL 2026-11-11 the flashlight's lens pattern ([Shaders.Flashlight.Deferred] Cookie, frame row texel 15.y, 0 = none; RtPathTrace.cpp
+// writes it only while lamp 0 is the flashlight). The raster pass reads Effects\Flashlight.png across the cone (FlashlightDeferred.hlsl); the
+// helper has no such texture, so this is the file's own radial profile (tools/gen_textures.py gen_flashlight: hot spot, broad band, thin
+// ring, glow, dark rim, x 2 as the pass reads it) without its few-percent angular unevenness and speckle. r: 0 on the axis, 1 at the cone's
+// outer edge (tan of the angle off the axis over tan of the half-angle, the texture's own radius).
+float FlashCookie(vec3 toPoint) {
+	const float code = FrameTexel(15).x;
+	if (code < 0.5) return 1.0;
+	const uint c = uint(code - 1.0 + 0.5);
+	const vec2 e = vec2(float((c >> 9u) & 511u), float(c & 511u)) / 511.0 * 2.0 - 1.0;
+	vec3 d = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+	if (d.z < 0.0) d.xy = (1.0 - abs(d.yx)) * vec2(d.x >= 0.0 ? 1.0 : -1.0, d.y >= 0.0 ? 1.0 : -1.0);
+	const float ca = cos(radians(float(c >> 18u))), ct = clamp(dot(normalize(d), toPoint), 1.0e-3, 1.0);
+	const float r = sqrt(max(1.0 - ct * ct, 0.0)) / ct * ca / sqrt(max(1.0 - ca * ca, 1.0e-6));
+	const float r4 = r * r * r * r, band = (r - 0.46) / 0.18, ring = (r - 0.76) / 0.018;
+	const float f = 0.46 * exp(-r4 / 0.00130321) + 0.27 * exp(-band * band) + 0.07 * exp(-ring * ring) + 0.20 * exp(-r4 / 0.52200625);
+	return 2.0 * min(f * (1.0 - smoothstep(0.92, 1.12, r)), 0.71);
+}
 // UNOFFICIAL 2026-11-11 the flashlight's NearFade and HotspotLimit ([Shaders.Flashlight.Main] / .Interiors, the old flashlight's keys), frame
 // row texel 31 (x NearFade in units, y HotspotLimit; 0 off; RtPathTrace.cpp writes them only while lamp 0 is the flashlight): lamp 0's
 // light at `dist` from it, as FlashlightDeferred.hlsl shapes it. 2026-11-11 (take 2: the knee on the light's luma did nothing in the raster
@@ -829,6 +914,8 @@ vec3 FlashShape(int k, float dist, float reach, vec3 toPoint, vec3 light) {
 	if (k != 0 || !LampImage()) return light;
 	const vec2 t = FrameTexel(31);
 	if (t.x > 0.0) light *= smoothstep(0.0, t.x, dist);
+	const float cookie = FrameTexel(15).y;   // (2026-11-11 Cookie)
+	if (cookie > 0.0) light *= mix(1.0, FlashCookie(toPoint), min(cookie, 1.0));
 	if (t.y > 0.0) {
 		const float r = reach * ((uint(p.accum.w) & 131072u) != 0u ? 0.5 : 1.0), q = dist * dist / max(r * r, 1.0e-6), F = FrameTexel(kEarlyLookTexel).y;
 		const float w = clamp(1.0 - q, 0.0, 1.0), cone = LampSpot(k, toPoint);
@@ -898,7 +985,9 @@ float EmWeight(int e, vec3 hit, vec3 n) {
 	const vec3 l = vec3(EmF(b + 2u), EmF(b + 3u), EmF(b + 4u)) - p.origin.xyz - hit;
 	const float r = EmF(b + 5u), dist = length(l);
 	const float c = dist > r ? clamp(dot(n, l) / dist + r / dist, 0.0, 1.0) : 1.0;
-	return EmF(b + 1u) * c / max(dist * dist, r * r);
+	const float w = EmF(b + 1u) * c / max(dist * dist, r * r);
+	// (2026-11-11 pt-emissive-cost) PTEmissiveCut / PTEmissiveFloor: under the floor it is no candidate here (0 + 0: every weight as before)
+	return w >= gEmFloorBase + gEmFloorSun * max(dot(n, p.sunDir.xyz), 0.0) ? w : 0.0;
 }
 // Instance e's triangle `prim` in scene space: its record, corners; false: not listed
 bool EmTriangle(int e, uint prim, out uint g, out vec3 a, out vec3 b, out vec3 c) {
@@ -1075,6 +1164,9 @@ bool LightAt(LSample y, vec3 at, vec3 n, out vec3 light, out vec3 pos) {
 	if (y.lamp >= 0) return LampAt(y.lamp, at, n, light, pos);
 	light = vec3(0.0); pos = vec3(0.0);
 	if (y.em < 0) return false;
+	// (2026-11-11 pt-emissive-cost) with a floor, an instance under it at this point is no light sample's here (EmPick never draws it and
+	// the bounce rays count it in full): a reservoir's sample from a surface where it was over the floor must not count here as well
+	if (gEmFloor && !(EmWeight(y.em, at, n) > 0.0)) return false;
 	vec3 ny; float area; uint g;
 	if (!EmPoint(y.em, y.tri, y.bary, pos, ny, area, g)) return false;
 	vec3 l = pos - (at + n * (1.0 + 0.002 * length(at)));
@@ -1174,10 +1266,12 @@ vec3 RestirDirect(vec3 hit, vec3 lift, vec3 n, vec3 v, Surface s, int k0, float 
 	float yTarget = 0.0;
 	vec3 yLight = vec3(0.0), yPos = vec3(0.0);
 	float W = 0.0, M = 1.0, wSum = 0.0;
+	float lampRef = 0.0;   // (2026-11-11 PTEmissiveRoulette) the lamps' unshadowed light here through the BRDF (the pick's estimate)
 	if (k0 >= 0 && w0 > 0.0 && total > 0.0) {
 		vec3 light, pos;
 		if (LampAt(k0, hit, n, light, pos)) {
 			const float t = RestirTarget(light, pos, hit, s, n, v);
+			if (t > 0.0) lampRef = t * total / w0;
 			const vec3 l = pos - lift;
 			const float dist = length(l);
 			if (t > 0.0 && (!canonEach || Visible(lift, l / dist, max(dist - 16.0, 0.0)))) {   // (short of its fixture, as Direct)
@@ -1195,8 +1289,15 @@ vec3 RestirDirect(vec3 hit, vec3 lift, vec3 n, vec3 v, Surface s, int k0, float 
 				const float t = RestirTarget(light, pos, hit, s, n, v);
 				const vec3 l = pos - lift;
 				const float dist = length(l);
-				if (t > 0.0 && (!canonEach || Visible(lift, l / dist, LightGap(c, dist)))) {
-					const float wi = t / pdfArea;
+				float wi = t > 0.0 ? t / pdfArea : 0.0;
+				// (2026-11-11 pt-emissive-cost) PTEmissiveRoulette: a candidate far under the hit's other direct light is kept with chance
+				// wi / bound at weight = the bound, else dropped before its shadow ray (E[wi] unchanged: the reservoir stays unbiased)
+				bool kept = true;
+				if (gEmRoulette > 0.0 && t > 0.0) {
+					const float bound = gEmRoulette * (gEmRef + lampRef);
+					if (wi < bound) { kept = Rand() * bound < wi; wi = bound; }
+				}
+				if (t > 0.0 && kept && (!canonEach || Visible(lift, l / dist, LightGap(c, dist)))) {
 					wSum += wi;
 					if (Rand() * wSum < wi) { y = c; yTarget = t; yLight = light; yPos = pos; }
 				}
@@ -1511,6 +1612,8 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 	gEmTotal = 0.0;
 	gEmSelect = 1.0;
 	restirHere = gRestirFirst;
+	// (2026-11-11 PTEmissiveRoulette) the hit's unshadowed sun + sky light through the BRDF (the sky as a matte surface takes it)
+	if (gEmRoulette > 0.0) gEmRef = Luma(cE[0]) + (p.skyZenith.w > 0.5 ? Luma(s.albedo) * Luma(0.5 * (p.skyZenith.rgb + p.skyHorizon.rgb)) : 0.0);
 	if (restirHere) PT_DIRECT_ADD(e, RestirDirect(hit, lift, n, v, s, chosenK, total, chosenWeight))   // (ptaaa-emissive: the lamps + PTEmissive)
 #endif
 	if (!restirHere && total > 0.0 && chosenWeight > 0.0) {
@@ -1523,7 +1626,8 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 	bool emOk = false;
 #ifndef PT_RESTIR_GI
 	int emE = -1; uint emPrim = 0u; vec2 emBary = vec2(0.0); float emPdfArea = 0.0;
-	if (!restirHere && EmCount() > 0) emOk = EmPick(hit, n, emE, emPrim, emBary, emPdfArea);
+	// (2026-11-11 pt-emissive-cost) PTEmissiveHits n >= 1: only the path's first n hits (gEmTotal stays 0: the bounce ray counts glow in full)
+	if (!restirHere && EmCount() > 0 && (gEmHits < 0.5 || float(gBounce) < gEmHits)) emOk = EmPick(hit, n, emE, emPrim, emBary, emPdfArea);
 #endif
 	// (perf-ptcost) PTBounceLights 0: at a bounce hit (not the first: the picture's own direct light keeps every sample) ONE of the three
 	// is traced, chosen with chance P_k = 0.75 w_k / sum w + 0.25 / (how many have w > 0) (the floor bounds the noise where a weight
@@ -1562,6 +1666,13 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 	}
 #ifndef PT_RESTIR_GI
 	if (emOk && (!pickOne || chosenC == 2)) cE[2] = EmissiveCandidate(lift, n, v, s, emE, emPrim, emBary, emPdfArea, pickOne ? P[2] : 1.0, cDir[2], cDist[2], cSpec[2]);
+	// (2026-11-11 pt-emissive-cost) PTEmissiveRoulette at the plain sample (every light traced: the first hit without ReSTIR DI,
+	// PTBounceLights 1): under k x the sun's + sky's + the picked lamp's unshadowed light it is kept with chance light / bound and
+	// scaled up, else no shadow ray (unbiased; the MIS weights are the sample's as before)
+	if (gEmRoulette > 0.0 && emOk && !pickOne) {
+		const float le = Luma(cE[2]), bound = gEmRoulette * (gEmRef + Luma(cE[1]));
+		if (le > 0.0 && le < bound) cE[2] = Rand() * bound < le ? cE[2] * (bound / le) : vec3(0.0);
+	}
 #endif
 	for (int k = 0; k < 3; k++) {
 		if (pickOne && k != chosenC) continue;
@@ -1644,17 +1755,50 @@ bool gScreenDrawnElse = false;   // (2026-11-05) the game drew something at this
 // not traced there, the screen's surface is the first hit (its colour, normal, material), lit and bounced from its true point; its rays
 // leave from near the eye, so they pass over the hidden first-person body (RtHidden.glsl).
 bool gViewModel = false;
+// UNOFFICIAL 2026-11-11 PTScreenOwn (a tester on an RTX 4090: a head of hair shaded as the plaster wall behind it; "hair, and sometimes
+// skin, takes on the material of what it overlaps"). The AlbedoBuffer and MaterialBuffer are written only by NVR's templates drawn opaque
+// in the world's main list (core/CapturedNormals.h). Whatever else the game draws over such a surface WITH depth (its blended hair, brows
+// and beards, a head drawn in the sorted blended list, any shader of the game's own) leaves both buffers as they were: the pixel's depth
+// is the hair's, its colour, roughness, metal and material class the wall's behind it (or the scalp's under it), and a = 1 says
+// "written". The same where skin drew without the skin blur's albedo target (no SkinAlbedoFill): the wall's colour under a face.
+// RtPathTrace.cpp's prep pass (core/RtViewModel.h) compares the captured surface's own distance (TESR_CapturedNormalsBuffer b) with the
+// depth buffer's and marks such a pixel in the normals' alpha: + 0.25 (1.25 the world, 2.25 a person; without the key, or with an older
+// DLL: 1 / 2, nothing marked, as before). A marked pixel's position (depth) and normal (rebuilt from the depth) are its own; its colour and
+// material are not, and are never used: the camera's traced hit at that depth gives them (the hair's record: its tint, kKindHair; the
+// head's skin record), and where nothing traced lies at that depth the game's own pixel is shown, as gScreenDrawnElse does.
+// (the same evening) two marks: + 0.5 SURE (as above), + 0.25 MAYBE: in front of the captured surface by less than the tessellation's
+// reach: a displaced rock's raised bump is in front of its OWN captured distance (the object templates' distance is the flat surface's).
+// A maybe pixel keeps the screen's colour and material, as before PTScreenOwn, unless the camera's traced hit at its depth is hair / a
+// cut-out or skin (records that never write those buffers).
+bool gScreenStale = false, gScreenStaleSure = false, gScreenPerson = false;
+// (2026-11-12 CapturedGrass) the screen pixel is recorded grass (MaterialBuffer class 7 with the grass mark g = 0.5, GRASS23x000TMS.pso):
+// the raster blades (turned, bent, moved by wind) never match the traced scene's still tufts, so whether the camera ray's traced hit lay
+// within `same` of the screen point flipped per pixel and per frame, and the contact march walked over neighbouring blades. A grass
+// pixel always starts from the screen's own point and takes no contact march. Without grass records (the key off): never set.
+bool gScreenGrass = false;
 bool ScreenHit(ivec2 pixel, out vec3 hit, out vec3 n, out Surface s) {
 	hit = n = vec3(0.0);
 	s = HitSurface(vec3(0.0));
 	gScreenDrawnElse = false;
 	gViewModel = false;
+	gScreenStale = false; gScreenStaleSure = false; gScreenPerson = false; gElseDist = 0.0; gScreenGrass = false;
 	if (!GBuffer()) return false;
 	float d = imageLoad(gDepth, pixel).r;
 	vec4 a = imageLoad(gAlbedo, pixel);
 	const vec4 nv = imageLoad(gNormals, pixel);
-	gScreenDrawnElse = d > 0.0 && d < 0.9999 && (a.a < 0.5 || nv.a < -0.5);   // (ptaaa-firstperson) + a view-model pixel without a capture
-	if (!(d > 0.0 && d < 0.9999) || a.a < 0.5 || nv.a < -0.5) return false;
+	// (2026-11-11 PTScreenOwn) the prep pass's codes: mark = this pixel's colour / material buffers are another surface's (+ 0.25);
+	// person = the skin template drew this pixel (2 / 2.25). Marked skin stays a screen surface (its depth and normal) even where the
+	// AlbedoBuffer holds nothing (skin against the sky with no skin blur): the same rule as skin in front of a wall, not the game's pixel.
+	const bool ownMark = nv.a > 0.5 && nv.a < 3.5 && fract(nv.a) > 0.125 && fract(nv.a) < 0.625;
+	const bool ownSure = ownMark && fract(nv.a) > 0.375;
+	const bool person = nv.a > 1.5 && nv.a < 3.5;
+	const bool unwritten = (a.a < 0.5 && !(ownSure && person)) || nv.a < -0.5;
+	gScreenDrawnElse = d > 0.0 && d < 0.9999 && unwritten;   // (ptaaa-firstperson) + a view-model pixel without a capture
+	if (gScreenDrawnElse && gHairSky > 0.5 && nv.a > -0.5 && nv.a < 3.5) {   // (2026-11-12 PTHairOverSky) the depth's distance along this pixel's ray
+		const vec2 euv = (vec2(pixel) + 0.5) * p.size.zw + p.rect.xy;
+		gElseDist = length((p.forward.xyz + p.right.xyz * (2.0 * euv.x - 1.0) - p.up.xyz * (2.0 * euv.y - 1.0)) * (d * p.forward.w));
+	}
+	if (!(d > 0.0 && d < 0.9999) || unwritten) return false;
 	vec2 uv = (vec2(pixel) + 0.5) * p.size.zw + p.rect.xy;
 	float lateral = 1.0;
 	if (nv.a > 3.5) { gViewModel = true; uv = (vec2(pixel) + 0.5) * p.size.zw; lateral = 1.0 / max(nv.a - 4.0, 0.05); }
@@ -1666,10 +1810,14 @@ bool ScreenHit(ivec2 pixel, out vec3 hit, out vec3 n, out Surface s) {
 	if (!(dot(n, n) > 1.0e-8) || !(dot(n, n) < 1.0e30)) { hit = n = vec3(0.0); gViewModel = false; return false; }
 	n = normalize(n);
 	if (dot(n, hit) > 0.0) n = -n;
+	gScreenPerson = person;
+	gScreenStale = !gViewModel && ownMark; gScreenStaleSure = gScreenStale && ownSure;   // (PTScreenOwn: + 0.25 maybe, + 0.5 sure)
 	s.albedo = clamp(a.rgb, 0.0, 1.0);
+	if (gAlbedoGamma > 0.0) s.albedo = pow(s.albedo, vec3(gAlbedoGamma));   // (2026-11-12 PTAlbedoGamma)
 	if ((uint(p.accum.w) & 256u) != 0u) {
 		vec4 m = imageLoad(gMaterial, pixel);
 		float cls = floor(m.r);
+		gScreenGrass = cls == 7.0 && m.a > 0.5 && abs(m.g - 0.5) < 0.1;   // (2026-11-12 CapturedGrass)
 		if (cls >= 1.0) {
 			s.metal = clamp((m.r - cls) / 0.49, 0.0, 1.0);
 			s.rough = m.b >= 0.0 ? clamp(m.b, 0.05, 1.0) : cls == 4.0 || cls == 5.0 ? 0.95 : 0.7;
@@ -1678,6 +1826,13 @@ bool ScreenHit(ivec2 pixel, out vec3 hit, out vec3 n, out Surface s) {
 			if (cls == 3.0 && MatSheen() > 0.0) s.kind = kKindCloth;
 			else if (cls == 5.0 && keys.z > 0.0) s.kind = kKindFoliage;
 			else if (cls == 6.0 && keys.w > 0.0) s.kind = kKindSkin;
+		}
+		// (2026-11-11 PTScreenOwn) a skin pixel (the prep's person code: the skin template drew it) whose MaterialBuffer texel is not skin's:
+		// SkinFill did not reach it (MaterialBufferSkin off; a skin shader from before 2026-11-11, whose alpha code SkinFill clipped with
+		// AlbedoBuffer on), so the texel is still the wall's or the armour's drawn before the skin: its class, roughness and METAL. Skin's
+		// own instead: no metal, a skin roughness, the skin model.
+		if (person && cls != 6.0) {
+			s.metal = 0.0; s.rough = 0.6; s.kind = MatKeys().w > 0.0 ? kKindSkin : kKindPlain;
 		}
 	}
 	return true;
@@ -1858,7 +2013,7 @@ vec3 Path(vec3 dir) {
 			if (slack > 0.0) same += slack / max(abs(dot(HitNormal(qInstance, qPrim, qToScene, dir), dir)), 0.35);
 		}
 		// (1b) the first hit's contact march starts on the screen's surface (where the depth buffer has it)
-		gContact = screen && !viewModel;   // (ptaaa-firstperson: the march walks the world's projection; the view model has its own)
+		gContact = screen && !viewModel && !(bounce == 0 && gScreenGrass);   // (ptaaa-firstperson: the march walks the world's projection; the view model has its own)
 		if (screen) { gContactFrom = sHit; gContactN = sN; gContactZ = dot(sHit, p.forward.xyz); gContactNoise = Rand(); }
 		// (2026-11-10 BlendedHair, texel 30.x) traced hair in front of the screen's surface: the hair is the first surface
 		const bool hairFront = bounce == 0 && screen && traced && !viewModel && gHairFirst > 0.5 && qT < length(sHit) + same &&   // (not a margin IN FRONT: short hair and beards lie on the skin, under 0.1 unit off it; the nearest traced hit being hair is the test)
@@ -1872,7 +2027,33 @@ vec3 Path(vec3 dir) {
 		const bool hairThrough = bounce == 0 && screen && traced && !viewModel && !hairFront && gHairKind > 0.5 &&
 			gHairSkipT < length(sHit) + same && qT > length(sHit) + same;
 		if (hairFront || hairThrough) gContact = false;
-		if (screen && !hairFront && !hairThrough && (!traced || abs(qT - length(sHit)) > same)) {
+		// (2026-11-11 PTScreenOwn) the screen's colour and material at this pixel are another surface's (ScreenHit, gScreenStale): what the
+		// game drew here wrote its depth but not the AlbedoBuffer / MaterialBuffer. staleOwn: the camera's traced hit lies at the screen's
+		// depth: it IS what the game drew (a hair card this ray's alpha test kept without texel 30.x's first-surface bit, an untinted hair
+		// record, the scalp or face under a card it passed, a head or body the buffers did not capture): its own record gives the colour,
+		// material and smooth normal, at the traced point. Nothing traced at that depth (hair that is not in the scene, an edge the pose
+		// misses, anything else the scene lacks): the game's own pixel, as wherever the AlbedoBuffer holds nothing (gScreenDrawnElse).
+		// (the same evening) a MAYBE mark (within the tessellation's reach of the captured surface: perhaps that surface's own raised bump):
+		// only a traced hair / cut-out or skin record at the screen's depth takes over; a plain traced world surface there, or none, leaves the
+		// screen's colour and material as before PTScreenOwn (a displaced rock keeps its own captured colour, lit by the path tracer)
+		const bool stale = bounce == 0 && screen && gScreenStale && !viewModel;
+		const bool staleSure = stale && gScreenStaleSure;
+		const bool ownable = traced && ((records[qInstance].flags & RT_RECORD_ALPHA_TESTED) != 0u || rtRecordKind(records[qInstance].flags) == 3u);
+		// (2026-11-12 PTScreenOwnNarrow; docs/next/PT-COMPAT-AUDIT-2026-11-12.md "A pattern") the rule above second-guessed EVERY surface a little
+		// in front of a recorded one: a puddle over its bed (the bed's traced record as a flat plain sheet, in the band of view angles where
+		// the bed lies within `same` of the water), grass over the ground (traced tufts where a ray's alpha test kept one, the game's pixel
+		// where not: a per-pixel mix that changed every frame), fading rubble drawn blended over land (a hard solid polygon). Narrow: the
+		// traced record takes over only where it is what the marks were made for: hair (a TINTED record), skin, or any cut-out standing
+		// before a person (brows, beards, lashes: untinted records on a face). Any other sure-marked pixel shows the game's own pixel: the
+		// water, the grass and the faded rubble as the game drew them, the same every frame.
+		const bool ownTake = traced && ((records[qInstance].flags & RT_HIT_TINTED_FLAGS) == RT_HIT_TINTED_FLAGS || rtRecordKind(records[qInstance].flags) == 3u ||
+			(gScreenPerson && (records[qInstance].flags & RT_RECORD_ALPHA_TESTED) != 0u));
+		const bool staleOwn = stale && traced && !hairFront && !hairThrough && abs(qT - length(sHit)) <= same && (gOwnNarrow > 0.5 ? ownTake : (staleSure || ownable));
+		if (staleSure && !staleOwn && !hairFront && !hairThrough && ScreenFrame() && view != 2 && view != 3 && view != 4 && view < 5) {
+			radiance = pow(max(imageLoad(gFrame, gPixel).rgb, vec3(0.0)), vec3(2.2));
+			break;
+		}
+		if (screen && !hairFront && !hairThrough && (!traced || abs(qT - length(sHit)) > same || (bounce == 0 && gScreenGrass))) {
 			hit = sHit; n = sN; surf = sS; t = length(sHit);
 		}
 		else {
@@ -1893,7 +2074,10 @@ vec3 Path(vec3 dir) {
 			// hill came out as grey slabs under PTRealtime. The game's frame shows what it drew.
 			// (2026-11-07 ptaaa-materials) except a glass pane the camera meets (PTGlass 2): the game drew its glass there (depth written, no
 			// AlbedoBuffer colour), and the path traces the pane and what lies behind it
-			if (bounce == 0 && !screen && (t > 8192.0 || gScreenDrawnElse) && ScreenFrame() && view != 2 && view != 3 && view != 4 && view < 5 &&
+			// (2026-11-12 PTHairOverSky) ... nor the game's hair where nothing is recorded behind it: the traced hair, as over a wall
+			const bool elseHair = bounce == 0 && !screen && gElseDist > 0.0 && gHairKind > 0.5 &&
+				(records[qInstance].flags & RT_HIT_TINTED_FLAGS) == RT_HIT_TINTED_FLAGS && abs(t - gElseDist) <= max(0.03 * gElseDist, 8.0);
+			if (bounce == 0 && !screen && (t > 8192.0 || gScreenDrawnElse) && !elseHair && ScreenFrame() && view != 2 && view != 3 && view != 4 && view < 5 &&
 				!(gGlassSolid && rtIsGlass(qInstance) && GlassMode() > 0.5)) {
 				radiance = pow(max(imageLoad(gFrame, gPixel).rgb, vec3(0.0)), vec3(2.2));
 				break;
@@ -1913,7 +2097,7 @@ vec3 Path(vec3 dir) {
 #endif
 			const vec3 hitAlbedo = clamp(AlbedoAtlas() ? rtHitAlbedo(instance, prim, bary) : records[instance].albedo.rgb, 0.0, 1.0);
 			surf = HitSurface(hitAlbedo, instance);
-			if (screen && !hairFront && !hairThrough && surf.kind != kKindGlass) { n = sN; surf = sS; }   // the same surface: the screen's colour, normal and material, the traced point (ptaaa: a pane stays glass)
+			if (screen && !hairFront && !hairThrough && !staleOwn && surf.kind != kKindGlass) { n = sN; surf = sS; }   // the same surface: the screen's colour, normal and material, the traced point (ptaaa: a pane stays glass)
 			// (2026-11-11 PTGlassSurface) a pane with a surface share: with that chance this path meets the pane's OWN surface, its texture's
 			// colour as a thin two-sided matte sheet (kKindPane: roughness 1, metal 0; the thin translucent model, T = R), lit from the ray's
 			// side like any surface (sun, lamps, ReSTIR DI, glow; n already faces the ray) AND from behind (DirectSides' far-side sample: a lamp
@@ -1946,12 +2130,17 @@ vec3 Path(vec3 dir) {
 			// (2026-11-11 PTEarlyLook slice 2) an early frame has no screen frame: the camera's glowing hit is marked (display.a -1) and the show
 			// pass keeps the game's pixel there; its traced light goes on as before
 			if (bounce == 0 && view == 0 && !screen && gEarlyLook > 0.5 && GlowFromFrame() && (records[instance].flags & RT_HIT_GLOW_FLAG) != 0u) gFirstGlowMark = true;
-			if (bounce == 0 && view == 0 && screen && GlowFromFrame() && ScreenFrame() && (records[instance].flags & RT_HIT_GLOW_FLAG) != 0u) {
+			// (2026-11-12 PTGlowTexel) the hit's glow texel, read ONCE for the test here and the glow below (one inlined copy of rtHitGlow)
+			const bool glowFrame = bounce == 0 && view == 0 && screen && GlowFromFrame() && ScreenFrame() && (records[instance].flags & RT_HIT_GLOW_FLAG) != 0u;
+			const bool glowWanted = (view == 0 || (view >= 5 && view != 8 && bounce > 0)) && GlowAtlas() && p.skyHorizon.w > 0.0;
+			const bool glowTest = glowFrame && gGlowTexel > 0.0 && GlowAtlas();
+			const vec3 glowAt = glowWanted || glowTest ? rtHitGlow(instance, prim, bary) : vec3(0.0);
+			if (glowFrame && !(glowTest && dot(max(glowAt, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722)) < gGlowTexel)) {
 				radiance = pow(max(imageLoad(gFrame, gPixel).rgb, vec3(0.0)), vec3(2.2));
 				break;
 			}
-			if ((view == 0 || (view >= 5 && view != 8 && bounce > 0)) && GlowAtlas() && p.skyHorizon.w > 0.0) {
-				vec3 glow = rtHitGlow(instance, prim, bary);
+			if (glowWanted) {
+				vec3 glow = glowAt;
 				float mis = 1.0;
 				if (bounce > 0 && GlowLightCount() > 0 && glow != vec3(0.0) && prevGlowTotal > 0.0) {
 					int owner = GlowOwner(hit);
@@ -2149,6 +2338,7 @@ void main() {
 	LoadMatKeys();   // (2026-11-07 ptaaa-materials) the material models' keys, once
 	LoadBounceRoughen();   // (2026-11-09 PTBounceRoughen)
 	LoadCostKeys();  // (perf-ptcost) the ray budget's keys, once
+	LoadEmCostKeys();   // (2026-11-11 pt-emissive-cost) PTEmissive's cost keys, once
 #ifndef PT_RESTIR_GI
 	LoadScratchLayout();   // (ptaaa-hangfix) the scratch store's regions, checked once
 #endif

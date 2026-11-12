@@ -9,6 +9,10 @@ layout(set = 1, binding = 1) uniform texture2D t_depth;      // TESR_DepthBuffer
 layout(set = 1, binding = 2) uniform texture2D t_depthVM;    // TESR_DepthBufferViewModel (LINEAR, CLAMP)
 layout(set = 1, binding = 3) uniform texture2D t_ortho;      // TESR_OrthoMapBuffer (LINEAR, CLAMP)
 layout(set = 1, binding = 4) uniform texture2D t_normals;    // TESR_NormalsBuffer (point, CLAMP)
+// UNOFFICIAL 2026-11-12 PuddlesLandOnly: TESR_MaterialBuffer (point, CLAMP; core/CapturedNormals.h: r class, g bound radius, a written).
+// Read by the wet-map pass only while c.wetWorldLook.y says so (ExtRender sends the mode as 0 when the buffer holds nothing this
+// frame, and binds the depth texture as a placeholder).
+layout(set = 1, binding = 5) uniform texture2D t_material;
 
 layout(push_constant) uniform Push {
     uint sLin;          // LINEAR, CLAMP (heap index, filled in by the extension)
@@ -24,6 +28,33 @@ layout(location = 0) out vec4 o_color;
 
 #include "WetWorldCommon.glsl"
 
+// UNOFFICIAL 2026-11-12 PuddlesLandOnly / WeaponRainHandOff / ReflectionsOwnPuddles: GetSurfaceWetClass of WetWorld.fx.hlsl, line for
+// line (what the wet pass may put on this pixel: 1 everything, 1.5 everything but the puddle's own mirror image, 0.5 the wet look
+// without puddles, 0 nothing). c.wetWorldLook: y the mode (0 off, 1 ground-like, 2 land only) + 4 with WeaponRainHandOff, z
+// PuddlesMinObjectSize, w 1 while the Reflections effect owns the puddles' mirror image.
+float GetSurfaceWetClass(vec2 uv, float vmMask) {
+    float wetClass = 1.0;
+    float weaponOff = step(3.5, c.wetWorldLook.y);
+    float mode = c.wetWorldLook.y - 4.0 * weaponOff;
+    if (mode > 0.5) {
+        vec4 material = textureLod(sampler2D(t_material, NVR_SAMPLER(pc.sPoint)), uv, 0.0);
+        float share = clamp(material.a, 0.5, 1.0);
+        float written = step(0.5, material.a) * step(0.5, material.r);
+        float kind = floor(material.r / share + 0.01);
+        float radius = material.g / share;
+        float isActor = (kind == 2.0 || kind == 6.0) ? 1.0 : 0.0;
+        float isLand = (kind == 4.0) ? 1.0 : 0.0;
+        float isObject = (kind == 1.0) ? 1.0 : 0.0;
+        float groundLike = max(isLand, isObject * step(c.wetWorldLook.z, radius));
+        float puddleSurface = mode > 1.5 ? isLand : groundLike;
+        float unwritten = mode > 1.5 ? 0.5 : 1.0;
+        float known = isActor > 0.5 ? 0.0 : mix(0.5, 1.0, puddleSurface);
+        wetClass = written > 0.5 ? known : unwritten;
+    }
+    wetClass = mix(wetClass, 1.0 - weaponOff, vmMask);
+    return wetClass + 0.5 * step(0.75, wetClass) * step(0.5, c.wetWorldLook.w);
+}
+
 // Wet-map pass
 vec4 WetMap(vec2 uv) {
     float depth = readDepth(uv);
@@ -31,13 +62,14 @@ vec4 WetMap(vec2 uv) {
         return vec4(0.0, 0.0, 0.0, 1.0);
     vec4 surfacePosition = GetOrthoSurfacePosition(uv);
     float vmMask = GetViewModelMask(uv);
-    float coverage = ComputeDepressionMask(surfacePosition, depth, vmMask);
+    float wetClass = GetSurfaceWetClass(uv, vmMask);	// UNOFFICIAL 2026-11-12 PuddlesLandOnly (1 with the keys off)
+    float coverage = ComputeDepressionMask(surfacePosition, depth, vmMask) * step(0.75, wetClass);
     float dotUp = dot(GetWorldNormal(uv), vec3(0.0, 0.0, 1.0));
     vec4 roofPosition = surfacePosition * c.shadowToLight;
     float flatCoverage = GetRoofMask(roofPosition) * smoothstep(0.65, 0.92, dotUp)
         * (1.0 - vmMask);
     float flatWetCoverage = flatCoverage * smoothstep(0.90, 0.97, dotUp);
-    return vec4(coverage, flatCoverage, flatWetCoverage, 1.0);
+    return vec4(coverage, flatCoverage, flatWetCoverage, wetClass);
 }
 
 // Wet-map blur pass
@@ -47,7 +79,8 @@ vec4 BlurWetMap(vec2 uv, vec2 offsetMask) {
     vec2 blurStep = c.reciprocalResolution.xy * offsetMask * max(blurRadius, 0.0) * 0.5;
     float depthTolerance = max(PuddleBlurDepthTolerance * max(centerDepth, 1.0), 0.0001);
     float weightSum = 0.375;
-    vec3 coverage = texture(sampler2D(t_rendered, NVR_SAMPLER(pc.sLin)), uv).rgb * weightSum;
+    vec4 centre = texture(sampler2D(t_rendered, NVR_SAMPLER(pc.sLin)), uv);	// UNOFFICIAL 2026-11-12 PuddlesLandOnly: a = the pixel's class, not blurred
+    vec3 coverage = centre.rgb * weightSum;
     for (int tap = -2; tap <= 2; tap++) {
         if (tap != 0) {
             vec2 sampleUV = saturate(uv + blurStep * float(tap));
@@ -61,7 +94,7 @@ vec4 BlurWetMap(vec2 uv, vec2 offsetMask) {
         }
     }
     coverage /= weightSum;
-    return vec4(coverage, 1.0);
+    return vec4(coverage, centre.a);
 }
 
 void main() {

@@ -30,6 +30,8 @@
 #include "FlashlightLamp.h"	// UNOFFICIAL 2026-11-04 the flashlight's game lamp: which objects the G-buffer holds
 #include "GpuProfiler.h"	// UNOFFICIAL ShadowContrast step timer	// UNOFFICIAL 2026-10-29 lean hook: AfterStateBlock
 
+namespace RtPathTrace { bool Replacing(); }	// UNOFFICIAL 2026-11-12 (core/RtPathTrace.h): the foliage records are written only while it is true
+
 namespace CapturedNormals {
 
 	inline bool Checked = false, Compiled = false;	// on at startup (the templates write COLOR3)
@@ -49,6 +51,75 @@ namespace CapturedNormals {
 	inline UInt32 Frames = 0, Writes = 0, Masked = 0, Unbinds = 0;
 
 	inline void NoteWriter(IDirect3DPixelShader9* handle) { if (handle) Writers.insert(handle); }
+
+	// UNOFFICIAL 2026-11-12 foliage records (docs/next/PT-COMPAT-AUDIT-2026-11-12.md items 1 and 9; [Main.Main.Quality] CapturedGrass /
+	// CapturedLeaves, live, a missing key = on). The grass (GRASS23x000 / 000TMS.pso) and SpeedTree leaf (STLEAF2000 / 2001 (TMS).pso) pixel
+	// shaders are no templates and wrote depth without any record: under the path tracer such a pixel was shaded with the record of
+	// whatever was drawn behind it, or shown as the game's own pixel, blade by blade. Compiled with the AlbedoBuffer they write all three
+	// records (Includes/CapturedNormals.hlsl CAPTURED_FOLIAGE; ShaderRecord notes them here), and the draw hook takes them as writers:
+	//  - leaves: only inside the span (the world's main list), like any template. A leaf pass the game draws outside it writes nothing
+	//    (LeafWrites in the log line says which it is);
+	//  - grass is never drawn in the main list. The near tufts GrassFirst draws BEFORE it (GrassShaders::DrawPart 1): the span opens at
+	//    their first shader bind (GrassBind, from GrassShaders::SetForDraw), so the clear comes first and MainListHook's own BeginSpan
+	//    finds the span open. Every grass draw AFTER the list (the fading tufts; everything with terrain blending on or DrawFirst off):
+	//    the three targets are bound again, not cleared, for the grass writer draws alone into the span's own scene target (GrassLateDraw),
+	//    and taken off (and resolved again under the game's MSAA) at the first other draw or Clear (GrassLateEnd).
+	// Only while the path tracer replaces the picture (RtPathTrace::Replacing, read once a frame): the raster frame's readers of these
+	// buffers (the deferred flashlight, which would light the grass a second time next to the grass's own beam; snow; AmbientLight's
+	// bounce) see exactly what they saw before. (The same day, second pass: the grass's also for the RT GI; see GrassOwnBeam.) Not written: the game's own 1POINT grass shaders (grass by a lamp), GPU grass strands,
+	// NewGrass blades, and anything on native D3D9 with the game's MSAA (no span there).
+	inline std::unordered_set<IDirect3DPixelShader9*> GrassWriters, LeafWriters;
+	inline void NoteGrassWriter(IDirect3DPixelShader9* handle) { if (handle) GrassWriters.insert(handle); }
+	inline void NoteLeafWriter(IDirect3DPixelShader9* handle) { if (handle) LeafWriters.insert(handle); }
+	inline bool GrassKey = true, LeafKey = true, GrassNow = false, LeafNow = false;	// the keys; this frame: key, writers loaded, path tracing replaces
+	inline bool LastGrassWriter = false, LastLeafWriter = false;
+	inline bool GrassArmed = false;			// a grass shader was bound after the span: the draws are looked at until the first that is not grass
+	inline bool GrassLateOk = false, GrassLateBound = false;	// this frame's span ended (its targets hold the frame); ours are bound outside it
+	inline IDirect3DSurface9* GrassLateTarget = nullptr;	// the scene target of that span (not held: compared only)
+	inline UInt32 GrassWrites = 0, GrassLateWrites = 0, GrassLateBusy = 0, GrassEarlySpans = 0, LeafWrites = 0;
+	// UNOFFICIAL 2026-11-12 CapturedGrass, second pass ("grass records that are right"; an RTX run: bright orange-yellow speckles on the
+	// tufts that changed every frame). Read from the code, the largest fault first:
+	//  1. NOBODY READ THE GRASS'S NORMAL. The path tracer's normals image is TESR_NormalsBuffer (core/RtViewModel.h kPrepPS: `nb.rgb` for
+	//     every world pixel), and the RT AO / GI rays start from the same buffer (Compute/RtAOInput.frag). A captured normal gets into it
+	//     only through MergeIntoNormals, which wants it within 60 degrees of the depth buffer's own facet. The grass records its tuft's
+	//     axis (about straight up), a card's facet is about level: refused on nearly every grass pixel. What stayed is the normal rebuilt
+	//     from depth (Effects/Normals.fx: differences to the next texel or two), which on blades one to three pixels wide, with the ground
+	//     behind them and the wind moving them, is a different direction per pixel and per frame. Before the records those pixels were
+	//     shown as the game's own (PTScreenOwn), so it did not matter; with the records each became a lit surface with a random normal
+	//     under the noon sun: the bright speckles. The same normals make the RT GI "sparkle" on grass without any path tracing.
+	//     Now MergeIntoNormals takes the record's normal on the pixels the grass shader marks (MaterialBuffer g = 0.5; GrassMergeNow,
+	//     [Main.Main.Quality] CapturedGrassNormals, live, a missing key = on), whatever the facet says.
+	//  2. The material, the colour's missing tuft shade, the coverage rule and the normal's flip: GRASS23x000TMS.pso.hlsl, main's end.
+	//  3. NOT in these files (the tracer's side; described in the hand-over): the traced scene's own grass tufts stand still, are not
+	//     turned as the game turns them, and shadow the screen's blades from an 8-unit-wide choice of start points.
+	// The gate: the records are also written without path tracing while the RT GI or SunGI reads them (GrassForGI: the bounce's surface
+	// colour from the AlbedoBuffer, every screen-space reader's normal through the merge), but not while the deferred flashlight's beam is
+	// on the grass (GrassOwnBeam, from GrassShaders::UpdateLights): its light pass lights everything the records hold, and the grass
+	// lights itself by the same beam (TESR_GrassSpot): twice. Under the path tracer the raster flashlight is not shown, so there it stays.
+	constexpr float kGrassMark = 0.5f;	// MaterialBuffer g of a grass record (GRASS23x000TMS.pso.hlsl)
+	inline bool GrassOwnBeam = false;	// the grass shaders light the grass by the deferred flashlight's beam this frame
+	inline bool GrassForGI = false;		// this frame's grass records are written for the raster frame's RT GI (no path tracing)
+	inline bool GrassMergeNow = false;	// this frame: the grass's own normal goes into TESR_NormalsBuffer (MergeIntoNormals)
+	// UNOFFICIAL 2026-11-12 CapturedGrassTint: the grass's colour keys as GrassShaders::UpdateSettings read them (tint, colour, saturation),
+	// for the self-check's line only (AlbedoCheck): the log then says which settings its numbers were measured with.
+	inline float GrassColourKeys[3] = { 1.0f, 1.0f, 1.0f };
+	inline int GrassState = -1;			// the last state logged (BeginFrame)
+	inline UInt32 GrassStateLogs = 0, GrassBeamFrames = 0;
+	// UNOFFICIAL 2026-11-12 CapturedCoverage (audit item 7; see CoverageBegin)
+	inline bool CoverageOn = true, CoverageActive = false;
+	// Writers whose record alpha is a CODE, not 1 (skinned gear: the normals' 2; the DeferredLamps records: the material's 1.01-1.99 and
+	// the albedo's 1 - fog): a code cannot ride the "alpha 0 keeps the texel" blend (see BlendedAlphaBegin), so their blended draws are
+	// left exactly as the 2026-11-11 BlendedAlpha fix made them (the whole polygon recorded). ShaderRecord notes them.
+	inline std::unordered_set<IDirect3DPixelShader9*> CodeWriters;
+	inline void NoteCodeWriter(IDirect3DPixelShader9* handle) { if (handle) CodeWriters.insert(handle); }
+	inline bool LastCodeWriter = false;
+	inline float CoverageSaved[4] = {};
+	inline UInt32 CoverageDraws = 0;
+	// a [Main.Main.Quality] switch, live; a missing key = on
+	inline bool QualityKeyOn(const char* key) {
+		SettingManager::Configuration::ConfigNode node;
+		return !TheSettingManager->Config.FillNode(&node, "Main.Main.Quality", key) || node.BoolValue;
+	}
 
 	// UNOFFICIAL 2026-11-07 (ptaaa-firstperson; docs/next/RT-PATH-TRACING.md "ptaaa-firstperson") the first-person view model's G-buffer for
 	// the path tracer (RtPathTrace.cpp PTViewModel): the same span round the game's first-person render (Render.cpp RenderFirstPersonHook,
@@ -113,6 +184,7 @@ namespace CapturedNormals {
 	inline IDirect3DTexture9* SkinAlbedoTex = nullptr;  inline IDirect3DSurface9* SkinAlbedoMsaa = nullptr;  inline IDirect3DSurface9* SkinAlbedoSurface = nullptr;	// the skin blur's albedo target, when skin drew this span (SkinScattering::BindForSkinDraw)
 	inline IDirect3DPixelShader9* SkinAlbedoFillPS = nullptr;  inline bool SkinAlbedoFillFailed = false, SkinAlbedoLogged = false, AlbedoWantLogged = false;
 	inline void NoteAlbedoWriter(IDirect3DPixelShader9* handle, bool lightOnly) { if (!handle) return; AlbedoWriters.insert(handle); if (lightOnly) AlbedoLightOnlyWriters.insert(handle); }
+	inline bool SunGIWantsAlbedo = false;	// UNOFFICIAL 2026-11-12 (sungi p4) set by AmbientLight (SunGI on, outdoors): AlbedoBuffer's reader asks for the capture without the AL key
 	inline void NoteSkinAlbedo(IDirect3DTexture9* tex, IDirect3DSurface9* msaa, IDirect3DSurface9* surface) { SkinAlbedoTex = tex; SkinAlbedoMsaa = msaa; SkinAlbedoSurface = surface; }
 	inline bool AlbedoCompiledIn() {
 		if (!AlbedoChecked) { AlbedoChecked = true; AlbedoCompiled = MaterialCompiledIn() && TheSettingManager->GetSettingI("Main.Main.Quality", "AlbedoBuffer") != 0; }
@@ -123,7 +195,7 @@ namespace CapturedNormals {
 	// the G-buffer would never be made). Logged once.
 	inline bool AlbedoWanted() {
 		const bool rr = TheSettingManager->GetSettingI("Shaders.TAA.DLSS", "RayReconstruction") != 0 && TheSettingManager->GetSettingI("Shaders.TAA.DLSS", "RRAlbedo") == 2;
-		const bool al = TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "AlbedoBuffer") != 0;
+		const bool al = TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "AlbedoBuffer") != 0 || SunGIWantsAlbedo;	// UNOFFICIAL 2026-11-12 (sungi p4): SunGI outdoors asks for it too
 		if (!AlbedoCompiledIn()) {
 			// UNOFFICIAL 2026-10-31 (round 1's AlbedoBuffer-off twin run: the AmbientLight switch went on and off without a word): a reader
 			// switched on without the capture gets its one line, so the silence is explained.
@@ -334,17 +406,52 @@ namespace CapturedNormals {
 		std::vector<float> n, a, m;
 		if (!Read64(d, TextureSurface, n) || !Read64(d, AlbedoSurface, a)) return;
 		const bool material = MaterialDrawn && MaterialSurface && Read64(d, MaterialSurface, m);
-		int normals = 0, albedo = 0, both = 0, normalsOnly = 0, skinNormals = 0, skinAlbedo = 0, byClass[7] = {};
+		int normals = 0, albedo = 0, both = 0, normalsOnly = 0, skinNormals = 0, skinAlbedo = 0, byClass[8] = {};
 		double mean[3] = {};
+		// UNOFFICIAL 2026-11-12 CapturedGrass: the grass's records ([1]: MaterialBuffer g = kGrassMark) against the land's ([0]: class 4):
+		// texels, the mean colour and the mean world normal (z up), so one launch tells a colour that is too bright from a normal that is
+		// off. Here (the main list's end) only the near tufts are in (GrassFirst's early run); the fading ones are drawn after it.
+		int count[2] = {}; double colour[2][3] = {}, up[2] = {};
 		for (int i = 0; i < 4096; i++) {
 			const bool hasN = n[i * 4 + 3] > 0.99f, hasA = a[i * 4 + 3] > 0.99f, skin = n[i * 4 + 3] >= 1.5f;
 			normals += hasN; albedo += hasA; both += hasN && hasA; normalsOnly += hasN && !hasA; skinNormals += skin; skinAlbedo += skin && hasA;
-			if (hasA) { for (int c = 0; c < 3; c++) mean[c] += a[i * 4 + c]; if (material && m[i * 4 + 3] > 0.5f) byClass[(std::min)((std::max)((int)floorf(m[i * 4] + 0.004f), 0), 6)]++; }
+			if (hasA) { for (int c = 0; c < 3; c++) mean[c] += a[i * 4 + c]; if (material && m[i * 4 + 3] > 0.5f) byClass[(std::min)((std::max)((int)floorf(m[i * 4] + 0.004f), 0), 7)]++; }
+			if (GrassNow && material && hasA && hasN && m[i * 4 + 3] > 0.5f) {
+				const bool isGrass = m[i * 4] > 0.5f && fabsf(m[i * 4 + 1] - kGrassMark) < 0.1f;
+				const int w = isGrass ? 1 : (int)floorf(m[i * 4] + 0.004f) == 4 ? 0 : -1;
+				if (w >= 0) {
+					// the octahedral normal's z (Includes/Shadow.hlsl ShadowEncodeNormal, as the merge shader decodes it)
+					float x = n[i * 4], y = n[i * 4 + 1], z = 1.0f - fabsf(x) - fabsf(y);
+					const float fold = (std::min)((std::max)(-z, 0.0f), 1.0f);
+					x += x >= 0.0f ? -fold : fold; y += y >= 0.0f ? -fold : fold;
+					const float len = sqrtf(x * x + y * y + z * z);
+					count[w]++; up[w] += len > 1.0e-6f ? z / len : 0.0f;
+					for (int c = 0; c < 3; c++) colour[w][c] += a[i * 4 + c];
+				}
+			}
 		}
 		const double k = albedo ? 1.0 / albedo : 0.0;
-		Logger::Log("AlbedoBuffer: self-check at captured frame %u: albedo texels %d of 4096 (normals %d, both %d, normals without albedo %d = %.1f %%); skin texels %d, filled %d; written by class 0:%d object:%d gear:%d cloth:%d land:%d plant:%d skin:%d; mean albedo %.3f %.3f %.3f",
+		Logger::Log("AlbedoBuffer: self-check at captured frame %u: albedo texels %d of 4096 (normals %d, both %d, normals without albedo %d = %.1f %%); skin texels %d, filled %d; written by class 0:%d object:%d gear:%d cloth:%d land:%d plant:%d skin:%d grass:%d; mean albedo %.3f %.3f %.3f",
 			LiveFrames, albedo, normals, both, normalsOnly, normals ? 100.0 * normalsOnly / normals : 0.0, skinNormals, skinAlbedo,
-			byClass[0], byClass[1], byClass[2], byClass[3], byClass[4], byClass[5], byClass[6], mean[0] * k, mean[1] * k, mean[2] * k);
+			byClass[0], byClass[1], byClass[2], byClass[3], byClass[4], byClass[5], byClass[6], byClass[7], mean[0] * k, mean[1] * k, mean[2] * k);
+		if (GrassNow && material) {
+			const double g = count[1] ? 1.0 / count[1] : 0.0, l = count[0] ? 1.0 / count[0] : 0.0;
+			// UNOFFICIAL 2026-11-12 CapturedGrassTint: the two numbers the grass's colour is judged by, so a run reads from the log alone: each
+			// one's luma (Rec. 709 weights on the linear mean) and red over blue (how orange it is), and the grass's over the land's. The
+			// second pass's record (the texture alone) read 1.18 and 2.10 at Goodsprings at noon (grass 0.181 0.121 0.056, land 0.125 0.107
+			// 0.081): tufts too bright and too orange under the path tracer. The keys are the ones the grass shader had (GrassColourKeys).
+			double luma[2], redBlue[2];
+			for (int w = 0; w < 2; w++) {
+				const double perTexel = w ? g : l;
+				luma[w] = (0.2126 * colour[w][0] + 0.7152 * colour[w][1] + 0.0722 * colour[w][2]) * perTexel;
+				redBlue[w] = colour[w][2] > 0.0 ? colour[w][0] / colour[w][2] : 0.0;
+			}
+			Logger::Log("CapturedGrass: self-check at captured frame %u (the near tufts only; linear colours): grass %d texels, mean colour %.3f %.3f %.3f (luma %.3f, R/B %.2f), mean normal up %.2f; land %d texels, mean colour %.3f %.3f %.3f (luma %.3f, R/B %.2f), mean normal up %.2f; GRASS / LAND: luma %.2f, R/B %.2f, with CapturedGrassTint %.2f, CapturedGrassColour %.2f, CapturedGrassSaturation %.2f (the texture alone read luma 1.18 and R/B 2.10 at Goodsprings at noon: too bright, too orange; a normal far from the land's: the normal is at fault)",
+				LiveFrames, count[1], colour[1][0] * g, colour[1][1] * g, colour[1][2] * g, luma[1], redBlue[1], up[1] * g,
+				count[0], colour[0][0] * l, colour[0][1] * l, colour[0][2] * l, luma[0], redBlue[0], up[0] * l,
+				luma[0] > 0.0 ? luma[1] / luma[0] : 0.0, redBlue[0] > 0.0 ? redBlue[1] / redBlue[0] : 0.0,
+				GrassColourKeys[0], GrassColourKeys[1], GrassColourKeys[2]);
+		}
 	}
 
 	// Read once (the shaders are compiled with it): any reader's switch at startup.
@@ -382,11 +489,17 @@ namespace CapturedNormals {
 		if (!MergePS) {
 			// c0: 1 / proj _11, 1 / proj _22, far, 0; c1: TESR_RenderScale (xy drawn share, zw its reciprocal); c2: distance share, units,
 			// least cosine; c3-c6: TESR_ViewTransform as the effects see it (row_major: rows uploaded as stored).
+			// UNOFFICIAL 2026-11-12 CapturedGrass: s2 the MaterialBuffer, read only with c2.w = 1 (grass records written this frame and
+			// CapturedGrassNormals on): a pixel the grass shader marked (g = kGrassMark, written) takes the record's normal without the
+			// facet test (a card's facet is level, the tuft's lighting normal about straight up: see GrassOwnBeam's comment, 1). c2.w 0:
+			// the same result as before on every pixel.
 			static const char* kPS =
-				"sampler2D C : register(s0); sampler2D D : register(s1);"
+				"sampler2D C : register(s0); sampler2D D : register(s1); sampler2D M : register(s2);"
 				"float4 P : register(c0); float4 R : register(c1); float4 G : register(c2); row_major float4x4 V : register(c3);"
 				"float4 main(float2 uv : TEXCOORD0) : COLOR0 {"
 				"  float4 c = tex2D(C, uv); float z = tex2D(D, uv).x * P.z;"
+				"  float grass = 0.0f;"
+				"  if (G.w > 0.5f) { float4 m = tex2Dlod(M, float4(uv, 0.0f, 0.0f)); grass = m.a > 0.5f && m.r > 0.5f && abs(m.g - 0.5f) < 0.1f ? 1.0f : 0.0f; }"
 				"  float2 s = uv * R.zw;"
 				"  float3 vp = float3((s.x * 2.0f - 1.0f) * P.x, (1.0f - s.y * 2.0f) * P.y, 1.0f) * z;"
 				"  float3 fn = cross(ddy(vp), ddx(vp)); fn = normalize(fn + float3(0.0f, 0.0f, 1.0e-20f)); fn *= dot(fn, vp) > 0.0f ? -1.0f : 1.0f;"
@@ -394,7 +507,7 @@ namespace CapturedNormals {
 				"  n.xy += float2(n.x >= 0.0f ? -t : t, n.y >= 0.0f ? -t : t); n = normalize(n);"
 				"  float3 nv = normalize(mul(n, (float3x3)V));"
 				"  float d = length(vp);"
-				"  clip(c.a > 0.99f && abs(c.b - d) <= d * G.x + G.y && dot(nv, fn) > G.z && z < P.z * 0.99f ? 1.0f : -1.0f);"
+				"  clip(c.a > 0.99f && abs(c.b - d) <= d * G.x + G.y && (dot(nv, fn) > G.z || grass > 0.5f) && z < P.z * 0.99f ? 1.0f : -1.0f);"
 				"  return float4(nv * 0.5f + 0.5f, 1.0f); }";
 			ID3DXBuffer* code = nullptr; ID3DXBuffer* errors = nullptr;
 			if (FAILED(D3DXCompileShader(kPS, (UINT)strlen(kPS), NULL, NULL, "main", "ps_3_0", 0, &code, &errors, NULL)) || !code ||
@@ -411,11 +524,15 @@ namespace CapturedNormals {
 
 		// Save what the chain relies on (as LinearScene::Convert does).
 		IDirect3DVertexShader9* vs = nullptr; IDirect3DPixelShader9* ps = nullptr; IDirect3DVertexDeclaration9* decl = nullptr;
-		IDirect3DVertexBuffer9* vb = nullptr; UINT vbOffset = 0, vbStride = 0; IDirect3DBaseTexture9* tex[2] = {};
+		IDirect3DVertexBuffer9* vb = nullptr; UINT vbOffset = 0, vbStride = 0; IDirect3DBaseTexture9* tex[3] = {};
 		IDirect3DSurface9* rt0 = nullptr; D3DVIEWPORT9 vp = {};
 		DWORD fvf = 0; float saved[7][4] = {};
+		// UNOFFICIAL 2026-11-12 CapturedGrass: the grass's own normal on its marked pixels (stage 2: the MaterialBuffer), only in a frame
+		// whose grass records are written and that holds the material buffer; otherwise two stages and c2.w 0, as before
+		const bool grass = GrassMergeNow && MaterialTexture && MaterialData.x > 0.5f;
+		const DWORD stages = grass ? 3 : 2;
 		d->GetVertexShader(&vs); d->GetPixelShader(&ps); d->GetVertexDeclaration(&decl); d->GetFVF(&fvf);
-		d->GetStreamSource(0, &vb, &vbOffset, &vbStride); d->GetTexture(0, &tex[0]); d->GetTexture(1, &tex[1]);
+		d->GetStreamSource(0, &vb, &vbOffset, &vbStride); d->GetTexture(0, &tex[0]); d->GetTexture(1, &tex[1]); if (grass) d->GetTexture(2, &tex[2]);
 		d->GetRenderTarget(0, &rt0); d->GetViewport(&vp); d->GetPixelShaderConstantF(0, &saved[0][0], 7);
 		static const D3DRENDERSTATETYPE kRS[] = { D3DRS_ZENABLE, D3DRS_ZWRITEENABLE, D3DRS_ALPHABLENDENABLE, D3DRS_ALPHATESTENABLE, D3DRS_STENCILENABLE,
 			D3DRS_SCISSORTESTENABLE, D3DRS_CULLMODE, D3DRS_COLORWRITEENABLE, D3DRS_FILLMODE, D3DRS_SRGBWRITEENABLE, D3DRS_FOGENABLE, D3DRS_CLIPPLANEENABLE };
@@ -425,8 +542,8 @@ namespace CapturedNormals {
 		for (unsigned i = 0; i < sizeof(kRS) / sizeof(kRS[0]); i++) { if (FAILED(d->GetRenderState(kRS[i], &savedRS[i]))) savedRS[i] = want[i]; if (savedRS[i] != want[i]) d->SetRenderState(kRS[i], want[i]); }
 		static const D3DSAMPLERSTATETYPE kSS[] = { D3DSAMP_MINFILTER, D3DSAMP_MAGFILTER, D3DSAMP_MIPFILTER, D3DSAMP_ADDRESSU, D3DSAMP_ADDRESSV, D3DSAMP_SRGBTEXTURE };
 		const DWORD wantS[] = { D3DTEXF_POINT, D3DTEXF_POINT, D3DTEXF_NONE, D3DTADDRESS_CLAMP, D3DTADDRESS_CLAMP, FALSE };
-		DWORD savedS[2][sizeof(kSS) / sizeof(kSS[0])];
-		for (DWORD s = 0; s < 2; s++)
+		DWORD savedS[3][sizeof(kSS) / sizeof(kSS[0])];
+		for (DWORD s = 0; s < stages; s++)
 			for (unsigned i = 0; i < sizeof(kSS) / sizeof(kSS[0]); i++) { if (FAILED(d->GetSamplerState(s, kSS[i], &savedS[s][i]))) savedS[s][i] = wantS[i]; if (savedS[s][i] != wantS[i]) d->SetSamplerState(s, kSS[i], wantS[i]); }
 
 		d->SetRenderTarget(0, normals);
@@ -437,24 +554,25 @@ namespace CapturedNormals {
 		const float c[7][4] = {
 			{ 1.0f / proj->_11, 1.0f / proj->_22, camera->y, 0.0f },
 			{ scale ? scale->x : 1.0f, scale ? scale->y : 1.0f, scale ? scale->z : 1.0f, scale ? scale->w : 1.0f },
-			{ Data.y, Data.z, Data.w, 0.0f },
+			{ Data.y, Data.z, Data.w, grass ? 1.0f : 0.0f },	// (w: 2026-11-12 CapturedGrass, the marked grass pixels take their record's normal)
 			{ view->_11, view->_12, view->_13, view->_14 }, { view->_21, view->_22, view->_23, view->_24 },
 			{ view->_31, view->_32, view->_33, view->_34 }, { view->_41, view->_42, view->_43, view->_44 } };
 		d->SetPixelShaderConstantF(0, &c[0][0], 7);
 		d->SetTexture(0, Texture);
 		d->SetTexture(1, depth);
+		if (grass) d->SetTexture(2, MaterialTexture);
 		d->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
 		const float x1 = (float)t.Width - 0.5f, y1 = (float)t.Height - 0.5f;
 		const float quad[4][6] = { { -0.5f, -0.5f, 0, 1, 0, 0 }, { x1, -0.5f, 0, 1, 1, 0 }, { -0.5f, y1, 0, 1, 0, 1 }, { x1, y1, 0, 1, 1, 1 } };
 		d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(quad[0]));
 
 		// Put it all back.
-		for (DWORD s = 0; s < 2; s++)
+		for (DWORD s = 0; s < stages; s++)
 			for (unsigned i = 0; i < sizeof(kSS) / sizeof(kSS[0]); i++) if (savedS[s][i] != wantS[i]) d->SetSamplerState(s, kSS[i], savedS[s][i]);
 		for (unsigned i = 0; i < sizeof(kRS) / sizeof(kRS[0]); i++) if (savedRS[i] != want[i]) d->SetRenderState(kRS[i], savedRS[i]);
 		if (rt0) { d->SetRenderTarget(0, rt0); rt0->Release(); }
 		d->SetViewport(&vp);
-		for (DWORD s = 0; s < 2; s++) { d->SetTexture(s, tex[s]); if (tex[s]) tex[s]->Release(); }
+		for (DWORD s = 0; s < stages; s++) { d->SetTexture(s, tex[s]); if (tex[s]) tex[s]->Release(); }
 		d->SetPixelShaderConstantF(0, &saved[0][0], 7);
 		if (decl) { d->SetVertexDeclaration(decl); decl->Release(); } else d->SetFVF(fvf);
 		d->SetStreamSource(0, vb, vbOffset, vbStride); if (vb) vb->Release();
@@ -484,6 +602,7 @@ namespace CapturedNormals {
 		if (AlbedoSurface) { AlbedoSurface->Release(); AlbedoSurface = nullptr; }
 		if (AlbedoTexture) { AlbedoTexture->Release(); AlbedoTexture = nullptr; }
 		Made = {};
+		GrassArmed = GrassLateOk = GrassLateBound = false; GrassLateTarget = nullptr;	// UNOFFICIAL 2026-11-12 (the late grass binds: gone with the targets)
 	}
 
 	inline IDirect3DSurface9* DrawSurface() { return MsaaSurface ? MsaaSurface : TextureSurface; }
@@ -748,8 +867,142 @@ namespace CapturedNormals {
 		d->SetRenderState(st, v);
 	}
 
-	inline void BeforeDraw(IDirect3DDevice9* d) {
+	// UNOFFICIAL 2026-11-11 BlendedAlpha ([Main.Main.Quality] CapturedBlendedAlpha; a tester's video, Tale of Two Wastelands under the path
+	// tracer: rubble piles as the game's bright raster pixels next to path-traced ground, the boundaries along triangles). A writer drawn
+	// with the SRCALPHA / INVSRCALPHA blend (Fallout 3's rubble piles and roads fade into the ground by vertex alpha; objects fading in) was
+	// taken as "the templates write alpha 1 there, a plain replace" (BeforeDraw). True for the targets' rgb. But MaterialAware reflections
+	// (core/ReflMaterial.h SetSceneStates, on by default) run the whole world scene with SEPARATEALPHABLENDENABLE and the alpha blend
+	// ZERO / ONE, and D3D9 has ONE blend state for every render target: the blended writer replaced the normal / albedo / material rgb and
+	// KEPT each target's alpha. Over a texel nothing had written yet (objects draw before the land) the alpha stayed 0 = "unwritten": every
+	// reader took the pixel as not captured, and the path tracer showed the game's own pixel there (RtPathTrace.comp gScreenDrawnElse);
+	// over a texel another object had written, the same rubble came out path traced. For such a draw the alpha blend is now ONE / ZERO (the
+	// targets' alpha is the shader's: written) and the scene target's alpha write is masked off (it keeps its alpha, as ZERO / ONE did);
+	// AfterDraw puts the three states back. Only the exact ZERO / ONE case (a draw ReflMaterial gave another alpha blend keeps it).
+	inline bool BlendedAlphaOn = true, BlendedAlphaActive = false;
+	inline DWORD BlendedAlphaSaved[3] = {};	// SRCBLENDALPHA, DESTBLENDALPHA, COLORWRITEENABLE
+	inline UInt32 BlendedAlphaDraws = 0;
+	// UNOFFICIAL 2026-11-12 CapturedCoverage (keep): the targets' alpha blend is ONE / INVSRCALPHA instead of ONE / ZERO: a record written
+	// with alpha 1 gives 1 x 1 + dest x 0 = 1 exactly as before, and one written with alpha 0 (a blended draw below half coverage, a grass
+	// texel that is no grass) leaves the texel's alpha as it was, as SRCALPHA / INVSRCALPHA leaves its rgb. Only for writers whose record
+	// alpha is 1 or 0: an alpha CODE (actors' 2, the deferred records' 1.01-1.99) would come out as code + dest x (1 - code), so the
+	// CodeWriters and the skin template keep ONE / ZERO (keep false).
+	inline void BlendedAlphaBegin(IDirect3DDevice9* d, DWORD mask, bool keep) {
+		DWORD separate = FALSE, srcA = D3DBLEND_ONE, dstA = D3DBLEND_ZERO;
+		if (FAILED(d->GetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, &separate)) || !separate) return;
+		if (FAILED(d->GetRenderState(D3DRS_SRCBLENDALPHA, &srcA)) || FAILED(d->GetRenderState(D3DRS_DESTBLENDALPHA, &dstA))) return;
+		if (srcA != D3DBLEND_ZERO || dstA != D3DBLEND_ONE) return;
+		BlendedAlphaSaved[0] = srcA; BlendedAlphaSaved[1] = dstA; BlendedAlphaSaved[2] = mask;
+		d->SetRenderState(D3DRS_SRCBLENDALPHA, D3DBLEND_ONE);
+		d->SetRenderState(D3DRS_DESTBLENDALPHA, keep ? D3DBLEND_INVSRCALPHA : D3DBLEND_ZERO);
+		if (mask & D3DCOLORWRITEENABLE_ALPHA) d->SetRenderState(D3DRS_COLORWRITEENABLE, mask & 7);
+		BlendedAlphaActive = true;
+		BlendedAlphaDraws++;
+	}
+
+	// UNOFFICIAL 2026-11-12 CapturedCoverage ([Main.Main.Quality] CapturedCoverage, live, a missing key = on; audit item 7: "fading objects
+	// recorded as solid"). A template writer drawn with the SRCALPHA / INVSRCALPHA blend wrote its records with alpha 1 on every pixel of
+	// the polygon, whatever the draw's own alpha: a Fallout 3 rubble skirt or road edge (vertex alpha down to 0), an object fading in,
+	// terrain blending's Smooth seam became solid, hard-edged shapes under the path tracer. The templates now write record alpha 0 where
+	// the draw's own alpha is below 0.5 (Includes/CapturedNormals.hlsl CapturedCoverage), which under this blend leaves the texel as it
+	// was -- but only for a draw marked as blended, since an OPAQUE draw's alpha can be anything (a texture's alpha that means something
+	// else) and must record as before. The mark rides in NVR_SpecFade.z (pixel c211, core/PbrPop.h: FoldHighlights' vertex-colour switch,
+	// 0 or 1): for this one draw it is -1 (was 0) or 3 (was 1), which every z > 0.5 test in the shaders reads as before; AfterDraw puts
+	// the register back exactly, so PbrPop's "already sent" record stays right. No new register (c180-c223 are taken) and no new define.
+	// Opaque draws: nothing is set, the shaders multiply their record alpha by 1.
+	inline void CoverageBegin(IDirect3DDevice9* d) {
+		if (FAILED(d->GetPixelShaderConstantF(211, CoverageSaved, 1))) return;
+		if (CoverageSaved[2] > 1.5f) CoverageSaved[2] = 1.0f; else if (CoverageSaved[2] < -0.5f) CoverageSaved[2] = 0.0f;	// (never a mark left behind)
+		const float marked[4] = { CoverageSaved[0], CoverageSaved[1], CoverageSaved[2] > 0.5f ? 3.0f : -1.0f, CoverageSaved[3] };
+		d->SetPixelShaderConstantF(211, marked, 1);
+		CoverageActive = true;
+		CoverageDraws++;
+	}
+
+	// UNOFFICIAL 2026-11-12 grass records after the main list (see GrassWriters). GrassLateEnd: our targets off the device (only where
+	// they are still ours), the write masks as Unbind leaves them, and under the game's MSAA the three resolved again for the readers.
+	inline void GrassLateEnd(IDirect3DDevice9* d) {
+		GrassArmed = false;
+		if (!GrassLateBound) return;
+		GrassLateBound = false;
+		D3DVIEWPORT9 vp; d->GetViewport(&vp);
+		IDirect3DSurface9* const ours[3] = { AlbedoDrawSurface(), MaterialDrawSurface(), DrawSurface() };
+		for (DWORD i = 1; i <= 3; i++) {
+			IDirect3DSurface9* rt = nullptr;
+			if (SUCCEEDED(d->GetRenderTarget(i, &rt)) && rt) rt->Release();
+			if (rt && rt == ours[i - 1]) d->SetRenderTarget(i, nullptr);
+		}
+		d->SetViewport(&vp);
+		d->SetRenderState(D3DRS_COLORWRITEENABLE1, 0xF);
+		d->SetRenderState(D3DRS_COLORWRITEENABLE2, 0xF);
+		d->SetRenderState(D3DRS_COLORWRITEENABLE3, 0xF);
+		if (MsaaSurface && TextureSurface) d->StretchRect(MsaaSurface, NULL, TextureSurface, NULL, D3DTEXF_NONE);
+		if (MaterialMsaa && MaterialSurface) d->StretchRect(MaterialMsaa, NULL, MaterialSurface, NULL, D3DTEXF_NONE);
+		if (AlbedoMsaa && AlbedoSurface) d->StretchRect(AlbedoMsaa, NULL, AlbedoSurface, NULL, D3DTEXF_NONE);
+	}
+	// A draw outside the span while a grass shader was the last thing bound (GrassArmed). The device is asked (nothing is tracked here);
+	// the first draw that is not a grass writer's ends it, so the rest of the frame's draws pay one flag test.
+	inline void GrassLateDraw(IDirect3DDevice9* d) {
+		IDirect3DPixelShader9* ps = nullptr;
+		d->GetPixelShader(&ps); if (ps) ps->Release();
+		if (!ps || !GrassLateOk || !GrassWriters.count(ps) || !TextureSurface || !MaterialSurface || !AlbedoSurface) { GrassLateEnd(d); return; }
+		IDirect3DSurface9* rt0 = nullptr;
+		if (SUCCEEDED(d->GetRenderTarget(0, &rt0)) && rt0) rt0->Release();
+		if (rt0 != GrassLateTarget) { GrassLateEnd(d); GrassArmed = true; return; }	// another target (never with ours bound); the grass may go on after it
+		DWORD mask = 0xF, blend = FALSE, src = D3DBLEND_ONE, dst = D3DBLEND_ZERO;
+		d->GetRenderState(D3DRS_COLORWRITEENABLE, &mask);
+		d->GetRenderState(D3DRS_ALPHABLENDENABLE, &blend);
+		if (blend) { d->GetRenderState(D3DRS_SRCBLEND, &src); d->GetRenderState(D3DRS_DESTBLEND, &dst); }
+		// as BeforeDraw: opaque, or the SRCALPHA / INVSRCALPHA blend (grass: its record alpha is 1 or 0, a replace or nothing)
+		if (!(mask & 7) || (blend && (src != D3DBLEND_SRCALPHA || dst != D3DBLEND_INVSRCALPHA))) {
+			if (GrassLateBound) { d->SetRenderState(D3DRS_COLORWRITEENABLE1, 0); d->SetRenderState(D3DRS_COLORWRITEENABLE2, 0); d->SetRenderState(D3DRS_COLORWRITEENABLE3, 0); }
+			return;
+		}
+		if (!GrassLateBound) {
+			IDirect3DSurface9* const ours[3] = { AlbedoDrawSurface(), MaterialDrawSurface(), DrawSurface() };
+			for (DWORD i = 1; i <= 3; i++) {	// every stage free (or ours already), or none is touched
+				IDirect3DSurface9* rt = nullptr;
+				if (SUCCEEDED(d->GetRenderTarget(i, &rt)) && rt) rt->Release();
+				if (rt && rt != ours[i - 1]) { GrassLateBusy++; return; }
+			}
+			D3DVIEWPORT9 vp; d->GetViewport(&vp);
+			for (DWORD i = 1; i <= 3; i++) d->SetRenderTarget(i, ours[i - 1]);
+			d->SetViewport(&vp);
+			GrassLateBound = true;
+		}
+		d->SetRenderState(D3DRS_COLORWRITEENABLE1, 0xF);
+		d->SetRenderState(D3DRS_COLORWRITEENABLE2, 0xF);
+		d->SetRenderState(D3DRS_COLORWRITEENABLE3, 0xF);
+		if (blend && BlendedAlphaOn) BlendedAlphaBegin(d, mask, true);	// (AfterDraw puts the alpha blend back)
+		GrassLateWrites++;
+	}
+	inline void BeginSpan(IDirect3DDevice9* d);
+	// GrassShaders::SetForDraw, at every grass shader bind. part: GrassShaders::DrawPart (1 = GrassFirst's early run, which only
+	// GrassFirst::MainListHook makes, in the world scene, right before its own BeginSpan / EndSpan pair round the main list).
+	inline void GrassBind(IDirect3DDevice9* d, int part) {
+		if (!GrassNow || !Live || InSpan) return;
+		if (part == 1) { BeginSpan(d); if (InSpan) GrassEarlySpans++; }
+		else if (GrassLateOk) GrassArmed = true;
+	}
+	// A draw this hook does not see is coming (GPU grass strands through the DXVK extension): nothing of ours may be written by it.
+	inline void BeforeForeignDraw(IDirect3DDevice9* d) {
+		if (GrassLateBound) { GrassLateEnd(d); return; }
 		if (!InSpan) return;
+		IDirect3DSurface9* rt3 = nullptr;
+		if (SUCCEEDED(d->GetRenderTarget(3, &rt3)) && rt3) rt3->Release();
+		if ((rt3 && rt3 == DrawSurface()) || MaterialBound || AlbedoBound) Unbind(d);	// (the next writing draw binds them again)
+	}
+
+	inline void AfterDraw(IDirect3DDevice9* d) {
+		if (CoverageActive) { CoverageActive = false; d->SetPixelShaderConstantF(211, CoverageSaved, 1); }	// UNOFFICIAL 2026-11-12 CapturedCoverage
+		if (!BlendedAlphaActive) return;
+		BlendedAlphaActive = false;
+		d->SetRenderState(D3DRS_SRCBLENDALPHA, BlendedAlphaSaved[0]);
+		d->SetRenderState(D3DRS_DESTBLENDALPHA, BlendedAlphaSaved[1]);
+		if (BlendedAlphaSaved[2] & D3DCOLORWRITEENABLE_ALPHA) d->SetRenderState(D3DRS_COLORWRITEENABLE, BlendedAlphaSaved[2]);
+	}
+
+	inline void BeforeDraw(IDirect3DDevice9* d) {
+		if (!InSpan) { if (GrassArmed) GrassLateDraw(d); return; }	// (2026-11-12 grass records after the main list)
 		if (BodyLean()) {	// UNOFFICIAL 2026-11-04 DrawStateTracking: a lost record read again; every CheckEvery-th draw compared
 			if (!Tracked) { Resync(d); BodyResyncs++; SharedDrawState::Valid = true; }
 			else if (++BodyDrawCounter >= BodyCheckEvery) {
@@ -767,7 +1020,11 @@ namespace CapturedNormals {
 		else { d->GetPixelShader(&ps); if (ps) ps->Release(); }
 		if (ps != LastPS) { LastPS = ps; LastWriter = ps && Writers.count(ps) != 0; LastMaterialWriter = ps && MaterialWriters.count(ps) != 0;
 			LastContrastWriter = ps && ContrastWriters.count(ps) != 0;
-			LastAlbedoWriter = ps && AlbedoWriters.count(ps) != 0; LastAlbedoLightOnly = ps && AlbedoLightOnlyWriters.count(ps) != 0; }	// UNOFFICIAL 2026-10-31 AlbedoBuffer
+			LastAlbedoWriter = ps && AlbedoWriters.count(ps) != 0; LastAlbedoLightOnly = ps && AlbedoLightOnlyWriters.count(ps) != 0;	// UNOFFICIAL 2026-10-31 AlbedoBuffer
+			// UNOFFICIAL 2026-11-12 foliage records: the grass and leaf shaders write all three (while path tracing replaces the picture)
+			LastGrassWriter = GrassNow && ps && GrassWriters.count(ps) != 0; LastLeafWriter = LeafNow && ps && LeafWriters.count(ps) != 0;
+			LastCodeWriter = ps && CodeWriters.count(ps) != 0;	// (2026-11-12 CapturedCoverage: not for these)
+			if (LastGrassWriter || LastLeafWriter) LastWriter = LastMaterialWriter = LastAlbedoWriter = true; }
 		bool write = LastWriter;
 		bool contrast = false;	// UNOFFICIAL ShadowContrast: an added lamp pass that gives its lost light to MaterialBuffer's alpha
 		if (write) {
@@ -775,6 +1032,13 @@ namespace CapturedNormals {
 			const DWORD src = blend ? StateNow(d, D3DRS_SRCBLEND, D3DBLEND_ONE) : D3DBLEND_ONE, dst = blend ? StateNow(d, D3DRS_DESTBLEND, D3DBLEND_ZERO) : D3DBLEND_ZERO;
 			// opaque, or a SRCALPHA / INVSRCALPHA fade (the land over objects): the templates write alpha 1 there, a plain replace
 			write = (mask & 7) && (!blend || (src == D3DBLEND_SRCALPHA && dst == D3DBLEND_INVSRCALPHA));
+			// (2026-11-11 BlendedAlpha) ... of the targets' alpha too, under the scene's separate alpha blend (see BlendedAlphaBegin)
+			// (2026-11-12 CapturedCoverage) a blended template writer is marked for its one draw (CoverageBegin), and a record alpha of 0
+			// keeps the texel's alpha (the foliage shaders write 1 or 0 by themselves)
+			const bool foliage = LastGrassWriter || LastLeafWriter;
+			const bool coverage = write && blend && CoverageOn && AlbedoCompiled && LastAlbedoWriter && !LastCodeWriter && !LastAlbedoLightOnly;
+			if (coverage && !foliage) CoverageBegin(d);
+			if (write && blend && BlendedAlphaOn) BlendedAlphaBegin(d, mask, coverage || foliage);
 			// added (ONE / ONE): the alpha adds up across the lamp passes; any other added blend would scale it, so it is left out (counted)
 			if (!write && LastContrastWriter && ContrastStrength > 0.0f && (mask & 7) && blend && dst == D3DBLEND_ONE) {
 				if (src == D3DBLEND_ONE) contrast = true; else ContrastOtherBlend++;
@@ -787,7 +1051,9 @@ namespace CapturedNormals {
 			Drawn = true;
 			// UNOFFICIAL 2026-11-04: the light pass lights this object (core/FlashlightLamp.h). (2026-11-07 ptaaa-firstperson) not the view
 			// model's draws (VmSpan): the deferred flashlight ran before them, so marking them "lit already" would take the light off the gun
-			if (!VmSpan) FlashlightLamp::NoteWrite();
+			// (2026-11-12) nor the grass and the leaves: they keep their own beam / the game lamp (their records are only for the path tracer)
+			if (!VmSpan && !LastGrassWriter && !LastLeafWriter) FlashlightLamp::NoteWrite();
+			if (LastGrassWriter) GrassWrites++; else if (LastLeafWriter) LeafWrites++;
 		}
 		else if (Bound) {
 			SetMask(d, D3DRS_COLORWRITEENABLE3, 0);
@@ -939,19 +1205,27 @@ namespace CapturedNormals {
 	inline HRESULT STDMETHODCALLTYPE DIPHook(IDirect3DDevice9* d, D3DPRIMITIVETYPE t, INT b, UINT mi, UINT nv, UINT s, UINT pc) {
 		DisplaceHeight::BeforeDraw(d);	// UNOFFICIAL 2026-11-01 SameHeight (displaced parallax objects)
 		BeforeDraw(d);
-		return NextDIP(d, t, b, mi, nv, s, pc);
+		const HRESULT r = NextDIP(d, t, b, mi, nv, s, pc);
+		AfterDraw(d);	// (2026-11-11 BlendedAlpha)
+		return r;
 	}
 	inline HRESULT STDMETHODCALLTYPE DPHook(IDirect3DDevice9* d, D3DPRIMITIVETYPE t, UINT s, UINT pc) {
 		BeforeDraw(d);
-		return NextDP(d, t, s, pc);
+		const HRESULT r = NextDP(d, t, s, pc);
+		AfterDraw(d);
+		return r;
 	}
 	inline HRESULT STDMETHODCALLTYPE DPUPHook(IDirect3DDevice9* d, D3DPRIMITIVETYPE t, UINT pc, CONST void* v, UINT stride) {
 		BeforeDraw(d);
-		return NextDPUP(d, t, pc, v, stride);
+		const HRESULT r = NextDPUP(d, t, pc, v, stride);
+		AfterDraw(d);
+		return r;
 	}
 	inline HRESULT STDMETHODCALLTYPE DIPUPHook(IDirect3DDevice9* d, D3DPRIMITIVETYPE t, UINT mi, UINT nv, UINT pc, CONST void* i, D3DFORMAT f, CONST void* v, UINT stride) {
 		BeforeDraw(d);
-		return NextDIPUP(d, t, mi, nv, pc, i, f, v, stride);
+		const HRESULT r = NextDIPUP(d, t, mi, nv, pc, i, f, v, stride);
+		AfterDraw(d);
+		return r;
 	}
 	inline HRESULT STDMETHODCALLTYPE ClearHook(IDirect3DDevice9* d, DWORD count, CONST D3DRECT* rects, DWORD flags, D3DCOLOR color, float z, DWORD stencil) {
 		if (InSpan) {	// D3D9's Clear clears every bound target; the next writing draw binds it again
@@ -959,6 +1233,7 @@ namespace CapturedNormals {
 			if (SUCCEEDED(d->GetRenderTarget(3, &rt3)) && rt3) rt3->Release();
 			if ((rt3 && rt3 == DrawSurface()) || MaterialBound || AlbedoBound) Unbind(d);	// (AlbedoBound: 2026-10-31 AlbedoBuffer)
 		}
+		else if (GrassLateBound) { const bool armed = GrassArmed; GrassLateEnd(d); GrassArmed = armed; }	// UNOFFICIAL 2026-11-12 (the late grass binds)
 		return NextClear(d, count, rects, flags, color, z, stencil);
 	}
 
@@ -1013,6 +1288,38 @@ namespace CapturedNormals {
 	// Render.cpp, once a frame. wanted: a reader will use this frame's normals (SnowAccumulation with CapturedNormals on).
 	inline void BeginFrame(IDirect3DDevice9* d, bool wanted) {
 		Data.x = 0.0f;	// nothing captured yet this frame
+		{	// UNOFFICIAL 2026-11-12 foliage records + CapturedCoverage: the keys (live), and whether the path tracer replaces the picture
+			if (GrassLateBound) GrassLateEnd(d);
+			GrassArmed = GrassLateOk = false; GrassLateTarget = nullptr;
+			{ SettingManager::Configuration::ConfigNode gk; GrassKey = TheSettingManager->Config.FillNode(&gk, "Main.Main.Quality", "CapturedGrass") && gk.BoolValue; }	/* UNOFFICIAL 2026-11-12: OFF unless set (a missing key: off). Seen on an RTX card: with it on the grass got bright orange-yellow speckles that changed every frame under path tracing */ LeafKey = QualityKeyOn("CapturedLeaves"); CoverageOn = QualityKeyOn("CapturedCoverage");
+			const bool traced = AlbedoCompiledIn() && RtPathTrace::Replacing();
+			// UNOFFICIAL 2026-11-12 CapturedGrass, second pass: also for the raster frame's RT GI (the SunGI switch, which sets SunGIWantsAlbedo,
+			// or [Shaders.AmbientOcclusion.RT] Enabled + GI): its bounce takes the grass's own colour, and its rays (and every other
+			// reader of TESR_NormalsBuffer) the tuft's normal instead of the depth-rebuilt one. Not while the grass lights itself by the
+			// deferred flashlight's beam (the light pass would light its records too). The keys are read only with CapturedGrass on.
+			bool forGI = false, beam = false;
+			if (GrassKey && !traced && AlbedoCompiledIn() && !GrassWriters.empty()) {
+				forGI = SunGIWantsAlbedo || (TheSettingManager->GetSettingI("Shaders.AmbientOcclusion.RT", "Enabled") != 0 && TheSettingManager->GetSettingI("Shaders.AmbientOcclusion.RT", "GI") != 0);
+				if (forGI && GrassOwnBeam) { forGI = false; beam = true; GrassBeamFrames++; }
+			}
+			GrassNow = (traced || forGI) && GrassKey && !GrassWriters.empty();
+			GrassForGI = GrassNow && !traced;
+			GrassMergeNow = GrassNow && QualityKeyOn("CapturedGrassNormals");
+			LeafNow = traced && LeafKey && !LeafWriters.empty();
+			{	// one line when the grass records' state changes (at most 24 a session: the flashlight can switch it often)
+				const int state = !GrassKey ? 0 : GrassWriters.empty() || !AlbedoCompiledIn() ? 1 : traced ? 2 : forGI ? 3 : beam ? 4 : 5;
+				if (state != GrassState && (state != 0 || GrassState > 0) && GrassStateLogs < 24) {
+					GrassStateLogs++;
+					static const char* const text[] = { "off (the key)",
+						"on, but cannot run: no grass shader was compiled with the records (needs [Main.Main.Quality] CapturedNormals, MaterialBuffer and AlbedoBuffer at startup, and Vegas Shaders' grass shaders)",
+						"WRITTEN for the path tracer", "WRITTEN for the RT GI (no path tracing: the bounce's colour and the rays' normal on grass)",
+						"on, but not written now: the deferred flashlight lights the grass itself (its light pass would light the records too)",
+						"on, but not written now: nothing reads them (no path tracing, no RT GI / SunGI)" };
+					Logger::Log("CapturedGrass: grass records %s%s", text[state], state == 2 || state == 3 ? (GrassMergeNow ? "; the grass's own normal goes into the normals buffer (CapturedGrassNormals on)" : "; CapturedGrassNormals is OFF: grass pixels keep the normal rebuilt from depth (noisy)") : "");
+				}
+				GrassState = state;
+			}
+		}
 		if (Failed && MakeFail.failed && !MakeFail.Blocked()) { Failed = false; Recreations = 0; RecreationsSince = LiveFrames; }	// UNOFFICIAL 2026-11-02 RetryFailedEffects (not after the self-check)
 		Live = CompiledIn() && !Failed && wanted;
 		if (Live && !Hooked) {
@@ -1034,6 +1341,14 @@ namespace CapturedNormals {
 			if (BodyTracked)	// UNOFFICIAL 2026-11-04 DrawStateTracking
 				Logger::Log("DrawStateTracking: %s; %u checks against the device so far, %u differed; %u records read again after a state block or reset",
 					BodyDisabled ? "OFF after a difference (the per-draw device queries)" : BodyWanted ? "in use" : "switched off", BodyChecks, BodyMismatches, BodyResyncs);
+			// UNOFFICIAL 2026-11-12 foliage records + CapturedCoverage
+			if (AlbedoCompiled)
+				Logger::Log("CapturedNormals: foliage records %s (CapturedGrass %s, %u grass shaders; CapturedLeaves %s, %u leaf shaders; written while path tracing replaces the picture, the grass's also for the RT GI: %s): per frame %.1f grass draws wrote them before / in the main list (the span opened early on %.2f of the frames), %.1f after it (%.2f found a target stage taken), %.1f leaf draws in the main list. CapturedCoverage %s: %.1f blended writer draws a frame recorded only where their own alpha is 0.5 or more",
+					GrassNow || LeafNow ? "ACTIVE" : "idle", GrassKey ? "on" : "off", (unsigned)GrassWriters.size(), LeafKey ? "on" : "off", (unsigned)LeafWriters.size(),
+					GrassForGI ? "now" : "not now",
+					GrassWrites / (double)Frames, GrassEarlySpans / (double)Frames, GrassLateWrites / (double)Frames, GrassLateBusy / (double)Frames, LeafWrites / (double)Frames,
+					CoverageOn ? "on" : "off", CoverageDraws / (double)Frames);
+			GrassWrites = GrassLateWrites = GrassLateBusy = GrassEarlySpans = LeafWrites = CoverageDraws = 0;
 			Frames = Writes = Masked = Unbinds = 0;
 			MaterialWrites = MaterialBusy = 0;
 			AlbedoWrites = AlbedoBusy = AlbedoLightOnlyDraws = AlbedoSkinFills = 0;	// UNOFFICIAL 2026-10-31 AlbedoBuffer
@@ -1042,8 +1357,11 @@ namespace CapturedNormals {
 	}
 
 	// GrassFirst::MainListHook, around the game's RenderBatches(1, 0x25B) call (world context only).
+	// (2026-11-12: also from GrassBind, at the early grass's first shader bind; MainListHook's call then finds the span open)
 	inline void BeginSpan(IDirect3DDevice9* d) {
 		if (!Live || InSpan) return;
+		if (GrassLateBound) GrassLateEnd(d);	// UNOFFICIAL 2026-11-12 (a second world scene in the frame: the first one's late grass is over)
+		GrassArmed = GrassLateOk = false; GrassLateTarget = nullptr;
 		IDirect3DSurface9* rt0 = nullptr;
 		if (FAILED(d->GetRenderTarget(0, &rt0)) || !rt0) return;
 		D3DSURFACE_DESC t = {};
@@ -1074,6 +1392,11 @@ namespace CapturedNormals {
 		if (AlbedoTexture && AlbedoCompiled) d->ColorFill(AlbedoDrawSurface(), NULL, D3DCOLOR_ARGB(0, 0, 0, 0));	// UNOFFICIAL 2026-10-31 AlbedoBuffer: unwritten
 		AlbedoDrawn = AlbedoBound = false;
 		SkinAlbedoTex = nullptr; SkinAlbedoMsaa = nullptr; SkinAlbedoSurface = nullptr;	// (noted again by the skin draws of this span)
+		{	// (2026-11-11) [Main.Main.Quality] CapturedBlendedAlpha, live (a missing key: on); a log line of its work now and then
+			SettingManager::Configuration::ConfigNode node;
+			BlendedAlphaOn = !TheSettingManager->Config.FillNode(&node, "Main.Main.Quality", "CapturedBlendedAlpha") || node.BoolValue;
+			if (LiveFrames % 1800 == 2) { Logger::Log("CapturedNormals: CapturedBlendedAlpha %s: %u blended writer draws since the last line had the targets' alpha written (the scene's alpha blend ZERO / ONE kept it before: such pixels counted as unwritten)", BlendedAlphaOn ? "on" : "off", BlendedAlphaDraws); BlendedAlphaDraws = 0; }
+		}
 		CheckThisFrame = IsCheckFrame(++LiveFrames);
 		{	// UNOFFICIAL 2026-10-31 [Main.Main.Quality] MaterialBufferCheckEvery (live, 0 off): the self-check every that many frames too (a test aid)
 			const int every = TheSettingManager->GetSettingI("Main.Main.Quality", "MaterialBufferCheckEvery");
@@ -1108,6 +1431,9 @@ namespace CapturedNormals {
 		ContrastDrawn = false;
 		if (MaterialDrawn && !Failed && Drawn) SkinFill(d);	// UNOFFICIAL 2026-10-31 MaterialBufferSkin (after the contrast step: it reads the alpha)
 		if (AlbedoDrawn && !Failed && Drawn) SkinAlbedoFill(d);	// UNOFFICIAL 2026-10-31 AlbedoBuffer: the skin's albedo from the skin blur's target
+		// UNOFFICIAL 2026-11-12 grass records: the grass drawn after this list writes into the same targets (GrassLateDraw), this scene target only
+		GrassLateTarget = SpanTarget;
+		GrassLateOk = GrassNow && !Failed && SpanTarget && AlbedoDrawn && MaterialDrawn && Drawn;
 		if (SpanTarget) { SpanTarget->Release(); SpanTarget = nullptr; }
 		MaterialData.x = MaterialDrawn && !Failed ? 1.0f : 0.0f;
 		AlbedoData.x = AlbedoDrawn && !Failed ? 1.0f : 0.0f;	// UNOFFICIAL 2026-10-31 AlbedoBuffer
@@ -1119,13 +1445,13 @@ namespace CapturedNormals {
 			D3DLOCKED_RECT r = {};
 			if (MaterialDrawn && MaterialSurface && CheckTarget && SUCCEEDED(d->StretchRect(MaterialSurface, NULL, CheckTarget, NULL, D3DTEXF_POINT)) &&
 				SUCCEEDED(d->GetRenderTargetData(CheckTarget, CheckCopy)) && SUCCEEDED(CheckCopy->LockRect(&r, NULL, D3DLOCK_READONLY))) {
-				int byClass[7] = {}, metalTexels = 0; float thickMax = 0.0f, roughMin = 2.0f, roughMax = -2.0f, metalMax = 0.0f;
+				int byClass[8] = {}, metalTexels = 0; float thickMax = 0.0f, roughMin = 2.0f, roughMax = -2.0f, metalMax = 0.0f;	// (7: 2026-11-12 CapturedGrass, grass)
 				for (int y = 0; y < 64; y++) {
 					const D3DXFLOAT16* row = (const D3DXFLOAT16*)((const char*)r.pBits + y * r.Pitch);
 					for (int x = 0; x < 64; x++) {
 						float v[4]; D3DXFloat16To32Array(v, row + x * 4, 4);
 						if (v[3] < 0.5f) continue;
-						byClass[(std::min)((std::max)((int)floorf(v[0] + 0.004f), 0), 6)]++;	// 2026-10-31: r = class + 0.49 x metal
+						byClass[(std::min)((std::max)((int)floorf(v[0] + 0.004f), 0), 7)]++;	// 2026-10-31: r = class + 0.49 x metal
 						const float metal = (std::max)(v[0] - floorf(v[0] + 0.004f), 0.0f) / 0.49f;
 						if (metal > 0.02f) { metalTexels++; metalMax = (std::max)(metalMax, metal); }
 						thickMax = (std::max)(thickMax, v[1]);
@@ -1133,8 +1459,8 @@ namespace CapturedNormals {
 					}
 				}
 				CheckCopy->UnlockRect();
-				Logger::Log("MaterialBuffer: self-check at captured frame %u: texels by class 0:%d object:%d gear:%d cloth:%d land:%d plant:%d skin:%d of 4096; largest thickness %.0f; roughness %.2f-%.2f; metal on %d texels (up to %.2f); skin fills so far %u",
-					LiveFrames, byClass[0], byClass[1], byClass[2], byClass[3], byClass[4], byClass[5], byClass[6], thickMax, roughMin, roughMax, metalTexels, metalMax, SkinFills);
+				Logger::Log("MaterialBuffer: self-check at captured frame %u: texels by class 0:%d object:%d gear:%d cloth:%d land:%d plant:%d skin:%d grass:%d of 4096; largest thickness %.0f; roughness %.2f-%.2f; metal on %d texels (up to %.2f); skin fills so far %u",
+					LiveFrames, byClass[0], byClass[1], byClass[2], byClass[3], byClass[4], byClass[5], byClass[6], byClass[7], thickMax, roughMin, roughMax, metalTexels, metalMax, SkinFills);
 			}
 			if (AlbedoDrawn && AlbedoSurface && CheckTarget) AlbedoCheck(d);	// UNOFFICIAL 2026-10-31 AlbedoBuffer
 		}
@@ -1168,6 +1494,8 @@ namespace CapturedNormals {
 
 	// Render.cpp RenderFirstPersonHook, right round the game's first-person render
 	inline void BeginViewModelSpan(IDirect3DDevice9* d) {
+		if (GrassLateBound) GrassLateEnd(d);	// UNOFFICIAL 2026-11-12 (the world's late grass is over)
+		GrassArmed = GrassLateOk = false;
 		if (!VmWanted || !Live || InSpan || Failed || Data.x <= 0.0f || AlbedoData.x <= 0.0f || !Texture || !AlbedoSurface || MsaaSurface || AlbedoMsaa) return;
 		IDirect3DSurface9* rt0 = nullptr;
 		if (FAILED(d->GetRenderTarget(0, &rt0)) || !rt0) return;

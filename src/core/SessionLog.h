@@ -63,6 +63,7 @@ namespace SessionLog {
 	std::vector<std::string> SettingsDiff(unsigned& differ, unsigned& total);
 	void OnDevice(IDirect3DDevice9* device);	// RenderManager::Initialize: GPU, runtime, screen
 	void OnDeferredInit();					// xNVSE DeferredInit: the game INI values, the load order, the plugin DLLs
+	int  GridsToLoad();	// UNOFFICIAL 2026-11-12: the game INI's uGridsToLoad as the game read it (5 when not seen, clamped 5-21)
 	void NoteIni(const GameSetting* setting);	// ReadSettingHook: keeps the few INI values the header lists
 	void OnFrame();							// ShaderManager::RenderEffects, first thing every rendered frame
 	void OnSettingChanged(const char* section, const char* key, const char* before, const char* after);	// SettingManager::SetSetting

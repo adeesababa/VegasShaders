@@ -38,6 +38,7 @@
 #include "../../core/Diagnostics.h"	// UNOFFICIAL 2026-11-01 the history watch (HistoryProbe)
 #include "../../core/ObjectMotion.h"	// UNOFFICIAL 2026-10-29 ObjectMotion
 #include "../../core/ReactiveMask.h"	// UNOFFICIAL 2026-10-30 ReactiveMask
+#include "../../core/ScopeOverlay.h"	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] KeepRenderScale
 #include "../../core/RrRectPlan.h"	// UNOFFICIAL 2026-11-07 (perf-rr) the render size's maths, shared with RR's plan
 
 D3DXVECTOR4 TAAEffect::RenderScaleConstant = D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
@@ -277,7 +278,16 @@ bool TAAEffect::UpscaleBegin(bool firstWorld) {
 	if (fabsf(port.l) > 1e-4f || fabsf(port.r - 1.0f) > 1e-4f || fabsf(port.t - 1.0f) > 1e-4f || fabsf(port.b) > 1e-4f) return skip(SkipPort);
 	IDirect3DDevice9* device = TheRenderManager->device;
 	DWORD scissor = FALSE;
-	if (SUCCEEDED(device->GetRenderState(D3DRS_SCISSORTESTENABLE, &scissor)) && scissor) return skip(SkipScissor);
+	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] KeepRenderScale (core/ScopeOverlay.h; user at RenderScale 0.33 on 2560x1440: the frame rate
+	// "drops in half when i scope"): the game's own rifle scope draws the world through a scissor rectangle, and this frame was then left
+	// at native resolution with every effect. With the key on and the game's scope up, the frame is taken and the scissor rectangle is
+	// moved into the render rectangle below (the game switches the test off itself after the world). Any other scissor: as before.
+	RECT scopeScissor = {};
+	bool scopeScissorOn = false;
+	if (SUCCEEDED(device->GetRenderState(D3DRS_SCISSORTESTENABLE, &scissor)) && scissor) {
+		if (!ScopeOverlay::KeepRenderScale || !ScopeOverlay::Visible() || FAILED(device->GetScissorRect(&scopeScissor))) return skip(SkipScissor);
+		scopeScissorOn = true;
+	}
 
 	IDirect3DSurface9* target = nullptr;
 	IDirect3DSurface9* depth = nullptr;
@@ -326,6 +336,19 @@ bool TAAEffect::UpscaleBegin(bool firstWorld) {
 	Up.Camera = camera;
 	Up.PortSet = true;
 	Up.Active = true;
+	if (scopeScissorOn) {	// UNOFFICIAL 2026-11-12 KeepRenderScale: the game's scope scissor, in the render rectangle's pixels
+		const float kx = (float)renderWidth / (float)width, ky = (float)renderHeight / (float)height;
+		RECT r = { (LONG)floorf(scopeScissor.left * kx), (LONG)floorf(scopeScissor.top * ky), (LONG)ceilf(scopeScissor.right * kx), (LONG)ceilf(scopeScissor.bottom * ky) };
+		r.left = (std::max)(r.left, (LONG)0); r.top = (std::max)(r.top, (LONG)0);
+		r.right = (std::min)(r.right, (LONG)renderWidth); r.bottom = (std::min)(r.bottom, (LONG)renderHeight);
+		if (r.right > r.left && r.bottom > r.top) device->SetScissorRect(&r);
+		static bool told = false;
+		if (!told) {
+			told = true;
+			Logger::Log("UNOFFICIAL Scope KeepRenderScale: the game's scope is up: the frame stays at RenderScale %.2f (%ux%u); the game's scissor rectangle (%ld,%ld)-(%ld,%ld) of %ux%u is moved to (%ld,%ld)-(%ld,%ld) in the render rectangle.",
+				scale, renderWidth, renderHeight, scopeScissor.left, scopeScissor.top, scopeScissor.right, scopeScissor.bottom, width, height, r.left, r.top, r.right, r.bottom);
+		}
+	}
 	// UNOFFICIAL 2026-10-27 RenderScale v2: zw = 1 / scale (Includes/RenderRect.hlsl; the water shaders read only xy).
 	const float sx = (float)renderWidth / (float)width, sy = (float)renderHeight / (float)height;
 	RenderScaleConstant = D3DXVECTOR4(sx, sy, 1.0f / sx, 1.0f / sy);

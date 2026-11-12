@@ -497,8 +497,26 @@ float2 LampHazePhase(float2 cosTheta, float g) {
 	return min((1.0 - g * g) * rsqrt(k * k * k), 8.0);
 }
 
+// UNOFFICIAL 2026-11-12 LampHazeShadows ([Shaders.VolumetricFog.Interiors] LampHazeShadows, off by default; VolumetricFog.cpp SetLampHaze,
+// core/RtFogVisibility.h RtFogLamps, Compute/Rt/RtFogLamps.comp): the lamps' light in the air shadowed by the room. The RT core traces,
+// per lamp and screen cell, the share of the lamp's light along the view that really reaches the air (weighed as the integral below
+// weighs it), into 4 x 4 tiles of one texture, one tile a lamp. The lamp's code is its colour texel's alpha: 0 = no trace (the light
+// as before: the branch below is not taken), > 0 = tile + 1 + 32 x the cell size in pixels, < 0 = traced but this lamp has no tile yet
+// (no light in the air this frame). The tiles are bound on stage 11 and read through NVR_FogGrid's sampler (linear, clamp): indoors
+// the volumetric light's grid is never bound, and a sampler of its own was one more than ps_3_0 has (s15 is the sky shares').
+// s01: the pixel's screen position (0..1; rectToScreen of its texture coordinate), kept half a cell inside the tile so the linear read
+// never takes the next lamp's tile in.
+float LampHazeVisibility(float code, float2 s01) {
+	const float cell = floor(code * (1.0 / 32.0));
+	const float tile = code - 32.0 * cell - 1.0;
+	const float2 margin = 0.5 * cell * TESR_ReciprocalResolution.xy;
+	const float row = floor(tile * 0.25);
+	const float2 tileUV = (float2(tile - 4.0 * row, row) + clamp(s01, margin, 1.0 - margin)) * 0.25;
+	return code > 0.5 ? saturate(tex2Dlod(NVR_FogGrid, float4(tileUV, 0.0, 0.0)).r) : 0.0;
+}
+
 // The lamps' light scattered toward the camera along the unit view dir, out to dist (game units), through fog with extinction sigmaT per unit.
-float3 LampHazeLight(float3 dir, float dist, float sigmaT) {
+float3 LampHazeLight(float3 dir, float dist, float sigmaT, float2 s01) {
 	float3 sum = 0.0;
 	const float g = TESR_VolumetricFogLamps.z;
 	const float core = TESR_VolumetricFogLamps.w;
@@ -526,7 +544,11 @@ float3 LampHazeLight(float3 dir, float dist, float sigmaT) {
 				const float2 s = hp * sn / cs;
 				const float2 cosTheta = -s * rsqrt(h2 + s * s + 1.0e-4);	// light's direction at the point vs. toward the camera
 				const float2 phaseT = LampHazePhase(cosTheta, g) * exp(-sigmaT * max(t0 + s, 0.0));
-				sum += tex2Dlod(NVR_FogLamps, float4(u, 0.75, 0.0, 0.0)).rgb * (along * 0.5 * (phaseT.x + phaseT.y));
+				const float4 lampColour = tex2Dlod(NVR_FogLamps, float4(u, 0.75, 0.0, 0.0));
+				float3 lampLight = lampColour.rgb * (along * 0.5 * (phaseT.x + phaseT.y));
+				// UNOFFICIAL 2026-11-12 LampHazeShadows: the lamp's traced visibility along this view (alpha 0, the key off or nothing traced: as before)
+				[branch] if (lampColour.a != 0.0) lampLight *= LampHazeVisibility(lampColour.a, s01);
+				sum += lampLight;
 			}
 		}
 	}
@@ -1061,7 +1083,7 @@ void ModernFogTerms(float2 uvV, out float3 fogMul, out float3 fogAdd, out float 
 	// the rest. (ClassicLook: never, the original fog had no lamp light.)
 	if (lamps && !classic) {
 		[branch] if (TESR_VolumetricFogLamps.x > 0.0) {
-			fogAdd += LampHazeLight(eyeDirV, length(eyeVec), strV * nExt * 0.0001) * (TESR_VolumetricFogLamps.x * strV * nIns * 10.0 * skyMaskF);
+			fogAdd += LampHazeLight(eyeDirV, length(eyeVec), strV * nExt * 0.0001, rectToScreen(uvV)) * (TESR_VolumetricFogLamps.x * strV * nIns * 10.0 * skyMaskF);
 		}
 	}
 

@@ -49,7 +49,7 @@ AmbientScale = 0.5                   # Ambient lighting scale.
 SkylightingScale = 0.5               # Sky-colour ambient boost. 0 disables it.
 SkylightingDirectionality = 0.6      # Mode 1 only: 0 samples straight up, 1 along the normal.
 SkylightingSaturation = 1.0           # UNOFFICIAL: colour strength of the sky light (0 = grey, 1 = as the sky, above 1 = more colourful). Default skylighting mode (0) only.
-LightingScale = 1.0                  # Directional and point light scale.
+LightingScale = 0.725                # Directional and point light scale. UNOFFICIAL (2026-11-12), was 1.0: the dry value ([Shaders.PBR.Main]) had gone to 0.725 and this one had not, so rain lit objects brighter than dry weather. Now the same as dry.
 Saturation = 1.0                     # Color saturation.
 MetalnessScale = 1.0                 # UNOFFICIAL (2026-10-18), materials with an _rmaos map only: [0.0-1.0] their metal (green channel) times this, in this weather/time (idea from the Physically-Based-Reloaded fork). Metal is lit almost only by what it reflects, so with little around to reflect (night) it goes dark: lower keeps some of its colour. 1.0 = the map as it is. Applies immediately.
 AOScale = 1.0                        # UNOFFICIAL (2026-10-18), _rmaos maps only: [0.0-1.0] how much of their ambient occlusion applies in this weather/time (times [Shaders.PBR.Rmaos] Occlusion). 1.0 = as authored.

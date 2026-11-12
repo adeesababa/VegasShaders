@@ -64,6 +64,38 @@
         #define CapturedAlbedoOut(rgb) 0.0f
         #define CAPTURED_ALBEDO_NONE 0.0f
     #endif
+
+    // UNOFFICIAL 2026-11-12 CapturedCoverage (core/CapturedNormals.h CoverageBegin; [Main.Main.Quality] CapturedCoverage, live;
+    // docs/next/PT-COMPAT-AUDIT-2026-11-12.md item 7). The templates wrote their records with alpha 1 whatever the draw's own alpha: an
+    // object fading in, a Fallout 3 rubble skirt or road edge fading out by vertex alpha, terrain blending's Smooth seam were recorded as
+    // solid up to the polygon's edge, and the path tracer drew a hard-edged solid shape where the game shows a soft fade. For a draw the
+    // game BLENDS (SRCALPHA / INVSRCALPHA; the draw hook marks it in NVR_SpecFade.z for that one draw: 3 or -1 in place of 1 or 0, so every
+    // z > 0.5 test reads as before) the three records' alpha is 0 where the draw's own alpha is below 0.5: under that blend a record with
+    // alpha 0 changes nothing, the texel keeps what was drawn there before (the ground under the skirt), colour, material, normal and
+    // distance alike. At 0.5 and above: as before. An opaque draw (z 0 or 1): x 1, bit for bit what it wrote before, whatever its alpha.
+    // Needs the AlbedoBuffer level (3: the level the path tracer reads); a macro, so NVR_SpecFade (Includes/PBR.hlsl) is met at the use.
+    #if CAPTURED_NORMALS_ON >= 3
+        #define CapturedCoverage(alpha) (((NVR_SpecFade.z > 1.5f || NVR_SpecFade.z < -0.5f) && (alpha) < 0.5f) ? 0.0f : 1.0f)
+    #endif
+
+    // UNOFFICIAL 2026-11-12 foliage records (docs/next/PT-COMPAT-AUDIT-2026-11-12.md items 1 and 9; core/CapturedNormals.h GrassWriters /
+    // LeafWriters): the grass (GRASS23x000 / 000TMS.pso) and SpeedTree leaf (STLEAF2000 / 2001 (TMS).pso) pixel shaders are no templates and
+    // wrote no record: their pixels kept the record of whatever was drawn behind them (or none), with their own depth. With the AlbedoBuffer
+    // level they write all three: the linear texture colour, class 5 (plants; no metal) with a matte roughness and a small thickness (they
+    // have no NVR_SpecFade: no per-draw radius), and a normal with the camera distance. `written` 0 (the game's vertex shader: no position; a
+    // texel below half coverage) gives alpha 0 on all three: unwritten on an opaque draw, and under the grass's SRCALPHA / INVSRCALPHA blend
+    // the texel is left as it was. The targets are bound for them only while the path tracer replaces the picture.
+    #if CAPTURED_NORMALS_ON >= 3
+        #define CAPTURED_FOLIAGE 1
+        #define CAPTURED_FOLIAGE_OUTPUTS float4 capturedPad1 : COLOR1; float4 capturedPad2 : COLOR2; float4 capturedNormal : COLOR3;
+        #define CapturedFoliageAlbedo(rgb, written) float4((rgb), (written))
+        #define CapturedFoliageMaterial(roughness, written) float4(5.0f * (written), 8.0f, (roughness), (written))
+        float4 CapturedFoliageNormal(float3 n, float3 worldPos, float written) {
+            float4 o = CapturedNormalOut(n, worldPos);
+            o.a = min(o.a, 1.0f) * written;	// (never the actors' 2)
+            return o;
+        }
+    #endif
 #endif
 
 #endif

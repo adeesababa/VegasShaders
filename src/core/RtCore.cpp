@@ -499,6 +499,34 @@ namespace {
 		std::unordered_map<IDirect3DBaseTexture9*, TexEntry> texIds;	// 0 = not sendable (format, pool, budget): the slot keeps the atlas
 		struct SlotWant { int slot; IDirect3DBaseTexture9* tex[3]; };	// diffuse, normal, glow
 		std::vector<SlotWant> slotQueue;
+		// UNOFFICIAL 2026-11-11 (sungi, RT use-after-free): a queued want may wait several exchanges (op list or budget full), and the
+		// game can free its textures meanwhile (cell unload, LOD swap): SendTexture then called a freed texture's GetType (EIP 0, slot C
+		// 2026-11-09). Each texture in slotQueue / looseTextures holds one reference from the push to the erase / clear.
+		void QueueSlot(int slot, IDirect3DBaseTexture9* t, IDirect3DBaseTexture9* nm, IDirect3DBaseTexture9* g) {
+			SlotWant w = { slot, { t, nm, g } };
+			for (IDirect3DBaseTexture9* x : w.tex) if (x) x->AddRef();
+			slotQueue.push_back(w);
+		}
+		void DropSlots(size_t count) {
+			for (size_t i = 0; i < count && i < slotQueue.size(); i++) for (IDirect3DBaseTexture9* x : slotQueue[i].tex) if (x) x->Release();
+			slotQueue.erase(slotQueue.begin(), slotQueue.begin() + (std::min)(count, slotQueue.size()));
+		}
+		void DropLoose(size_t count) {
+			for (size_t i = 0; i < count && i < looseTextures.size(); i++) if (looseTextures[i]) looseTextures[i]->Release();
+			looseTextures.erase(looseTextures.begin(), looseTextures.begin() + (std::min)(count, looseTextures.size()));
+		}
+		void ClearTextureQueues() { DropSlots(slotQueue.size()); DropLoose(looseTextures.size()); }
+		// UNOFFICIAL 2026-11-11 (sungi, ABA guard F2): texIds / texKeyOf / alphaSlots are keyed by the texture's address and outlive the
+		// game's texture: a new texture allocated at a freed one's address inherited its RT id / atlas slot (wrong colour, wrong alpha at
+		// hits). Now one COM reference is held per texture with a live texKeyOf id (taken when the id is assigned, given back when the id is
+		// released or at the full clears); alphaSlots keys are not pinned (see AlphaSlotOf; alphaHeld stays empty). The VRAM tradeoff: a texture the
+		// game dropped stays alive until its id is released (RealTextureBudgetMB LRU, kTexIdle exchanges unused).
+		std::vector<IDirect3DBaseTexture9*> alphaHeld;
+		void ReleaseTexRefs() {
+			for (IDirect3DBaseTexture9*& x : texKeyOf) if (x) { x->Release(); x = nullptr; }
+			for (IDirect3DBaseTexture9* x : alphaHeld) if (x) x->Release();
+			alphaHeld.clear();
+		}
 		// per atlas slot: the ids its SLOT_TEXTURES op named; state 0 none, 1 queued, 2 sent, 3 short (a texture refused by the budget or
 		// released): queued again when the slot is next used from retryAt on
 		struct SlotReal { UInt32 ids[3] = {}; UInt8 state = 0; UInt64 retryAt = 0; };
@@ -654,7 +682,7 @@ namespace {
 			// (2026-11-07) RealNormalMaps: a slot first made without its normal map (an actor's or a leaf card's ask) is pointed at it now
 			if (s >= 0 && normal && realNormals && (size_t)s < slotNormals.size() && !slotNormals[s]) {
 				slotNormals[s] = normal;
-				if ((size_t)s < slotReal.size() && slotReal[s].state != 1) { slotReal[s].state = 1; slotQueue.push_back({ s, { texture, normal, glow } }); }
+				if ((size_t)s < slotReal.size() && slotReal[s].state != 1) { slotReal[s].state = 1; QueueSlot(s, texture, normal, glow); }
 			}
 			if (s >= 0 && realTextures) NoteSlotUse(s, texture, normal, glow);	// (2026-11-07, protocol 8) last use / resend
 			return s;
@@ -783,7 +811,7 @@ namespace {
 				}
 				if (slot >= 0) { atlasUsed++; if (glow) glowSlots++; }
 				if (slot >= 0 && realTextures && (UInt32)slot < slotReal.size()) {	// (2026-11-07, protocol 7)
-					slotQueue.push_back({ slot, { texture, normal, glow } });
+					QueueSlot(slot, texture, normal, glow);
 					slotReal[slot] = SlotReal();
 					slotReal[slot].state = 1;
 				}
@@ -792,6 +820,9 @@ namespace {
 			target->Release();
 		}
 		if (target2) target2->Release();
+		// UNOFFICIAL 2026-11-11 (sungi): alphaSlots keys are NOT pinned (an atlas slot is never freed: pinning would keep up to 1024
+		// diffuse + 1024 glow textures alive for the session, GBs of VRAM after a long walk). The remaining ABA risk there is a wrong
+		// alpha / albedo atlas slot for a texture reallocated at a freed one's address (no crash); see SunGI-study F2.
 		alphaSlots.emplace(key, slot);
 		return slot;
 	}
@@ -851,7 +882,12 @@ namespace {
 			p.levels | (p.swapRG ? NVR_RT_TEX_SWIZZLE_GR : 0u) };
 		memcpy(&f.ops[f.opCount++], &op, sizeof(op));
 		texRes.Add(id, p.bytes, n);
-		if (id < texKeyOf.size()) texKeyOf[id] = base;
+		// UNOFFICIAL 2026-11-11 (sungi, ABA guard F2): one reference while the id lives (given back in ReleaseTexture / ReleaseTexRefs)
+		if (id < texKeyOf.size()) {
+			base->AddRef();
+			if (texKeyOf[id]) texKeyOf[id]->Release();	// (not expected: the id was freed before; keeps the count balanced)
+			texKeyOf[id] = base;
+		}
 		texSent++;
 		texRouteSent[p.route]++;
 		return (int)id;
@@ -867,6 +903,8 @@ namespace {
 		if (id < texKeyOf.size()) {
 			auto it = texIds.find(texKeyOf[id]);
 			if (it != texIds.end() && it->second.id == id) texIds.erase(it);
+			// UNOFFICIAL 2026-11-11 (sungi, ABA guard F2): the key is erased first (the Release may free the texture and its address)
+			if (texKeyOf[id]) texKeyOf[id]->Release();
 			texKeyOf[id] = nullptr;
 		}
 		for (SlotReal& s : slotReal)
@@ -882,7 +920,7 @@ namespace {
 		for (UInt32 k = 0; k < 3; k++) if (s.ids[k]) texRes.Use(s.ids[k], frame);
 		if (s.state == 3 && frame >= s.retryAt) {
 			s.state = 1;
-			slotQueue.push_back({ slot, { texture, normal, glow } });
+			QueueSlot(slot, texture, normal, glow);
 		}
 	}
 
@@ -935,7 +973,7 @@ namespace {
 				s->retryAt = shortOf ? n + kTexRetry : 0;
 			}
 		}
-		slotQueue.erase(slotQueue.begin(), slotQueue.begin() + done);
+		DropSlots(done);
 		// (2026-11-07 rtgap-tessblas) the textures the displacement asked for (land layers 1-6, parallax height maps): ids only, no slot
 		// (merged with rtgap-textures) a loose texture's id is pinned (RtTexturePack::Residency::Pin): never released while the session's
 		// displaced copies may read it (the helper keeps a DISPLACE_SOURCE's ids); a budget refusal is asked again by TextureIdFor later
@@ -953,7 +991,7 @@ namespace {
 				if (r > 0) texRes.Pin((uint32_t)r);
 				if (!r) texFailed++;
 			}
-			looseTextures.erase(looseTextures.begin(), looseTextures.begin() + loose);
+			DropLoose(loose);
 		}
 		QueryPerformanceCounter(&t1);
 		QueryPerformanceFrequency(&fq);
@@ -1086,10 +1124,11 @@ namespace {
 		normalSlots = 0;
 		atlasUsed = 0;
 		glowSlots = 0;
+		ReleaseTexRefs();	// UNOFFICIAL 2026-11-11 (sungi, ABA guard F2): the references of the keys cleared here and below
 		alphaSlots.clear();
 		// (2026-11-07, protocol 7) real textures: read at each helper start (restart), with the atlases they follow
 		realTextures = (alphaOn || hitTextures) && TheSettingManager->GetSettingI("Main.Main.RayTracing", "RealTextures") != 0;
-		texIds.clear(); slotQueue.clear(); looseTextures.clear(); dispSentOn = false; texSent = texFailed = texSlotsSent = texReleased = 0; texCpuMs = 0.0;
+		texIds.clear(); ClearTextureQueues(); dispSentOn = false; texSent = texFailed = texSlotsSent = texReleased = 0; texCpuMs = 0.0;
 		// (2026-11-07, RT-DETAIL-GAPS.md section 2) the real normal maps, on by default with RealTextures (restart)
 		realNormals = realTextures && TheSettingManager->GetSettingI("Main.Main.RayTracing", "RealNormalMaps") != 0;
 		slotNormals.assign(realNormals ? NVR_RT_ALPHA_ATLAS_SLOTS * NVR_RT_ALPHA_ATLAS_SLOTS : 0, nullptr);
@@ -1452,13 +1491,14 @@ namespace {
 		if (shared) { UnmapViewOfFile(shared); shared = nullptr; }
 		if (texStaging) { UnmapViewOfFile(texStaging); texStaging = nullptr; }	// (2026-11-07, protocol 7)
 		if (texMapping) { CloseHandle(texMapping); texMapping = nullptr; }
-		texIds.clear(); slotQueue.clear(); looseTextures.clear(); dispSentOn = false;
+		texIds.clear(); ClearTextureQueues(); dispSentOn = false;
 		HANDLE* handles[] = { &mapping, &frameEvent, &statusEvent };
 		for (HANDLE* h : handles) if (*h) { CloseHandle(*h); *h = nullptr; }
 		geometries.clear();
 		FreeLeafCards(true);
 		FreeFaces(true);
 		pendingReleases.clear();
+		ReleaseTexRefs();	// UNOFFICIAL 2026-11-11 (sungi, ABA guard F2): Stop may run at shutdown; releasing a held reference is valid there
 		alphaSlots.clear();
 		if (alphaUpload) { alphaUpload->Release(); alphaUpload = nullptr; }
 		if (alphaDetailUpload) { alphaDetailUpload->Release(); alphaDetailUpload = nullptr; }
@@ -2370,7 +2410,7 @@ namespace {
 			if (!e.retryAt) return 0;
 			if (frame < e.retryAt) return -1;
 		}
-		if (std::find(looseTextures.begin(), looseTextures.end(), texture) == looseTextures.end()) looseTextures.push_back(texture);
+		if (std::find(looseTextures.begin(), looseTextures.end(), texture) == looseTextures.end()) { texture->AddRef(); looseTextures.push_back(texture); }
 		return -1;
 	}
 
@@ -2988,7 +3028,9 @@ namespace {
 			// grid: 5 x 5 cells of 4096 round the camera's cell (uGridsToLoad 5), taken as a square of half-side 2.5 cells round the camera.
 			if (walkingFar && land && object->IsGeometry()) {
 				const NiBound* b = object->m_kWorldBound;
-				const float half = 2.5f * 4096.0f;
+				// UNOFFICIAL 2026-11-12 (audit item 12): the real grid (uGridsToLoad 7 and up: the outer loaded land lay under LOD slabs that
+				// passed this test, black slab shadows on it under path tracing); 5 = 2.5 cells, as before
+				static const float half = 0.5f * (float)SessionLog::GridsToLoad() * 4096.0f;
 				if (b && fabsf(b->Center.x - camera.x) < half + b->Radius && fabsf(b->Center.y - camera.y) < half + b->Radius) { farLandOverGrid++; continue; }
 			}
 			if (object->IsGeometry()) {

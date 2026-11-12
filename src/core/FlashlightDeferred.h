@@ -73,7 +73,28 @@ namespace FlashlightDeferred {
 		const FlashlightEffect* f = TheShaderManager->Effects.Flashlight;
 		ShadowsExteriorEffect* shadows = TheShaderManager->Effects.ShadowsExteriors;
 		IDirect3DTexture9* map = shadows ? shadows->Textures.ShadowSpotlightTexture[0] : nullptr;
-		return f && f->SpotLight && f->Deferred.Shadows && f->SpotLight->CastShadows && map ? map : nullptr;
+		// (UNOFFICIAL 2026-11-11 BUG FIX: + drawn THIS frame, as the comment above always said. The map stayed "there" in frames
+		// ShadowManager did not draw it, and the pass and the grass read the last drawn one through the last matrix.)
+		return f && f->SpotLight && f->Deferred.Shadows && f->SpotLight->CastShadows && map && f->ShadowMapFrame == (unsigned)TheFrameRateManager->FrameNumber ? map : nullptr;
+	}
+
+	// UNOFFICIAL 2026-11-11 (BUG FIX; a tester on the DXVK build: "flashlight does not appear to load flashlight.png ... Cookie just brightens
+	// and darkens the light as its value goes from 0 to 1; at 1 it is invisible"). The cookie was read from the Flashlight EFFECT's sampler list
+	// (ExtFileTexture("TESR_SpotLightTexture")), but the 2026-11-04 restructure left that effect a stub with no samplers: the file was never
+	// loaded, stage 7 was empty (an empty stage reads black) and lerp(1, black, Cookie) faded the whole beam out. The pass loads its own file
+	// now, the first time Cookie is above 0 (TextureManager::GetFileTexture: "Loaded texture file Data\Textures\Effects\Flashlight.png" in
+	// the log, or its "[ERROR] : Couldn't load texture file" line and the one below). No file = no cookie (strength 0 to the shader: the
+	// clean beam), never a darker one.
+	inline IDirect3DBaseTexture9* CookieTexture() {
+		static bool tried = false;
+		static IDirect3DBaseTexture9* texture = nullptr;	// (TextureManager's cache owns it; never freed while the game runs)
+		if (!tried) {
+			tried = true;
+			texture = TheTextureManager->GetFileTexture("Data\\Textures\\Effects\\Flashlight.png",TextureRecord::TextureRecordType::PlanarBuffer);
+			if (texture) Logger::Log("UNOFFICIAL FlashlightDeferred: the lens pattern (Data\\Textures\\Effects\\Flashlight.png) loaded for [Shaders.Flashlight.Deferred] Cookie");
+			else Logger::Log("[WARNING] UNOFFICIAL FlashlightDeferred: the lens pattern Data\\Textures\\Effects\\Flashlight.png was not found: [Shaders.Flashlight.Deferred] Cookie does nothing (the beam stays clean) until the file is there and the game is restarted");
+		}
+		return texture;
 	}
 
 	// The PCF disc's radius in texels of a map Width wide: ShadowSoftness is in texels of a 512 map (2026-11-04), so the blur is as wide on
@@ -168,8 +189,21 @@ namespace FlashlightDeferred {
 		// the shadow map: drawn this frame by ShadowManager (FlashlightEffect::WantsShadowMap)
 		IDirect3DTexture9* map = ShadowMap();
 		const bool shadowed = map != nullptr;
+		{	// UNOFFICIAL 2026-11-11 (a tester: "flashlight not casting shadows", no log line said which case): each change, a few times a session
+			static int told = 0, last = -1;
+			const int state = shadowed ? 1 : 0;
+			if (told < 8 && state != last) {
+				told++; last = state;
+				Logger::Log("UNOFFICIAL FlashlightDeferred: the light pass draws %s its shadow map ([Shaders.Flashlight.Deferred] Shadows %s; the map %s drawn this frame; %s). The player's own body and weapon never cast in it; under path tracing (PTRealtime) the beam on screen is the path tracer's lamp 0 with traced shadows, not this pass",
+					shadowed ? "WITH" : "WITHOUT", f->Deferred.Shadows ? "on" : "OFF", f->ShadowMapFrame == (unsigned)TheFrameRateManager->FrameNumber ? "was" : "was NOT",
+					TheShaderManager->GameState.isExterior ? "outdoors: casters are the player's own cell's objects, not the land" : "indoors: casters are the cell's objects by [Shaders.ShadowsInteriors.Forms]");
+			}
+		}
 		D3DSURFACE_DESC mapDesc = {};
 		if (shadowed) map->GetLevelDesc(0, &mapDesc);
+		// (2026-11-11) the cookie: loaded on first use; without the file its strength is 0 (CookieTexture)
+		IDirect3DBaseTexture9* cookieTexture = f->Deferred.Cookie > 0.0f ? CookieTexture() : nullptr;
+		const float cookieStrength = cookieTexture ? f->Deferred.Cookie : 0.0f;
 		const D3DXMATRIX& iv = TheRenderManager->InvViewMatrix;
 		const float tanX = fabsf(TheRenderManager->InvProjMatrix._11), tanY = fabsf(TheRenderManager->InvProjMatrix._22);
 		const D3DXMATRIX& proj = NiDX9Renderer::GetSingleton()->projMatrix;
@@ -185,7 +219,7 @@ namespace FlashlightDeferred {
 			// (UNOFFICIAL 2026-11-11 xy, were 0: HotspotLimit and SoftEdges, the old flashlight's keys; 0 = today's light)
 			{ f->Settings.HotspotLimit, f->Settings.softEdges ? 1.0f : 0.0f, gamma, 1.0f / gamma },
 			{ shadowed ? 1.0f : 0.0f, mapDesc.Width ? 1.0f / (float)mapDesc.Width : 0.0f, f->Deferred.ShadowBias, SoftnessTexels(mapDesc.Width) },
-			{ f->Deferred.Cookie, (float)debugView, f->Deferred.Falloff, f->Settings.NearFade } };	// (w: UNOFFICIAL 2026-11-11 NearFade, was 0)
+			{ cookieStrength, (float)debugView, f->Deferred.Falloff, f->Settings.NearFade } };	// (w: UNOFFICIAL 2026-11-11 NearFade, was 0)
 		d->SetPixelShaderConstantF(0, own[0], 11);
 		d->SetPixelShaderConstantF(11, (const float*)&TheShaderManager->SpotLightWorldToLightMatrix[0], 4);	// row_major in the pass
 
@@ -196,7 +230,7 @@ namespace FlashlightDeferred {
 		d->SetTexture(4, CapturedNormals::MaterialTexture);
 		d->SetTexture(5, CapturedNormals::Texture);
 		d->SetTexture(6, shadowed ? map : nullptr);
-		d->SetTexture(7, f->ExtFileTexture("TESR_SpotLightTexture"));
+		d->SetTexture(7, cookieTexture);	// (2026-11-11: was the stub effect's sampler, always null)
 		d->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
 		const float x0 = (float)vp.X - 0.5f, y0 = (float)vp.Y - 0.5f, x1 = (float)(vp.X + vp.Width) - 0.5f, y1 = (float)(vp.Y + vp.Height) - 0.5f;
 		const float u0 = (float)vp.X / t.Width, v0 = (float)vp.Y / t.Height, u1 = (float)(vp.X + vp.Width) / t.Width, v1 = (float)(vp.Y + vp.Height) / t.Height;

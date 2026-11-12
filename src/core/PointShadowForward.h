@@ -6,6 +6,7 @@
 #include "FlashlightLamp.h"	// UNOFFICIAL 2026-11-07 (perf-flashlight) the flashlight's game lamp stays out of ManyLights' table (NoteManyLamp)
 #include "ShadowPool.h"	// UNOFFICIAL 2026-10-29 ShadowPool (ShadowPoolMax)
 #include "ShadowHold.h"	// UNOFFICIAL 2026-10-30 ShadowHold (FadeIn across live / pool)
+#include "ScopeCamera.h"	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Detect / OwnCamera: the picture-in-picture scope's scene (OtherCamera)
 #include <unordered_set>	// UNOFFICIAL 2026-10-30 TerrainRecords
 
 // UNOFFICIAL interior forward point-light shadows (NVR-Lunacy\docs\interior-forward-shadows.md).
@@ -199,9 +200,14 @@ namespace PointShadowForward {
 	}
 
 	inline bool OtherCamera(const RenderPassView* pass, bool firstPerson) {
+		// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Detect (core/ScopeCamera.h): an extra camera's scene is known exactly (Render.cpp
+		// ScopeScene). Its draws get lamp shadows only while the constants are that camera's (OwnCamera: ScopeCamera::Shadows).
+		if (ScopeCamera::InScene) return !ScopeCamera::Shadows;
 		if (!ScopeFix) return false;
 		const D3DVIEWPORT9& port = TheRenderManager->m_kD3DPort;
-		if (!TAAEffect::IsWorldViewport(port)) {	// UNOFFICIAL 2026-10-27: RenderScale's world viewport (the render size) is the world's too
+		// (while the hooks see the scope's scene, the viewport guess below is not used: the scene's context answers above. Detect off, or no
+		// such scene seen lately: the guess, as before.)
+		if (!ScopeCamera::Exact() && !TAAEffect::IsWorldViewport(port)) {	// UNOFFICIAL 2026-10-27: RenderScale's world viewport (the render size) is the world's too
 			if (OtherCameraLogs < 3) {
 				OtherCameraLogs++;
 				Logger::Log("UNOFFICIAL forward shadows: a %ux%u render from another camera (a B42 Optics scope picture?) gets no lamp shadows.",
@@ -873,6 +879,10 @@ namespace PointShadowForward {
 				if (RtLampShadows::EyeVisibility(pass->lights[firstLight + k], v)) tracedSlots[k] = -2.0f - (std::min)((std::max)(v, 0.0f), 1.0f);
 			}
 		}
+		// UNOFFICIAL 2026-11-12 [Main.Main.Scope] OwnCamera: the traced result is the MAIN view's screen (looked up by reprojecting the
+		// point into that frame). In an extra camera's picture no lamp takes it: the cube maps / atlas tiles alone shade there (a lamp
+		// that has only the trace is lit, as the whole picture was before).
+		if (ScopeCamera::InScene) for (int k = 0; k < 6; k++) tracedSlots[k] = -1.0f;
 		RtLampShadows::SetForPass(tracedSlots, force);	// c206-c209, c215-c217 (nothing without POINT_SHADOW_RT)
 		if (GpuTimer::Enabled && !force) { StatDraws++; if (matched) { StatMatchedDraws++; StatMatchedLights += matched; } }
 	}
@@ -890,7 +900,8 @@ namespace PointShadowForward {
 		TheRenderManager->device->SetPixelShaderConstantF(146, &c[0][0], 20);
 		float r[5][4] = {};
 		memcpy(r, RtLampShadows::Reproject, sizeof(RtLampShadows::Reproject));
-		const bool on = RtLampShadows::Mode > 0.5f && RtLampShadows::Mode < 1.5f;	// traced (not the debug views)
+		// (UNOFFICIAL 2026-11-12 [Main.Main.Scope]: not in an extra camera's picture: the traced result is the main view's screen)
+		const bool on = RtLampShadows::Mode > 0.5f && RtLampShadows::Mode < 1.5f && !ScopeCamera::InScene;	// traced (not the debug views)
 		r[4][0] = on ? 1.0f : 0.0f; r[4][1] = RtLampShadows::RtConstant[1]; r[4][2] = RtLampShadows::RtConstant[2]; r[4][3] = Params[0];
 		TheRenderManager->device->SetPixelShaderConstantF(168, &r[0][0], 5);
 		// c173 (2026-11-03 rtext): x the result's packing unit (1024, or 4096 in the ManyLights packing), y 1 = ManyLights (entry 2 = R)

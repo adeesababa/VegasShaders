@@ -2,6 +2,7 @@
 #include "../../core/PassSums.h"
 #include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-10-29 ShadowContrast (the game's lamp passes)
 #include "../../core/LinearPreDecode.h"
+#include "../../core/RainState.h"	// UNOFFICIAL 2026-11-12 RainStateGuard
 
 void PBRShaders::RegisterConstants() {
 	ShaderManager* sm = TheShaderManager;
@@ -290,8 +291,11 @@ void PBRShaders::UpdateConstants() {
 	Constants.Translucency.w = TheShaderManager->Shaders.Grass ? TheShaderManager->Shaders.Grass->BendPush : 0.0f;	// UNOFFICIAL 2026-11-04 the grass bend's push per unit of blade height (Grass.cpp; was Grass Collision's scale)
 
 	// the stronger of the rain animator and the puddle animator drives the dry-to-wet blend
-	const auto& wet = TheShaderManager->Effects.WetWorld->Constants;
-	const float rainFactor = max(wet.Data.x, wet.Data.z);
+	// UNOFFICIAL 2026-11-12 RainStateGuard ([Shaders.WetWorld.Main] RainStateGuard, core/RainState.h): from the one rain state (0-1, this
+	// frame's, the weather's whether WetWorld and Precipitations are on or off). This function runs every frame, the object shaders on
+	// or off (ShaderManager::UpdateConstants), so this call is also what keeps the rain state running when everything else is off.
+	// With the guard off this is the old expression, max of WetWorld's Data.x and Data.z as that effect last left them.
+	const float rainFactor = RainState::Factor();
 
 	// One value blended over day / night / interiors, and then dry to wet by rainFactor.
 	auto weather = [&](float PBRSettings::* member) {

@@ -56,7 +56,7 @@ template <> std::string SettingManager::ToString<int>(const int number) {
 }
 
 // The user config's [_Unofficial] SettingsVersion this build brings it up to (UpdateOldDefaults, below).
-static const int UnofficialSettingsVersion = 78;  // (78: RT defaults replaced since 1.0.5 now reach saved configs; 77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
+static const int UnofficialSettingsVersion = 79;  // (78: RT defaults replaced since 1.0.5 now reach saved configs; 77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
 
 // UNOFFICIAL 2026-10-30: a setting is read only when the defaults file lists it (FillNode), so a line in the user's toml that
 // this build does not know (a key from a newer or an older build, a typo) silently did nothing. Each one is logged once per
@@ -640,6 +640,23 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 		replace("Main.Main.RayTracing", "ActorRebuildInterval", 0, 8, true);
 		replace("Shaders.AmbientOcclusion.RT", "GIOffscreen", 0.1, 1.0, false);
 		toTrue("Shaders.AmbientLight.Main", "AlbedoBuffer");
+	}
+	// 79 (2026-11-12, a rain run on an RTX card: the land's mean brightness 94.5 dry, 121.7 in rain): rain lit the land and the objects BRIGHTER than
+	// dry weather. On 2026-09-19 the dry groups' LightingScale went from 1.0 to 0.725 ([Shaders.Terrain.Main], [Shaders.PBR.Main]) and their Rain
+	// siblings stayed at 1.0. The Rain groups' default is 0.725 now, the same as dry. A saved 1.0 (the old default) moves once; it stays where the
+	// player's own dry value is 1.0 or more (rain is then not brighter than dry, and 1.0 may be their choice).
+	if (version < 79) {
+		for (const char* family : { "Shaders.Terrain", "Shaders.PBR" }) {
+			const std::string dry = std::string(family) + ".Main", rain = std::string(family) + ".Rain";
+			const tomlValue* saved = UserSection(dry.c_str());
+			double dryScale = 0.725;	// (no saved value: the default)
+			if (saved && saved->contains("LightingScale")) {
+				const tomlValue& value = saved->at("LightingScale");
+				if (value.is_floating()) dryScale = value.as_floating();
+				else if (value.is_integer()) dryScale = (double)value.as_integer();
+			}
+			if (dryScale < 1.0) replace(rain.c_str(), "LightingScale", 1.0, 0.725, false);
+		}
 	}
 	if (!changed.empty())
 		Logger::Log("UNOFFICIAL settings: old defaults saved by an earlier build moved to the new defaults: %s. "
@@ -1806,6 +1823,14 @@ SettingManager::MenuSwitch SettingManager::GetMenuShaderSwitch(const char* Name)
 bool SettingManager::GetMenuShaderEnabled(const char* name) {
 	// UNOFFICIAL 2026-11-04 HudRaindrops has no section of its own: it is switched under Wetness Effects (HudRaindropsEffect::UpdateSettings).
 	if (!strcmp(name, "HudRaindrops")) return GetSettingI("Shaders.WetnessEffects.HudRaindrops", "Enabled") != 0;
+	// UNOFFICIAL 2026-11-12 (sungi p4) SunGI ([Shaders.AmbientLight.Main] SunGI, the one switch for the exterior sun bounce) implies AmbientLight's
+	// Status Enabled: it is on at load and after a revert (the runtime flag; AmbientLight::UpdateSettings follows a live change). The toml is not written;
+	// AmbientLight::ShouldRender keeps it off indoors while only SunGI has it on, so interiors stay as the user set them.
+	if (!strcmp(name, "AmbientLight")) {
+		Configuration::ConfigNode sunGi;
+		if (Config.FillNode(&sunGi, "Shaders.AmbientLight.Main", "SunGI") && sunGi.BoolValue) return true;
+		if (Config.FillNode(&sunGi, "Shaders.AmbientLight.Main", "RoomGI") && sunGi.BoolValue) return true;
+	}
 
 	char section[256];
 

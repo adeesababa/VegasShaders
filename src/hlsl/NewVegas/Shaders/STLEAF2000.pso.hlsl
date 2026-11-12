@@ -15,5 +15,7 @@ PS_OUTPUT main(PS_INPUT IN) {
     OUT.color.rgb = lit;
     OUT.color.a = albedo.a;
 
+    LeafRecords(OUT, IN, albedo)	// UNOFFICIAL 2026-11-12 leaf records (Includes/Leaf.hlsl; nothing without the AlbedoBuffer)
+
     return OUT;
 };

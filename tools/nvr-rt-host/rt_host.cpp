@@ -1337,6 +1337,7 @@ static bool sceneCameraMove(Ctx& c) {
 #include "rt_host_pt.inl"	// (2026-11-07) the path tracer's quality scenes: ReSTIR DI (PTRestirDI)
 #include "rt_host_emissive.inl"	// (2026-11-07 ptaaa-emissive) PTEmissive: glowing triangles as lights vs the exact glow
 #include "rt_host_ptcost.inl"	// (2026-11-07 perf-ptcost) the path tracer's ray budget: rays a pixel, picture vs the old budget
+#include "rt_host_ptemcost.inl"	// (2026-11-11 pt-emissive-cost) PTEmissive's cost keys: rays a pixel, picture vs PTEmissive as it was
 #include "rt_host_pthidden.inl"	// (2026-11-07) the path tracer's camera rays pass over the hidden first-person body
 #include "rt_host_denoisepeople.inl"	// (2026-11-07) RtDenoise RGB: PeopleHistory (the path tracer's dialogue ghosting)
 #include "rt_host_aniso.inl"	// (2026-11-07) anisotropic filtering at ray-traced hits (ray cones)
@@ -1361,6 +1362,7 @@ static bool sceneCameraMove(Ctx& c) {
 #include "rt_host_reflfix4.inl"	// (2026-11-08 perf-reflfix4) the gold smooth in a mirror / chrome (5 x 5 tent), the mirror's silver F0, the hair's tint from its property
 #include "rt_host_mirroraa.inl"	// (2026-11-08 perf-reflfix4) blocky mirrors: MirrorJitter vs 4x rays vs the old centred ray
 #include "rt_host_rrrect.inl"	// (2026-11-07 perf-rr) DLSS RR at RenderScale < 1: the guide pass at the render size, the composite's rect mapping
+#include "rt_host_screenown.inl"	// (2026-11-11 PTScreenOwn) hair and skin in front of a wall: the first surface's colour / material are their own, not the wall's
 #include "rt_host_flashhead.inl"	// (2026-11-07 perf-flashlight) a lamp in the hidden first-person head under SameFrame lamp shadows (RtLampPrimary + RtLampTrace / Sigma + RtLampEye)
 
 // ------------------------------------------------------------------------------------------------------------------------------
@@ -1479,6 +1481,7 @@ int main(int argc, char** argv) {
 		{ "cache", "path tracer radiance cache (PTRadianceCache): 2 bounces + the cache vs 32 bounces, the light halved", [&] { return sceneRadianceCache(c); } },
 		{ "emissive", "path tracer PTEmissive: glowing triangles as lights (MIS, ReSTIR DI with lamps) vs the exact glow, bounce-only brute force, noise + cost", [&] { return sceneEmissive(c); } },
 		{ "ptcost", "path tracer ray budget (PTRestirDIRays, PTBounceLights, one camera query): rays a pixel and the picture vs the old budget, PTRealtime-like", [&] { return scenePtCost(c); } },
+		{ "ptemcost", "PTEmissive's cost keys (PTEmissiveCut / Floor / Hits / Roulette): rays a pixel, mean and noise vs PTEmissive as it was: at noon, at night, in a lamp room", [&] { return scenePtEmCost(c); } },
 		{ "restirgi", "ReSTIR GI on the path tracer (RtPathTraceGI + RtRestirGI)", [&] { return sceneRestirGI(c); } },
 		{ "denoise", "the game's RtDenoise passes (fork, D3D9 side)", [&] { return sceneDenoise(c); } },
 		{ "sigmalamps", "RT shadow denoiser, lamps of physical size vs the exact soft shadow, still + moving (RtLampTraceSigma + RtShadowDenoise)", [&] { return sceneSigmaLamps(c); } },
@@ -1517,6 +1520,7 @@ int main(int argc, char** argv) {
 		{ "facemorph", "FaceMorphs: a skinned head whose vertices change with still bones is re-posed by its hash, an unchanged one is not; the CPU-vertex copy (RtFaceMorph.h + StageSkinnedGeometry + RtLampPrimary)", [&] { return sceneFaceMorph(c); } },
 		{ "fogvis", "RT fog visibility: the froxel grid's traced sun visibility (a window's shaft, an alpha-tested card) = the CPU's rays per cell; the history converges and follows a moving camera (RtFogVisibility + RtFogGrid.h)", [&] { return sceneFogVis(c); } },
 		{ "ptviewmodel", "the first-person view model lit by the path tracer (PTViewModel: its G-buffer, its own FOV, the hidden body round the eye passed over; not-captured pixels keep the game's) (RtPathTrace)", [&] { return scenePtViewModel(c); } },
+		{ "screenown", "hair and skin take on the wall's material (PTScreenOwn): a blended hair cap over a head, a face, a body before a wall and an armour plate, the G-buffer as the game leaves it; the prep pass's marks (RtViewModel.h, ps_3_0) vs the CPU, then the first surface's colour / roughness / metal / normal before and after (RtPathTrace)", [&] { return sceneScreenOwn(c); } },
 		{ "vmprep", "PTViewModel's prep pass (src/core/RtViewModel.h, ps_3_0 on the fork's D3D9 device): the view model's code (4 + s / -1), its captured view-space normal, people 2, the world 1, vs the CPU", [&] { return sceneVmPrep(c); } },
 		{ "hiddennear","rays that start or end within reach of the eye pass over the hidden first-person body (a lamp in the head, a counter under the third-person gun); beyond reach its shadow stays (RtSunShadow, RtLampTrace, RtAOTrace)", [&] { return sceneHiddenNear(c); } },
 		{ "flashhead", "a lamp inside the hidden first-person head (the Pip-Boy light as a game lamp) under SameFrame lamp shadows: camera rays, the lamp trace, the denoiser's signal and the eye pass match the absent body bit for bit; a visible head blocks it (RtLampPrimary + RtLampTrace + RtLampTraceSigma + RtLampEye)", [&] { return sceneFlashHead(c); } },

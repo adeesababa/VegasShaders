@@ -82,6 +82,13 @@ public:
 	IDirect3DTexture9* lampTexture = nullptr;
 	void	SetLampHaze(IDirect3DDevice9* Device);
 	bool	LampHazeOn() const { return Constants.Lamps.x > 0.0f && !IsLegacy() && !IsClassic(); }
+	// UNOFFICIAL 2026-11-12 LampHazeShadows ([Shaders.VolumetricFog.Interiors] LampHazeShadows, off by default; LampHazeShadowCell,
+	// LampHazeShadowSamples, LampHazeShadowTemporal; read by UpdateSettings, a missing key takes the default): the lamps' light in the air
+	// shadowed by the room, traced by the RT core's rider core\RtFogVisibility.h RtFogLamps (which reads these). SetLampHaze hands it the
+	// frame's lamps and writes each lamp's tile code into the lamp table's row 1 alpha (0 = unshadowed, as before); Render binds the
+	// tiles on stage 11 (NVR_FogGrid's sampler: the volumetric light's grid is never bound indoors).
+	bool	lampHazeShadows = false; int lampHazeShadowCell = 8, lampHazeShadowSamples = 4; float lampHazeShadowTemporal = 0.8f;
+	IDirect3DTexture9* lampShadowTexture = nullptr;	// this frame's tiles (SetLampHaze; null: no lamp carries a tile code)
 
 	// cached from UpdateSettings (Shaders.ShadowsExteriors.Main/NightMinDarkness), consumed by
 	// UpdateConstants to drive the moon-phase night-ambient ceiling

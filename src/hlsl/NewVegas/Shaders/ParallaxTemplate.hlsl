@@ -871,6 +871,7 @@ PS_OUTPUT main(PS_INPUT pin)
         po.color.a = albedoPx.a;
     #else
         po.color.a = ReflMaterialAlpha(texAlpha * AmbientColor.a);	// UNOFFICIAL MaterialAware reflections (Object.hlsl)
+        #define CAP_COVERAGE (texAlpha * AmbientColor.a)	// UNOFFICIAL 2026-11-12 CapturedCoverage: the draw's own alpha, before the material code (the one-pass records only)
     #endif
     po.color.rgb = LinearSceneOut(po.color.rgb);	// UNOFFICIAL 2026-10-28 LinearScene (includes/LinearLight.hlsl)
 #if CAPTURED_NORMALS_ON
@@ -892,6 +893,16 @@ PS_OUTPUT main(PS_INPUT pin)
         po.capturedNormal = CAPTURED_NORMAL_INVALID;
     #else
         po.capturedNormal = CapturedNormalOut(PAR_SMOOTH_NORMAL, pin.shadowWorldPos.xyz);
+    #endif
+    // UNOFFICIAL 2026-11-12 CapturedCoverage (Includes/CapturedNormals.hlsl): a blended draw records only where its own alpha is 0.5 or
+    // more; below, alpha 0 = the texels stay as they were. An opaque draw: x 1, as before.
+    #if CAPTURED_NORMALS_ON >= 3 && defined(CAP_COVERAGE)
+    {
+        const float capKeep = CapturedCoverage(CAP_COVERAGE);
+        po.capturedPad1.a *= capKeep;
+        po.capturedPad2.a *= capKeep;
+        po.capturedNormal.a *= capKeep;
+    }
     #endif
 #endif
 

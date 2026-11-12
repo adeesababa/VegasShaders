@@ -4,6 +4,8 @@
 #include "../../core/DisplaceShadows.h"	// UNOFFICIAL 2026-10-27 displacement shadows: the land's draws taken, the depth copy's camera
 #include "../../core/SkyCoverage.h"	// UNOFFICIAL 2026-11-04
 #include "../../core/TemporalBackbone.h"	// UNOFFICIAL 2026-11-09 the dither follows the shared temporal resolve
+#include "../../core/ShaderFallback.h"	// UNOFFICIAL 2026-11-12 ShaderFallback (Terrain Blending left out of the land shaders)
+#include "../../core/RainState.h"	// UNOFFICIAL 2026-11-12 RainStateGuard
 
 // Set by SettingManager::Configuration::UpdateOldDefaults (settings version 65) when a saved config already had ParallaxLite
 // on, from builds that forced its distance cap every frame; UpdateSettings then writes the suggested distance once.
@@ -212,7 +214,10 @@ void TerrainShaders::UpdateSettings() {
 
 	// UNOFFICIAL terrain blending. Turning it on in the menu needs a restart (the land shaders and the depth copy are made
 	// at startup); turning it off works at once.
-	BlendingSettings.Enabled = TheSettingManager->GetSettingI("Shaders.Terrain.Blending", "Enabled") != 0;
+	// UNOFFICIAL 2026-11-12 ShaderFallback: not while the land shaders had to be built without it (too long for the driver on native
+	// Direct3D 9): no depth copy, no shadow drop and no blend state for a blend no shader does.
+	BlendingSettings.Enabled = TheSettingManager->GetSettingI("Shaders.Terrain.Blending", "Enabled") != 0 &&
+		!ShaderFallback::Dropped(ShaderFallback::TerrainBlend, ShaderFallback::Land);
 	BlendingSettings.Debug = TheSettingManager->GetSettingI("Shaders.Terrain.Blending", "Debug") != 0;
 	// UNOFFICIAL 2026-10-14 (ported from mrfury97's fork, 0a7cbdc5): capped at 20, deeper bands show too much of what the land
 	// covers; the band's width across the ground (GroundWidth), the land's height map at the edge, steep land, minimum pixels.
@@ -239,8 +244,12 @@ void TerrainShaders::UpdateSettings() {
 
 void TerrainShaders::UpdateConstants() {
 	// the stronger of the rain animator and the puddle animator drives the dry-to-wet blend
-	const auto& wetWorld = TheShaderManager->Effects.WetWorld->Constants;
-	const float rainFactor = max(wetWorld.Data.x, wetWorld.Data.z);
+	// UNOFFICIAL 2026-11-12 RainStateGuard ([Shaders.WetWorld.Main] RainStateGuard, core/RainState.h): the same max(rain, puddles), from
+	// the one rain state: 0-1, this frame's, and following the weather whether WetWorld and Precipitations are on or off. It was read
+	// from WetWorld's constants, which nothing updates while that effect is off, and whose puddle amount went to 1 for good when a
+	// rain ended (Increase / Decrease 0): every [Shaders.Terrain.Main] value stayed replaced by the Rain group's. With the guard off
+	// this is the old expression.
+	const float rainFactor = RainState::Factor();
 
 	// UNOFFICIAL 2026-10-27 (NVR DXVK 1.7-displace, core\DxvkCompute.h): the land's tessellation displacement settings, once a frame.
 	// Nothing registered (NvrDxvkDisplacement off at load, or no NVR DXVK): returns at once.

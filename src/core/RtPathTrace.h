@@ -12,6 +12,7 @@ namespace RtPathTrace {
 	void	RenderDebug(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget);	// the traced picture over the finished frame
 	void	Replace(IDirect3DDevice9* Device);
 	bool	Replacing();	// (2026-11-03) the traced picture replaces the scene this frame: AO / AmbientLight / Specular stay out (no light twice)	// (2026-11-03) PTReplace: the traced picture into the scene right after RtCore::Frame
+	void	MaskShadowBuffer(IDirect3DDevice9* Device, IDirect3DSurface9* shadowSurface);	// UNOFFICIAL 2026-11-12 PTOwnShadows: "lit" into TESR_PointShadowBuffer where the trace has a first surface
 	std::string	StatusText();				// the REPORT block's line: on / why not, samples so far
 	// UNOFFICIAL 2026-11-11 (user: "these keys have no reason to exist ... a second level dev menu only for our eyes"; a tester had set
 	// ReferencePT + PTReplace + PTDenoise by hand, which IS path tracing, so PTRealtime looked dead): the three are internal comparison

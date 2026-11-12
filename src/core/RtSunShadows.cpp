@@ -34,6 +34,10 @@ namespace {
 		float	denoiserHistory = 32.0f, denoiserMaxRadius = 32.0f, denoiserStabilize = 4.0f;
 		float	contact = 1.0f;			// 2026-11-07 (rtgap-tess) ContactShadows: the depth buffer's contact march (strength, 0 off; Mode 1 only)
 		float	contactLength = 24.0f;	// ContactLength (pixels)
+		// UNOFFICIAL 2026-11-12 LeafTransmission / LeafSoftEdges (Compute\Rt\RtSunFoliage.glsl): sunlight through plant cut-outs. Both 0 /
+		// off: the trace shader takes its old queries (no extra work, the same visibility).
+		float	leafTransmission = 0.0f;	// the share of the sunlight a covered leaf lets through (0: leaves are solid)
+		bool	leafSoftEdges = false;		// plants' alpha test hashed at every mip, a new hash each frame (soft leaf edges after the denoiser)
 		int		debugView = 0;			// 1 RT only, 2 traced not applied, 3 hit distance, 4 the raw visibility over the picture, 5 state codes, 6 primary rays (4-6: grey over the picture)
 	} S;
 
@@ -109,6 +113,9 @@ namespace {
 		S.denoiserMaxRadius = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "DenoiserMaxRadius"), 1.0f), 64.0f);
 		S.denoiserStabilize = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "DenoiserStabilize"), 0.0f), 16.0f);
 		if ((S.penumbra || S.shadowDenoiser) && S.sunAngle <= 0.0f) S.sunAngle = 0.53f;	// the sun's real angular diameter
+		// UNOFFICIAL 2026-11-12 LeafTransmission / LeafSoftEdges (a missing key reads 0: off)
+		S.leafTransmission = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "LeafTransmission"), 0.0f), 1.0f);
+		S.leafSoftEdges = TheSettingManager->GetSettingI(kSection, "LeafSoftEdges") != 0;
 	}
 
 	const D3DXVECTOR4* Constant(const char* name) {
@@ -267,6 +274,35 @@ namespace {
 		const int atlas = RtCore::AlphaAtlasImage();
 		const int albedoAtlas = RtCore::AlbedoAtlasImage();
 		const int glowAtlas = RtCore::GlowAtlasImage();
+		// UNOFFICIAL 2026-11-12 LeafTransmission / LeafSoftEdges (RtSunFoliage.glsl; the constants ride in three w slots that were unused,
+		// so the block's size and the offline host's copy of it stay as they are: a 0 there is the old path). Plants are the records of
+		// the kind "foliage" (RtCore: leaf cards, grass tufts, cut-outs under a "plant" material rule); they are alpha-tested, so both keys
+		// need [Main.Main.RayTracing] AlphaTested and the alpha atlas (binding 5; without it the shader's binding is a stand-in).
+		// The coin toss: the FidelityFX denoiser cores (DenoiserCore 1 / 2) pack each pixel as lit / blocked (visibility >= 0.5), so a
+		// leaf's 0.3 would read as solid there; for them a leaf passes its share of the rays instead and the visibility stays 0 or 1.
+		{
+			const bool wanted = S.leafTransmission > 0.0f || S.leafSoftEdges;
+			const bool can = c.alpha[0] > 0.0f && atlas >= 0;
+			if (wanted && can) {
+				c.origin[3] = S.leafTransmission;
+				c.cloudCentre[3] = S.leafSoftEdges ? 1.0f : 0.0f;
+				c.cloudLight[3] = S.leafTransmission > 0.0f && helperDenoise && TheSettingManager->GetSettingI(kSection, "DenoiserCore") != 0 ? 1.0f : 0.0f;
+			}
+			static int foliageState = 0;	// 0 off, 1 running, 2 wanted but cannot: one log line a change
+			const int state = !wanted ? 0 : can ? 1 : 2;
+			if (state != foliageState) {
+				foliageState = state;
+				if (state == 1)
+					Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT sun shadows through plants ON: LeafTransmission %.2f%s, LeafSoftEdges %s (plants = leaf cards, grass tufts, "
+						"cut-outs under a \"plant\" material rule; the sun rays test every hit themselves now).", S.leafTransmission,
+						c.cloudLight[3] > 0.0f ? " (as a coin toss a ray: DenoiserCore 1 / 2 reads lit / blocked)" : "", S.leafSoftEdges ? "on" : "off");
+				else if (state == 2)
+					Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT sun shadows through plants NOT running (LeafTransmission %.2f, LeafSoftEdges %s): %s. Leaves stay solid cut-outs.",
+						S.leafTransmission, S.leafSoftEdges ? "on" : "off", c.alpha[0] > 0.0f ? "no alpha atlas in the RT core" :
+						"[Main.Main.RayTracing] AlphaTested is off (or the fork stages no texcoords): no cut-outs in the traced scene");
+				else Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT sun shadows through plants off (LeafTransmission 0, LeafSoftEdges off): leaves are solid cut-outs again.");
+			}
+		}
 		if ((S.debugView == 7 || (S.debugView == 8 && glowAtlas >= 0)) && albedoAtlas >= 0 && atlas >= 0 && hitDebugShader >= 0) {	// the hit textures check (RtHitDebug.comp)
 			if (S.debugView == 8) c.range[3] = 4.0f;	// 2026-10-30: the glow atlas (GlowTextures)
 			const int images[4] = { imageVisibility, atlas, albedoAtlas, glowAtlas >= 0 ? glowAtlas : albedoAtlas };

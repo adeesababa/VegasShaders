@@ -27,6 +27,7 @@
 #include <unordered_set>
 #include <algorithm>
 #include <share.h>	// _SH_DENYNO (Copy bug report reads the open log)
+#include "ShaderFallback.h"	// UNOFFICIAL 2026-11-12 ShaderFallback: its notices, shown with the install check's
 
 // The settings overlay (ImGui on the game's D3D9 device). Layout, top to bottom: a menu bar (File / View / Tools and the
 // global switches), the sidebar of sections next to the page of the selected section, and a one-line status bar. Input
@@ -5441,6 +5442,8 @@ static void RenderTwinDllWarning(bool mainMenu) {
 static int InstallIssueCount() {
 	int n = 0;
 	for (const InstallCheck::Result& r : InstallCheck::Results()) if (r.level != InstallCheck::Level::Info && r.group != "twin") n++;
+	// UNOFFICIAL 2026-11-12 ShaderFallback (core/ShaderFallback.h): shaders too long for the graphics driver, and what was left out of them
+	for (const std::string& title : ShaderFallback::NoticeTitle) if (!title.empty()) n++;
 	return n;
 }
 
@@ -5504,6 +5507,10 @@ static void RenderInstallNotice(bool mainMenu) {
 		body += "- " + r.title + "\n";
 		if (!r.fix.empty()) body += "   " + r.fix + "\n";
 	}
+	for (unsigned family = 0; family < ShaderFallback::FamilyCount; family++) {	// UNOFFICIAL 2026-11-12 ShaderFallback
+		if (ShaderFallback::NoticeTitle[family].empty()) continue;
+		body += "- " + ShaderFallback::NoticeTitle[family] + "\n   " + ShaderFallback::NoticeFix[family] + "\n";
+	}
 	char tail[200];
 	sprintf_s(tail, "Details and a ready bug report: press %s, then Help > Install check.", DikToName(TheSettingManager->SettingsMain.Menu.KeyEnable));
 	body += tail;
@@ -5548,6 +5555,17 @@ static void DrawInstallCheckWindow() {
 			ImGui::TextDisabled("version, GPU, DXVK, these results, your changed settings and this session's log");
 		ImGui::Separator();
 		if (InstallCheck::Results().empty()) ImGui::TextUnformatted("Nothing found.");
+		for (unsigned family = 0; family < ShaderFallback::FamilyCount; family++) {	// UNOFFICIAL 2026-11-12 ShaderFallback (core/ShaderFallback.h)
+			if (ShaderFallback::NoticeTitle[family].empty()) continue;
+			const bool lost = ShaderFallback::Lost[family] != 0;	// some are drawn by the game's own shader
+			ImGui::PushStyleColor(ImGuiCol_Text, lost ? kProblemRed : kAmber);
+			ImGui::TextWrapped("%s  %s", lost ? "PROBLEM" : "warning", ShaderFallback::NoticeTitle[family].c_str());
+			ImGui::PopStyleColor();
+			ImGui::Indent();
+			ImGui::TextWrapped("%s", ShaderFallback::NoticeFix[family].c_str());
+			ImGui::Unindent();
+			ImGui::Spacing();
+		}
 		for (const InstallCheck::Result& r : InstallCheck::Results()) {
 			const bool info = r.level == InstallCheck::Level::Info;
 			const ImVec4 colour = r.level == InstallCheck::Level::Problem ? kProblemRed : info ? ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled) : kAmber;

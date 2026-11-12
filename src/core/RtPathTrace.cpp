@@ -19,6 +19,7 @@
 #include "FlashlightDeferred.h"	// (2026-11-07) the flashlight as its own pass draws it (LightParams)
 #include "RenderRect.h"	// (2026-11-03) RenderScale < 1: the trace over the frame's top-left rect (docs/next/RT-RENDERSCALE.md)
 #include "RtViewModel.h"	// (2026-11-07 ptaaa-firstperson) PTViewModel's prep pass (shared with tools/nvr-rt-host)
+#include "WaterMask.h"	// UNOFFICIAL 2026-11-12 PTWaterMask: the pixels the game drew water on (Render.cpp fills it; the prep pass reads it)
 #include "RtBlendedLayer.h"	// UNOFFICIAL 2026-11-10 PTBlendedLayer
 #include "RtEarlyLook.h"	// UNOFFICIAL 2026-11-11 PTEarlyLook (the early kick's look from the game's own buffers)
 #include "CapturedNormals.h"	// (2026-11-07 ptaaa-firstperson) PTViewModel: the first-person model's G-buffer (VmWanted / VmFrame)
@@ -71,6 +72,12 @@ namespace {
 		// UNOFFICIAL 2026-11-11 PTEarlyLook (core/RtEarlyLook.h; only in frames the early kick submitted, env NVR_RT_EARLY_PT): 0 off, 1 the game's
 		// own pixel where the live mode shows it (slice 1), 2 + the game's colour on matched surfaces (slice 2), 3 = 2 with the classes painted
 		int		earlyLook = 0;
+		bool	screenOwn = true;	// UNOFFICIAL 2026-11-11 [Main.Main.RayTracing] PTScreenOwn: the prep pass marks pixels whose colour / material buffers are another surface's (core/RtViewModel.h)
+		bool	ownShadows = true;	// UNOFFICIAL 2026-11-12 [Main.Main.RayTracing] PTOwnShadows: the game's deferred sun / lamp shadow apply leaves the traced pixels alone (MaskShadowBuffer)
+		bool	albedoGamma = true;	// UNOFFICIAL 2026-11-12 [Main.Main.RayTracing] PTAlbedoGamma: the AlbedoBuffer holds texture^([Shaders.PBR.Linear] Gamma); the trace reads it as texture^2.2 (frame row texel 291.y)
+		bool	screenOwnNarrow = true;	// UNOFFICIAL 2026-11-12 [Main.Main.RayTracing] PTScreenOwnNarrow: a marked pixel takes a traced record only for hair, skin and cut-outs over a person; else the game's pixel (frame row texel 292.x)
+		bool	hairOverSky = true;	// UNOFFICIAL 2026-11-12 [Main.Main.RayTracing] PTHairOverSky: traced hair where nothing is recorded behind it (frame row texel 292.y)
+		float	glowTexel = 0.02f;	// UNOFFICIAL 2026-11-12 [Main.Main.RayTracing] PTGlowTexel: PTGlowFromFrame only where the glow map's texel is this bright (frame row texel 293.x; 0 = the whole mesh, as before)
 		bool	hairFirst = true;	// UNOFFICIAL 2026-11-10 [Main.Main.RayTracing] BlendedHair, the path tracer's half: frame row texel 30.x
 		// UNOFFICIAL 2026-11-10 PTRealtimeLevel (a tester's RTX 4090: 23 fps in a small room, the trace 45 of the frame's 59 ms; the same card's
 		// 1.0.6 log: the plain 4-bounce reference trace 14 ms, PTRealtime 40). What PTRealtime trades for speed, each step measured in
@@ -141,6 +148,17 @@ namespace {
 		int		emissive = -1;
 		int		emissiveMax = 64;
 		int		emissiveTriangles = (int)RtEmissiveRow::kTrianglesMax;
+		// UNOFFICIAL 2026-11-11 (pt-emissive-cost; RtPathTrace.comp LoadEmCostKeys has the reasoning, frame row texels 289.y-291.x) PTEmissive cost
+		// 12.8 / 19.8 / 12.7 ms of a ~36 ms pass sum on an NVIDIA L4 (the 19.8 at Goodsprings at noon, nothing glowing on screen): every glowing
+		// mesh was a light-sample candidate at every hit however dim there, and ReSTIR DI then reused and ray-tested those samples in every pixel.
+		// All four leave the picture's mean alone (what is not light-sampled is counted in full by the bounce rays); 0 = as before.
+		//   PTEmissiveCut    an instance is a candidate at a hit only where its estimated light is at least this share of the sky's light +
+		//                    the sun's unshadowed light on that surface (so: by day, outdoors; 0 indoors and little at night)
+		//   PTEmissiveFloor  the same test against an absolute light level (the trace's linear units; works indoors too)
+		//   PTEmissiveHits   n >= 1: only the path's first n hits take an emissive sample (1 = the first hit)
+		//   PTEmissiveRoulette  k: an emissive candidate under k x the hit's other unshadowed direct light: Russian roulette before its shadow ray
+		float	emissiveCut = 0.02f, emissiveFloor = 0.0f, emissiveRoulette = 0.0f;	// (PTEmissiveCut: on by default, the others off)
+		int		emissiveHits = 0;
 		// UNOFFICIAL 2026-11-07 (perf-ptcost, RT-PATH-TRACING.md "perf-ptcost"; RtPtCost.h) the ray budget: PTRestirDIRays 0 = ReSTIR DI's
 		// targets unshadowed + one shadow ray for the chosen sample (1 = a ray inside every target, as before; 2 / 3 test variants),
 		// PTBounceLights 0 = one light sample a bounce hit (1 = the sun, the lamp and the emissive point each, as before). A missing key: 0
@@ -209,6 +227,12 @@ namespace {
 	// UNOFFICIAL 2026-11-11 PTGlassSurface: the frame row's texel 289 (RtPathTrace.comp kGlassSurfaceTexel: keep them equal), x the key (0 = the
 	// clear glass as before), y 0 (reserved). The material texels 24-26 are full (RtMaterials.h), so it sits after the early-look texel.
 	constexpr int kGlassSurfaceTexel = kEarlyLookTexel + 1;
+	// UNOFFICIAL 2026-11-11 (pt-emissive-cost) PTEmissive's cost keys (RtPathTrace.comp kEmCostTexel: keep them equal): texel 289.y the weight floor's
+	// base, 290.x its sun term (both in EmWeight's units: light x pi / PTGlow), 290.y PTEmissiveHits, 291.x PTEmissiveRoulette, 291.y free.
+	// The frame row's texels in use: 0-15, 16-21 (RtTessContact.h), 22 (RtEmissiveRow.h), 23, 24-26 (RtMaterials.h), 27, 28-29 (RtPtCost.h), 30, 31,
+	// 32-287 (the GGX energy table), 288, 289.x (PTGlassSurface), and these. The next free float: 291.y, then texel 292.
+	constexpr int kEmCostTexel = RtEmissiveRow::kCostTexel;
+	static_assert(kEmCostTexel == kGlassSurfaceTexel && kEmCostTexel == 289 && kEmCostTexel + 2 < kLightTexels && 2 * kEmCostTexel >= RtRestirRow::kRowFloatsAll, "PTEmissive's cost keys: frame row texels 289.y-291.x (RtPathTrace.comp kEmCostTexel)");
 	static_assert(2 * kGlassSurfaceTexel >= RtRestirRow::kRowFloatsAll && kGlassSurfaceTexel < kLightTexels, "PTGlassSurface's frame row texel: after the energy table, inside the row");
 	RtRestirRow::State restirState;
 	// (2026-11-07) the scratch store's layout: the ReSTIR DI reservoirs (two sets of w x h x 4 words) at word 0, the radiance cache from here
@@ -219,6 +243,7 @@ namespace {
 	RtEmissiveRow::State emissiveState;
 	int			shaderEmissive = -1;	// RtEmissiveBuild.spv
 	int			emissiveCount = 0;	// this frame's
+	float		emissiveFloorBase = 0.0f;	// (2026-11-11 pt-emissive-cost) this frame's weight floor (frame row texel 289.y; RtEmissiveBuild.comp params.z)
 	struct EmissiveConstants { float params[4]; };	// RtEmissiveBuild.comp's block	// (2026-11-07) PTRestirDI: last frame's camera, rect, lamps (RtRestirRow.h, shared with tools/nvr-rt-host)
 	constexpr int kGridXY = 32, kGridZ = 16;
 	// Below this many lamps the plain shader is cheaper (RtPathTrace.comp: every thread reads the same lamp; the grid's per-thread lists
@@ -293,6 +318,13 @@ namespace {
 		S.cacheShort = f("PTCacheShort", 0.0f, 64.0f);	// UNOFFICIAL 2026-11-10 (a missing key: 0, off)
 		S.realtimeLevel = i("PTRealtimeLevel", 0, 2);	// UNOFFICIAL 2026-11-10 (a missing key: 0, as before)
 		{ SettingManager::Configuration::ConfigNode hn; S.hairFirst = !TheSettingManager->Config.FillNode(&hn, kSection, "BlendedHair") || hn.BoolValue; }	// UNOFFICIAL 2026-11-10 (a missing key: on)
+		{ SettingManager::Configuration::ConfigNode on; S.screenOwn = !TheSettingManager->Config.FillNode(&on, kSection, "PTScreenOwn") || on.BoolValue; }	// UNOFFICIAL 2026-11-11 (a missing key: on)
+		{ SettingManager::Configuration::ConfigNode on; WaterMask::Enabled = !TheSettingManager->Config.FillNode(&on, kSection, "PTWaterMask") || on.BoolValue; }	// UNOFFICIAL 2026-11-12 PTWaterMask (a missing key: on; core/WaterMask.h)
+		{ SettingManager::Configuration::ConfigNode on; S.ownShadows = !TheSettingManager->Config.FillNode(&on, kSection, "PTOwnShadows") || on.BoolValue; }	// UNOFFICIAL 2026-11-12 (a missing key: on)
+		{ SettingManager::Configuration::ConfigNode on; S.albedoGamma = !TheSettingManager->Config.FillNode(&on, kSection, "PTAlbedoGamma") || on.BoolValue; }	// UNOFFICIAL 2026-11-12 (a missing key: on)
+		{ SettingManager::Configuration::ConfigNode on; S.screenOwnNarrow = !TheSettingManager->Config.FillNode(&on, kSection, "PTScreenOwnNarrow") || on.BoolValue; }	// UNOFFICIAL 2026-11-12 (a missing key: on)
+		{ SettingManager::Configuration::ConfigNode on; S.hairOverSky = !TheSettingManager->Config.FillNode(&on, kSection, "PTHairOverSky") || on.BoolValue; }	// UNOFFICIAL 2026-11-12 (a missing key: on)
+		{ SettingManager::Configuration::ConfigNode v; S.glowTexel = TheSettingManager->Config.FillNode(&v, kSection, "PTGlowTexel") ? (std::clamp)(TheSettingManager->GetSettingF(kSection, "PTGlowTexel"), 0.0f, 100.0f) : 0.02f; }	// UNOFFICIAL 2026-11-12 (a missing key: 0.02)
 		S.rouletteFrom = i("PTRouletteFrom", 0, 1);	// UNOFFICIAL 2026-11-10 (a missing key: 0, as before)
 		S.denoiseIterations = i("PTDenoiseIterations", 0, 5);
 		S.denoiseHistory = f("PTDenoiseHistory", 1.0f, 256.0f);
@@ -346,6 +378,11 @@ namespace {
 		S.emissive = i("PTEmissive", -1, 1);	// (2026-11-07 ptaaa-emissive)
 		S.emissiveMax = i("PTEmissiveMax", 0, RtEmissiveRow::kMax);
 		S.emissiveTriangles = i("PTEmissiveTriangles", 0, (int)RtEmissiveRow::kTrianglesMax);
+		// UNOFFICIAL 2026-11-11 (pt-emissive-cost; a missing key: PTEmissiveCut its documented 0.02, the others 0 = off, PTEmissive as before)
+		{ SettingManager::Configuration::ConfigNode en; S.emissiveCut = TheSettingManager->Config.FillNode(&en, kSection, "PTEmissiveCut") ? (std::min)((std::max)(en.FloatValue, 0.0f), 1.0f) : 0.02f; }
+		S.emissiveFloor = f("PTEmissiveFloor", 0.0f, 16.0f);
+		S.emissiveHits = i("PTEmissiveHits", 0, 16);
+		S.emissiveRoulette = f("PTEmissiveRoulette", 0.0f, 1.0f);
 		S.restirDISpatial = i("PTRestirDISpatial", 0, 8);
 		S.restirDIRadius = f("PTRestirDIRadius", 1.0f, 64.0f);
 		S.restirDIMaxM = f("PTRestirDIMaxM", 1.0f, 255.0f);
@@ -638,14 +675,25 @@ namespace {
 		const float toRad = 3.14159265f / 360.0f;
 		return tanf(world * toRad) / tanf(first * toRad);
 	}
-	bool ViewModelPrep(IDirect3DDevice9* Device, IDirect3DBaseTexture9* normals, UINT w, UINT h) {
+	// (2026-11-11 PTScreenOwn) viewModel: the view model's part (as before); own: the marks (RtViewModel.h; tw, th the render rect, jitter the
+	// depth's, as the trace's ScreenHit). At least one of the two.
+	UInt32		ownFrames = 0;
+	bool ViewModelPrep(IDirect3DDevice9* Device, IDirect3DBaseTexture9* normals, UINT w, UINT h, bool viewModel = true, bool own = false, UINT tw = 0, UINT th = 0, float jitterX = 0.0f, float jitterY = 0.0f) {
 		auto constant = [](const char* name) { auto f = TheShaderManager->ConstantsTable.find(name); return f == TheShaderManager->ConstantsTable.end() ? nullptr : f->second; };
 		auto texture = [](const char* name) -> IDirect3DBaseTexture9* { auto f = TheTextureManager->TextureNames.find(name); return f == TheTextureManager->TextureNames.end() || !f->second ? nullptr : *f->second; };
 		IDirect3DBaseTexture9* captured = texture("TESR_CapturedNormalsBuffer");
 		IDirect3DTexture9* depthVm = TheTextureManager->DepthTextureViewModel;
 		const D3DXMATRIX* view = (const D3DXMATRIX*)constant("TESR_ViewTransform");
 		const D3DXVECTOR4* camera = constant("TESR_CameraData");
-		if (vmPrepFailed || !normals || !captured || !depthVm || !view || !camera || camera->y <= 0.0f) return false;
+		IDirect3DBaseTexture9* depthWorld = texture("TESR_DepthBuffer");
+		if (viewModel && !depthVm) viewModel = false;
+		if (own && !depthWorld) own = false;
+		// UNOFFICIAL 2026-11-12 PTWaterMask (core/WaterMask.h; RtViewModel.h c9 / s5): the pixels this frame's world scene drew water on (null: no
+		// water in view, the key off, or the mask not made): coded -1, the game's own pixel. The pass also runs for the mask alone.
+		IDirect3DTexture9* water = WaterMask::ThisFrame(Device, TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0);
+		if (vmPrepFailed || !normals || !captured || (!viewModel && !own && !water) || !view || !camera || camera->y <= 0.0f) return false;
+		// the skin blur's albedo target, where this span's skin draws bound it (CapturedNormals::SkinAlbedoFill copied it into the AlbedoBuffer)
+		IDirect3DBaseTexture9* skinAlbedo = own && CapturedNormals::SkinAlbedoTex && !CapturedNormals::SkinAlbedoFillFailed ? (IDirect3DBaseTexture9*)CapturedNormals::SkinAlbedoTex : nullptr;
 		if (!vmPrepPS) {
 			// the source and its constants: core/RtViewModel.h (also run by tools/nvr-rt-host scene `vmprep`)
 			vmPrepPS = CapturedNormals::FullScreenShader(Device, RtViewModel::kPrepPS, "RT path trace view model", vmPrepFailed);
@@ -659,21 +707,30 @@ namespace {
 		const D3DXMATRIX& proj = TheRenderManager->projMatrix;
 		const float s = FovScale();
 		const float nearVm = (std::max)(TheRenderManager->DepthConstants.x, 1.0e-4f);
-		const float c[6][4] = {
+		// (2026-11-11) the tessellation's bumps lie up to Strength before the distance their pixel shader captured: within that a mark is "maybe"
+		const float reach = own ? RtViewModel::OwnReach(DxvkCompute::DisplaceMaxStrength()) : 0.0f;
+		const float c[10][4] = {
 			{ 1.0f / (proj._11 * s), 1.0f / (proj._22 * s), nearVm, camera->y },
 			{ TheRenderManager->DepthConstants.z == 0.0f ? 0.0f : 1.0f, s, RtViewModel::kMatchShare, RtViewModel::kMatchUnits },
 			{ view->_11, view->_12, view->_13, view->_14 }, { view->_21, view->_22, view->_23, view->_24 },
-			{ view->_31, view->_32, view->_33, view->_34 }, { view->_41, view->_42, view->_43, view->_44 } };
+			{ view->_31, view->_32, view->_33, view->_34 }, { view->_41, view->_42, view->_43, view->_44 },
+			{ viewModel ? 1.0f : 0.0f, own ? 1.0f : 0.0f, RtViewModel::kFrontShare, RtViewModel::kFrontUnits },
+			{ tw ? (float)w / (float)tw : 1.0f, th ? (float)h / (float)th : 1.0f, jitterX, jitterY },
+			{ !own ? 0.0f : skinAlbedo ? 2.0f : 1.0f, reach, 0.0f, 0.0f },
+			// (PTWaterMask) c9: the mask on; its uv scale: this target's uv -> the share of the render rect (c7) -> the mask's own rect (the
+			// viewport its water draws had, top-left) of its own size. 1, 1 whenever the mask and the depth buffer share one layout
+			{ water ? 1.0f : 0.0f, water && WaterMask::Made.Width ? (tw ? (float)w / (float)tw : 1.0f) * (float)WaterMask::Rect.Width / (float)WaterMask::Made.Width : 0.0f,
+			  water && WaterMask::Made.Height ? (th ? (float)h / (float)th : 1.0f) * (float)WaterMask::Rect.Height / (float)WaterMask::Made.Height : 0.0f, 0.0f } };
 		// one full-screen draw, everything it changes put back (as CapturedNormals::MergeIntoNormals)
 		IDirect3DVertexShader9* vs = nullptr; IDirect3DPixelShader9* ps = nullptr; IDirect3DVertexDeclaration9* decl = nullptr;
-		IDirect3DVertexBuffer9* vb = nullptr; UINT vbOffset = 0, vbStride = 0; IDirect3DBaseTexture9* tex[3] = {};
+		IDirect3DVertexBuffer9* vb = nullptr; UINT vbOffset = 0, vbStride = 0; IDirect3DBaseTexture9* tex[6] = {};	// (PTWaterMask: + s5, c9)
 		IDirect3DSurface9* rt[4] = {}; D3DVIEWPORT9 vp = {};
-		DWORD fvf = 0; float saved[6][4] = {};
+		DWORD fvf = 0; float saved[10][4] = {};
 		Device->GetVertexShader(&vs); Device->GetPixelShader(&ps); Device->GetVertexDeclaration(&decl); Device->GetFVF(&fvf);
 		Device->GetStreamSource(0, &vb, &vbOffset, &vbStride);
-		for (DWORD i = 0; i < 3; i++) Device->GetTexture(i, &tex[i]);
+		for (DWORD i = 0; i < 6; i++) Device->GetTexture(i, &tex[i]);
 		for (DWORD i = 0; i < 4; i++) Device->GetRenderTarget(i, &rt[i]);
-		Device->GetViewport(&vp); Device->GetPixelShaderConstantF(0, &saved[0][0], 6);
+		Device->GetViewport(&vp); Device->GetPixelShaderConstantF(0, &saved[0][0], 10);
 		static const D3DRENDERSTATETYPE kRS[] = { D3DRS_ZENABLE, D3DRS_ZWRITEENABLE, D3DRS_ALPHABLENDENABLE, D3DRS_ALPHATESTENABLE, D3DRS_STENCILENABLE,
 			D3DRS_SCISSORTESTENABLE, D3DRS_CULLMODE, D3DRS_COLORWRITEENABLE, D3DRS_FILLMODE, D3DRS_SRGBWRITEENABLE, D3DRS_FOGENABLE, D3DRS_CLIPPLANEENABLE };
 		const DWORD want[] = { FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, D3DCULL_NONE, 0xFu, D3DFILL_SOLID, FALSE, FALSE, 0 };
@@ -681,8 +738,8 @@ namespace {
 		for (unsigned i = 0; i < sizeof(kRS) / sizeof(kRS[0]); i++) { if (FAILED(Device->GetRenderState(kRS[i], &savedRS[i]))) savedRS[i] = want[i]; if (savedRS[i] != want[i]) Device->SetRenderState(kRS[i], want[i]); }
 		static const D3DSAMPLERSTATETYPE kSS[] = { D3DSAMP_MINFILTER, D3DSAMP_MAGFILTER, D3DSAMP_MIPFILTER, D3DSAMP_ADDRESSU, D3DSAMP_ADDRESSV, D3DSAMP_SRGBTEXTURE };
 		const DWORD wantS[] = { D3DTEXF_POINT, D3DTEXF_POINT, D3DTEXF_NONE, D3DTADDRESS_CLAMP, D3DTADDRESS_CLAMP, FALSE };
-		DWORD savedS[3][sizeof(kSS) / sizeof(kSS[0])];
-		for (DWORD st = 0; st < 3; st++)
+		DWORD savedS[6][sizeof(kSS) / sizeof(kSS[0])];
+		for (DWORD st = 0; st < 6; st++)
 			for (unsigned i = 0; i < sizeof(kSS) / sizeof(kSS[0]); i++) { if (FAILED(Device->GetSamplerState(st, kSS[i], &savedS[st][i]))) savedS[st][i] = wantS[i]; if (savedS[st][i] != wantS[i]) Device->SetSamplerState(st, kSS[i], wantS[i]); }
 		for (DWORD i = 1; i < 4; i++) if (rt[i]) Device->SetRenderTarget(i, nullptr);
 		Device->SetRenderTarget(0, vmNormalsSurface);
@@ -690,27 +747,31 @@ namespace {
 		Device->SetViewport(&full);
 		Device->SetVertexShader(nullptr);
 		Device->SetPixelShader(vmPrepPS);
-		Device->SetPixelShaderConstantF(0, &c[0][0], 6);
-		Device->SetTexture(0, normals); Device->SetTexture(1, captured); Device->SetTexture(2, depthVm);
+		Device->SetPixelShaderConstantF(0, &c[0][0], 10);
+		// (stages the pass does not read this frame hold the normals: any texture that is not the target)
+		Device->SetTexture(0, normals); Device->SetTexture(1, captured); Device->SetTexture(2, viewModel ? (IDirect3DBaseTexture9*)depthVm : normals);
+		Device->SetTexture(3, own ? depthWorld : normals); Device->SetTexture(4, skinAlbedo ? skinAlbedo : normals);
+		Device->SetTexture(5, water ? (IDirect3DBaseTexture9*)water : normals);	// (PTWaterMask)
 		Device->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
 		const float x1 = (float)w - 0.5f, y1 = (float)h - 0.5f;
 		const float quad[4][6] = { { -0.5f, -0.5f, 0, 1, 0, 0 }, { x1, -0.5f, 0, 1, 1, 0 }, { -0.5f, y1, 0, 1, 0, 1 }, { x1, y1, 0, 1, 1, 1 } };
 		Device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(quad[0]));
-		for (DWORD st = 0; st < 3; st++)
+		for (DWORD st = 0; st < 6; st++)
 			for (unsigned i = 0; i < sizeof(kSS) / sizeof(kSS[0]); i++) if (savedS[st][i] != wantS[i]) Device->SetSamplerState(st, kSS[i], savedS[st][i]);
 		for (unsigned i = 0; i < sizeof(kRS) / sizeof(kRS[0]); i++) if (savedRS[i] != want[i]) Device->SetRenderState(kRS[i], savedRS[i]);
 		Device->SetRenderTarget(0, rt[0]);
 		for (DWORD i = 1; i < 4; i++) if (rt[i]) Device->SetRenderTarget(i, rt[i]);
 		for (DWORD i = 0; i < 4; i++) if (rt[i]) rt[i]->Release();
 		Device->SetViewport(&vp);
-		for (DWORD i = 0; i < 3; i++) { Device->SetTexture(i, tex[i]); if (tex[i]) tex[i]->Release(); }
-		Device->SetPixelShaderConstantF(0, &saved[0][0], 6);
+		for (DWORD i = 0; i < 6; i++) { Device->SetTexture(i, tex[i]); if (tex[i]) tex[i]->Release(); }
+		Device->SetPixelShaderConstantF(0, &saved[0][0], 10);
 		if (decl) { Device->SetVertexDeclaration(decl); decl->Release(); } else Device->SetFVF(fvf);
 		Device->SetStreamSource(0, vb, vbOffset, vbStride); if (vb) vb->Release();
 		Device->SetVertexShader(vs); if (vs) vs->Release();
 		Device->SetPixelShader(ps); if (ps) ps->Release();
 		// A log line now and then (the first time, then every 1800 prepared frames): how many of the view model's texels the path tracer
 		// lights (a 64 x 64 point copy read back: one small stall)
+		if (own) ownFrames++;
 		if (vmPrepFrames++ % 1800 == 0) {
 			if (!vmCheckTex && SUCCEEDED(Device->CreateTexture(64, 64, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &vmCheckTex, nullptr)) && vmCheckTex) {
 				vmCheckTex->GetSurfaceLevel(0, &vmCheckSurface);
@@ -719,16 +780,25 @@ namespace {
 			D3DLOCKED_RECT r = {};
 			if (vmCheckSurface && vmCheckSys && SUCCEEDED(Device->StretchRect(vmNormalsSurface, nullptr, vmCheckSurface, nullptr, D3DTEXF_POINT)) &&
 				SUCCEEDED(Device->GetRenderTargetData(vmCheckSurface, vmCheckSys)) && SUCCEEDED(vmCheckSys->LockRect(&r, nullptr, D3DLOCK_READONLY))) {
-				int lit = 0, kept = 0, people = 0;
+				int lit = 0, kept = 0, people = 0, ownWorld = 0, ownPeople = 0, ownMaybe = 0;
 				for (int y = 0; y < 64; y++) {
 					const D3DXFLOAT16* row = (const D3DXFLOAT16*)((const char*)r.pBits + y * r.Pitch);
 					for (int x = 0; x < 64; x++) {
 						float a = 0.0f; D3DXFloat16To32Array(&a, row + x * 4 + 3, 1);
 						if (a > 3.5f) lit++; else if (a < -0.5f) kept++; else if (a > 1.5f) people++;
+						if (a > 0.5f && a < 3.5f && a - floorf(a) > 0.375f && a - floorf(a) < 0.625f) { if (a > 1.5f) ownPeople++; else ownWorld++; }
+						else if (a > 0.5f && a < 3.5f && a - floorf(a) > 0.125f && a - floorf(a) < 0.375f) ownMaybe++;
 					}
 				}
 				vmCheckSys->UnlockRect();
-				Logger::Log("UNOFFICIAL RT path trace: PTViewModel: of 4096 sample texels %d are the first-person model lit by the path tracer, %d keep the game's pixel (no capture there), %d people; FOV scale %.3f, near %.2f",
+				// (2026-11-11 PTScreenOwn) what a tester's log shows: some marked texels where hair or a head stands before a wall; most of the
+				// screen marked = the distance test is wrong for this setup (send the line; PTScreenOwn = false is the old behaviour)
+				if (own) Logger::Log("UNOFFICIAL RT path trace: PTScreenOwn: of 4096 sample texels %d world + %d skin are marked (their colour / material buffers hold another surface: hair, a head or one of the game's own shaders in front of it; skin without the skin blur's colour), %d more lie within the tessellation's reach (%.1f units) before their captured surface (kept as the screen's unless hair or skin is traced there); skin colour this frame: %s; render rect %ux%u of %ux%u",
+					ownWorld, ownPeople, ownMaybe, reach, skinAlbedo ? "the skin blur's target, per pixel" : "none (no skin draw bound the skin blur: every skin pixel is marked)", tw ? tw : w, th ? th : h, w, h);
+				// (2026-11-12 PTWaterMask) what a tester's log shows with water in view: some texels kept; none = the mask holds no water this frame
+				if (water) Logger::Log("UNOFFICIAL RT path trace: PTWaterMask: of 4096 sample texels %d keep the game's own pixel (water the game drew this frame%s); mask uv scale %.3f %.3f",
+					kept, viewModel ? ", and the first-person model's pixels without a capture" : "", c[9][1], c[9][2]);
+				if (viewModel) Logger::Log("UNOFFICIAL RT path trace: PTViewModel: of 4096 sample texels %d are the first-person model lit by the path tracer, %d keep the game's pixel (no capture there), %d people; FOV scale %.3f, near %.2f",
 					lit, kept, people, s, nearVm);
 			}
 		}
@@ -865,6 +935,14 @@ namespace {
 		// UNOFFICIAL 2026-11-10 early kick: recorded before the world is drawn, the G-buffer (and the view model's, the frame copy) would be
 		// last frame's at this frame's camera: traced first surface instead, as PTPrimary false (the player's setting stays as it is)
 		const bool primary = S.primary && !earlyRecording;
+		// UNOFFICIAL 2026-11-12 (docs/next/PT-COMPAT-AUDIT-2026-11-12.md items 14, 16): said once, not refused. With the game's MSAA the resolved
+		// material / colour buffers hold AVERAGES of class codes and flags at edges (material rims, dark outlines), and the first-person
+		// model is not captured (it stays the game's raster pixel), as at a RenderScale below 1.
+		if (primary) {
+			static bool toldMsaa = false, toldRect = false;
+			if (!toldMsaa && (CapturedNormals::AlbedoMsaa || CapturedNormals::MsaaSurface)) { toldMsaa = true; Logger::Log("[WARNING] RT path trace: the game's MSAA is on (iMultiSample). Path tracing reads the screen's material buffers, which MSAA averages at edges: expect thin wrong-material outlines, and your first-person arms and gun stay raster-lit. Turn the game's MSAA off and use TAA / DLSS with path tracing."); }
+			if (!toldRect && RenderRect::On) { toldRect = true; Logger::Log("UNOFFICIAL RT path trace: RenderScale is below 1: the first-person arms and gun are not path traced at a reduced render size (they keep the game's own lighting)."); }
+		}
 		const D3DXVECTOR4* albedoData = constant("TESR_AlbedoBufferData");
 		IDirect3DBaseTexture9* gDepth = texture("TESR_DepthBuffer");
 		IDirect3DBaseTexture9* gNormals = texture("TESR_NormalsBuffer");
@@ -875,9 +953,22 @@ namespace {
 		// (with PTDenoise only: the reference's running mean would smear a model that sways while the camera is still)
 		const bool fullRect = tw == w && th == h;
 		vmThisFrame = false;
-		if (primary && S.viewModel && S.denoise && fullRect && gNormals && CapturedNormals::VmFrame == TheFrameRateManager->FrameNumber && albedoData && albedoData->x > 0.5f)
-			vmThisFrame = ViewModelPrep(Device, gNormals, w, h);
-		IDirect3DBaseTexture9* normalsIn = vmThisFrame ? (IDirect3DBaseTexture9*)vmNormals : gNormals;
+		// UNOFFICIAL 2026-11-11 PTScreenOwn: the same pass in every PTPrimary frame (also third person, without the denoiser, at RenderScale
+		// below 1): it marks the pixels whose AlbedoBuffer / MaterialBuffer values are another surface's (hair, a head, the game's own shaders
+		// in front of a captured wall; skin without the skin blur's colour: core/RtViewModel.h), read by the trace's ScreenHit
+		const bool vmWant = primary && S.viewModel && S.denoise && fullRect && CapturedNormals::VmFrame == TheFrameRateManager->FrameNumber;
+		const D3DXVECTOR4* capturedData = constant("TESR_CapturedNormalsData");
+		const bool ownWant = primary && S.screenOwn && capturedData && capturedData->x > 0.5f;
+		// UNOFFICIAL 2026-11-12 PTWaterMask (core/WaterMask.h): the world scenes of the next frames redraw their water into a mask while a
+		// PTPrimary frame asks for it here; the prep pass (run for it alone too, when this frame's world drew water) codes those pixels -1
+		const bool waterWant = primary && WaterMask::Enabled;
+		if (waterWant) WaterMask::Request(TheFrameRateManager->FrameNumber);
+		bool prepped = false;
+		if ((vmWant || ownWant || (waterWant && WaterMask::WrittenFrame == TheFrameRateManager->FrameNumber)) && gNormals && albedoData && albedoData->x > 0.5f) {
+			prepped = ViewModelPrep(Device, gNormals, w, h, vmWant, ownWant, tw, th, c.rect[0], c.rect[1]);
+			vmThisFrame = prepped && vmWant;
+		}
+		IDirect3DBaseTexture9* normalsIn = prepped ? (IDirect3DBaseTexture9*)vmNormals : gNormals;
 		if (primary && imageDepth >= 0 && imageNormals >= 0 && imageAlbedo >= 0 && c.forward[3] > 0.0f && albedoData && albedoData->x > 0.5f &&
 			gDepth && normalsIn && gAlbedo && RtCore::CopyIn(imageDepth, gDepth) && RtCore::CopyIn(imageNormals, normalsIn) && RtCore::CopyIn(imageAlbedo, gAlbedo))
 			flags |= 8u;
@@ -1010,6 +1101,7 @@ namespace {
 						const FlashlightEffect* fe = TheShaderManager->Effects.Flashlight;
 						const bool flashLamp = fe && row[30] > 0.5f;
 						row[62] = flashLamp ? fe->Settings.NearFade : 0.0f; row[63] = flashLamp ? fe->Settings.HotspotLimit : 0.0f;
+						row[31] = flashLamp ? fe->Deferred.Cookie : 0.0f;	// texel 15.y (2026-11-11): the lens pattern's strength (RtPathTrace.comp FlashCookie)
 						row[2 * kEarlyLookTexel + 1] = flashLamp ? fe->Deferred.Falloff : 0.0f;	// texel 288.y (was 0, reserved; written above, unread): the beam's Deferred Falloff, HotspotLimit's shape
 					}
 					RtTessContact::PackRow(row, slack, contact);	// (2026-11-07 rtgap-tess) texels 16-21
@@ -1019,7 +1111,7 @@ namespace {
 						keys.mirrorSurface = (flags & 4194304u) && S.denoise && !rrDenoising ? S.denoiseMirrorSurface : 0.0f;
 						RtMaterials::PackRow(row, keys);
 						// UNOFFICIAL 2026-11-11 PTGlassSurface (RtPathTrace.comp gGlassSurface): a pane's own lit share. Written every frame (the lock discards)
-						row[2 * kGlassSurfaceTexel] = S.glassSurface; row[2 * kGlassSurfaceTexel + 1] = 0.0f;
+						row[2 * kGlassSurfaceTexel] = S.glassSurface;	// (289.y: PTEmissive's weight floor, written below with the emissive row)
 					}
 					row[54] = S.bounceRoughen; row[55] = S.cacheShort; row[60] = (S.hairFirst && !S.blendedLayer ? 1.0f : 0.0f) + (S.hairFirst ? 2.0f : 0.0f);	/* (not with PTBlendedLayer: the game's own hair comes over) */ row[61] = (float)S.rouletteFrom;	/* texel 30.y: 2026-11-10 PTRouletteFrom */	// UNOFFICIAL 2026-11-09 PTBounceRoughen: texel 27 (RtPathTrace.comp LoadBounceRoughen); y: 2026-11-10 PTCacheShort
 					{	// (2026-11-07 perf-ptcost) texels 28-29: the ray budget keys + whether this frame's scene holds the hidden first-person body
@@ -1049,6 +1141,44 @@ namespace {
 						for (const RtEmissiveRow::Mark& m : marks) RtCore::MarkEmissive(m.record, m.number);
 					}
 					else emissiveState = RtEmissiveRow::State();
+					{	// UNOFFICIAL 2026-11-11 (pt-emissive-cost) PTEmissive's cost keys, texels 289.y-291.x (RtPathTrace.comp LoadEmCostKeys). The floor in
+						// EmWeight's units (an instance's power x cos / d^2; x PTGlow / pi = the light it gives a matte surface, in the units of the
+						// sun's colour): base = PTEmissiveFloor + PTEmissiveCut x the sky's luminance (outdoors), sun = PTEmissiveCut x the sun's
+						// (while it is up; the trace multiplies it by the surface's cosine to the sun). Written every frame (the lock discards).
+						const float skyLuma = c.skyZenith[3] > 0.5f ? 0.5f * (0.2126f * (c.skyZenith[0] + c.skyHorizon[0]) + 0.7152f * (c.skyZenith[1] + c.skyHorizon[1]) + 0.0722f * (c.skyZenith[2] + c.skyHorizon[2])) : 0.0f;
+						const float sunLuma = c.sunDir[3] > 0.5f ? 0.2126f * c.sunColor[0] + 0.7152f * c.sunColor[1] + 0.0722f * c.sunColor[2] : 0.0f;
+						RtEmissiveRow::CostKeys costKeys;
+						costKeys.cut = S.emissiveCut; costKeys.floor = S.emissiveFloor; costKeys.hits = (float)S.emissiveHits; costKeys.roulette = S.emissiveRoulette;
+						emissiveFloorBase = RtEmissiveRow::PackCost(row, costKeys, skyLuma, sunLuma, S.glow, emissiveCount > 0);	// (RtEmissiveRow.h, shared with tools/nvr-rt-host)
+						// UNOFFICIAL 2026-11-12 PTAlbedoGamma (audit item 6): texel 291.y = the exponent that turns the AlbedoBuffer's texture^G (G = [Shaders.PBR.Linear]
+						// Gamma as the templates' LinColor uses it this frame, 1 with Linear off) into the texture^2.2 the trace works in; 0 = none (G is 2.2, or the key off)
+						{
+							const float g = TheShaderManager->Shaders.PBR ? (std::max)(TheShaderManager->Shaders.PBR->Constants.Linear.x, 1.0f) : 1.0f;
+							const float e = 2.2f / g;
+							row[2 * (kEmCostTexel + 2) + 1] = S.albedoGamma && fabsf(e - 1.0f) > 0.002f ? e : 0.0f;
+							static_assert(kEmCostTexel + 3 < kLightTexels, "PTScreenOwnNarrow: frame row texel 292");
+							row[2 * (kEmCostTexel + 3)] = S.screenOwn && S.screenOwnNarrow ? 1.0f : 0.0f;	// UNOFFICIAL 2026-11-12 PTScreenOwnNarrow (RtPathTrace.comp gOwnNarrow), 292.y free
+							row[2 * (kEmCostTexel + 3) + 1] = S.hairOverSky ? 1.0f : 0.0f;	// UNOFFICIAL 2026-11-12 PTHairOverSky (RtPathTrace.comp gHairSky); the next free texel: 293
+							static_assert(kEmCostTexel + 4 < kLightTexels, "PTGlowTexel: frame row texel 293");
+							row[2 * (kEmCostTexel + 4)] = S.glowTexel;	// UNOFFICIAL 2026-11-12 PTGlowTexel (RtPathTrace.comp gGlowTexel); 293.y free
+							static float toldGamma = -1.0f;
+							if (toldGamma != g) { toldGamma = g; Logger::Log("UNOFFICIAL RT path trace: PTAlbedoGamma %s: the scene's linear gamma is %.2f, the screen's surface colours are read ^%.3f", S.albedoGamma ? "on" : "off", g, S.albedoGamma ? e : 1.0f); }
+						}
+						// the frame's decision, logged when it changes (indoors <-> outdoors, the sun up <-> down, a key, emissive instances or none)
+						static float told[6] = { -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f };
+						static int toldLines = 0;
+						const float now[6] = { c.skyZenith[3], c.sunDir[3], S.emissiveCut, S.emissiveFloor, (float)S.emissiveHits + 100.0f * S.emissiveRoulette, emissiveCount > 0 ? 1.0f : 0.0f };
+						const bool keysOn = S.emissiveCut > 0.0f || S.emissiveFloor > 0.0f || S.emissiveHits > 0 || S.emissiveRoulette > 0.0f;
+						if (emissiveWanted && keysOn && memcmp(told, now, sizeof(now)) != 0 && toldLines < 48) {
+							memcpy(told, now, sizeof(now));
+							toldLines++;
+							Logger::Log("UNOFFICIAL RT path trace: PTEmissive this frame (%s, sun %s): %d emissive instances listed of %d glowing meshes; an instance is light-sampled at a "
+								"surface only where its estimated light is at least %.5f + %.5f x the surface's cosine to the sun (PTEmissiveFloor %.4g + PTEmissiveCut %.3g x sky %.4f / sun %.4f; "
+								"under it the bounce rays carry its glow), PTEmissiveHits %d, PTEmissiveRoulette %.3g.", c.skyZenith[3] > 0.5f ? "outdoors" : "indoors", c.sunDir[3] > 0.5f ? "up" : "down",
+								emissiveCount, (int)RtCore::GlowLights().size(), S.emissiveFloor + S.emissiveCut * skyLuma, S.emissiveCut * sunLuma, S.emissiveFloor, S.emissiveCut, skyLuma, sunLuma,
+								S.emissiveHits, S.emissiveRoulette);
+						}
+					}
 					row[2 * RtEmissiveRow::kFrameTexel] = (float)emissiveCount;
 					row[2 * RtEmissiveRow::kFrameTexel + 1] = (float)(EmissiveBaseWords(w, h, cacheLog2Setup) / 4096ull);
 				}
@@ -1107,7 +1237,7 @@ namespace {
 		else {
 			giHistory = false;
 			if (emissiveCount > 0 && (flags & 1024u)) {	// (2026-11-07 ptaaa-emissive) PTEmissive's list, before the trace
-				const EmissiveConstants ec = { { (float)emissiveCount, (float)(EmissiveBaseWords(w, h, cacheLog2Setup) / 4096ull), 0.0f, 0.0f } };
+				const EmissiveConstants ec = { { (float)emissiveCount, (float)(EmissiveBaseWords(w, h, cacheLog2Setup) / 4096ull), emissiveFloorBase, 0.0f } };	// (z: 2026-11-11 pt-emissive-cost)
 				const int emImages[2] = { imageLamps, glowAtlas };
 				// (2026-11-07 ptaaa-hangfix) the lamp image already went in with the count (texel 22): when the build pass is not added, flag
 				// 8388608 tells the trace the list was not rebuilt this frame (RtPathTrace.comp LoadScratchLayout: no emissive light), so it
@@ -1524,6 +1654,39 @@ namespace RtPathTrace {
 	}
 
 	bool Replacing() { return S.enabled && S.replace && haveImage && RtCore::Running(); }
+	// UNOFFICIAL 2026-11-12 PTOwnShadows (docs/next/PT-COMPAT-AUDIT-2026-11-12.md item 3). The path traced picture has its own sun and lamp
+	// shadows, but the chain's deferred shadow apply (ShadowsExteriors.fx Shadow, the interior darkening; also folded into the fog composite,
+	// the AO pair and AmbientLight) still ran over it: contact-shadow rims twice, with RT sun shadows on the sun's shadows twice as dark and
+	// sky-tinted, rooms darkened twice. Every one of those paths reads TESR_PointShadowBuffer (r the sun's term, g the lamps' light), so one
+	// small pass after the shadow passes writes "fully lit" (1, 1: both applies' identity) into it where the trace has a first surface
+	// (FirstSurface's a >= 0.5). The game's own pixels in the traced picture (sky, far land, grass, leaves, the first-person model the show
+	// pass kept) keep their shadows, and the cloud / far-land factor (SunFar) is not touched.
+	void MaskShadowBuffer(IDirect3DDevice9* Device, IDirect3DSurface9* shadowSurface) {
+		static IDirect3DPixelShader9* ps = nullptr; static bool failed = false, told = false;
+		if (!S.ownShadows || !Replacing() || !S.denoise || !albedoThisFrame || !albedoTexture || S.debugView != 0 || !shadowSurface || failed) return;
+		IDirect3DTexture9* first = FirstSurface();
+		D3DSURFACE_DESC a = {}, b = {};
+		if (!first || FAILED(first->GetLevelDesc(0, &a)) || FAILED(shadowSurface->GetDesc(&b)) || a.Width != b.Width || a.Height != b.Height) return;
+		if (!ps) {
+			ps = CapturedNormals::FullScreenShader(Device,
+				"sampler2D A : register(s0); sampler2D M : register(s1); float4 K : register(c0);"
+				"float4 main(float2 uv : TEXCOORD0) : COLOR0 {"
+				"  clip(tex2D(A, uv).a - 0.5);"
+				"  float vm = tex2D(M, uv).x;"
+				"  if (K.x > 0.5 && (K.x > 1.5 ? vm > 0.01 : vm < 0.9)) clip(-1.0);"
+				"  return float4(1.0, 1.0, 1.0, 1.0); }", "RT path trace own shadows", failed);
+			if (!ps) return;
+		}
+		// the first-person model's pixels where the show pass kept the game's own (Show: keepViewModel): they keep the game's shadows too
+		IDirect3DTexture9* viewModel = TheTextureManager->DepthTextureViewModel;
+		const float keep = viewModel && !vmThisFrame ? (TheRenderManager->DepthConstants.z == 0.0f ? 1.0f : 2.0f) : 0.0f;
+		float saved[4] = {}; const float k[4] = { keep, 0.0f, 0.0f, 0.0f };
+		Device->GetPixelShaderConstantF(0, saved, 1);
+		Device->SetPixelShaderConstantF(0, k, 1);
+		CapturedNormals::FullScreenPass(Device, shadowSurface, ps, first, false, D3DBLEND_ONE, D3DBLEND_ZERO, viewModel ? (IDirect3DBaseTexture9*)viewModel : (IDirect3DBaseTexture9*)first);
+		Device->SetPixelShaderConstantF(0, saved, 1);
+		if (!told) { told = true; Logger::Log("UNOFFICIAL RT path trace: PTOwnShadows on: the game's deferred sun / lamp shadow apply skips the traced pixels (the shadow buffer reads lit there)"); }
+	}
 
 	// UNOFFICIAL 2026-11-07 (ptaaa-denoiser) DLSS RR's guides from the path tracer (RtPathTrace.h)
 	bool RrGuides(IDirect3DTexture9** Albedo, IDirect3DTexture9** SpecularRG, IDirect3DTexture9** SpecularBRough) {

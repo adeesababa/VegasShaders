@@ -121,7 +121,20 @@ float4 main(PS_IN IN, out float depth : DEPTH) : COLOR0 {
 
     float2 mapUV;
     const float shadow = FLShadow(position, dist / FL_Pos.w, mapUV);
-    const float cookie = lerp(1.0f, tex2Dlod(FL_Cookie, float4(mapUV, 0.0f, 0.0f)).r * 2.0f, FL_Look.x);
+    // UNOFFICIAL 2026-11-11 (BUG FIX, a tester: "Cookie just brightens and darkens the light ... at 1 it is invisible"). Two faults: stage 7
+    // held no texture (FlashlightDeferred::CookieTexture loads it now; no file = FL_Look.x 0), and the cookie was read at the shadow map's
+    // uv, which is only right while the map is drawn (Shadows off, or a frame without it: an old or empty matrix, the whole beam one texel).
+    // Its uv from the cone itself now, the same frame the map has (ShadowManager::RenderShadowSpotlight: LookAtRH with Z up, a square FOV of
+    // twice the cone's half-angle), so the pattern's rim (r = 1) is the cone's outer edge and it follows Angle with or without shadows.
+    float cookie = 1.0f;
+    [branch] if (FL_Look.x > 0.0f) {
+        float3 side = cross(float3(0.0f, 0.0f, 1.0f), -FL_Dir.xyz);
+        side /= max(length(side), 1.0e-4f);
+        const float3 upAxis = cross(-FL_Dir.xyz, side);
+        const float invTan = FL_Dir.w / sqrt(max(1.0f - FL_Dir.w * FL_Dir.w, 1.0e-6f));   // 1 / tan(half-angle)
+        const float2 cookieUV = float2(dot(-toLight, side), -dot(-toLight, upAxis)) * (invTan / max(dot(-toLight, FL_Dir.xyz), 1.0e-3f)) * 0.5f + 0.5f;
+        cookie = lerp(1.0f, tex2Dlod(FL_Cookie, float4(cookieUV, 0.0f, 0.0f)).r * 2.0f, saturate(FL_Look.x));
+    }
 
     const float3 N = ShadowDecodeNormal(stored.rg);
     const float4 m = tex2Dlod(FL_Material, uv4);
