@@ -39,6 +39,10 @@ namespace {
 		float	leafTransmission = 0.0f;	// the share of the sunlight a covered leaf lets through (0: leaves are solid)
 		bool	leafSoftEdges = false;		// plants' alpha test hashed at every mip, a new hash each frame (soft leaf edges after the denoiser)
 		int		debugView = 0;			// 1 RT only, 2 traced not applied, 3 hit distance, 4 the raw visibility over the picture, 5 state codes, 6 primary rays (4-6: grey over the picture)
+		// UNOFFICIAL 2026-11-13 ForwardLookup (RtSunShadows.h): Mode 1 through the shaders' own sun lookup; ForwardDepthTolerance: how close
+		// (share of the view depth) a point must be to what last frame's trace saw at its place to take the traced visibility
+		bool	forwardLookup = true;
+		float	forwardTolerance = 0.02f;
 	} S;
 
 	// The trace pass's uniform block (RtSunShadow.comp, std140)
@@ -88,6 +92,28 @@ namespace {
 	bool		combineTried[3] = {};
 	bool		tracedForDebug = false;		// this frame's visibility is there for RenderDebug
 
+	// UNOFFICIAL 2026-11-13 ForwardLookup (RtSunShadows.h). forwardTexture: TESR_RtSunForward, G16R16F at the screen's size (red the
+	// visibility, green the view depth in units), made once; the camera a frame was traced with (Record: pending; Apply's pack: traced);
+	// the four constants the shaders read (UpdateForward).
+	bool		forwardCompiled = false;
+	char		forwardWhy[200] = "not checked yet";
+	IDirect3DTexture9*	forwardTexture = nullptr;
+	IDirect3DSurface9*	forwardSurface = nullptr;
+	struct ForwardCamera { D3DXMATRIX view; D3DXVECTOR3 location; float p11, p22, sx, sy, jx, jy; bool valid; UInt32 frame; };
+	ForwardCamera forwardPending = {}, forwardTraced = {};
+	bool		forwardThisFrame = false;		// this frame's Record traced for the lookup (Apply packs instead of multiplying)
+	D3DXVECTOR4	forwardConstants[4] = {};		// TESR_RtSunRowX, RowY, RowW, TESR_RtSunData
+	ID3D9NvrExtPipeline* forwardPipeline = nullptr;
+	bool		forwardTried = false;
+	UInt32		forwardPacks = 0, forwardReads = 0;	// frames packed / frames the constants were live (the log, StatusText)
+
+	bool ForwardShadowsSetting() {
+		ShadowsExteriorEffect* shadows = TheShaderManager->Effects.ShadowsExteriors;
+		return shadows && shadows->Settings.Exteriors.ForwardShadows;
+	}
+	// Mode 1 the old way (the forward lookups off, the deferred apply): the key off, or no forward lookups to carry the traced shadow
+	bool OldReplace() { return !S.forwardLookup || !ForwardShadowsSetting(); }
+
 	void ReadSettings() {
 		S.enabled = TheSettingManager->GetSettingI(kSection, "Enabled") != 0;
 		S.mode = TheSettingManager->GetSettingI(kSection, "Mode");
@@ -116,6 +142,9 @@ namespace {
 		// UNOFFICIAL 2026-11-12 LeafTransmission / LeafSoftEdges (a missing key reads 0: off)
 		S.leafTransmission = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "LeafTransmission"), 0.0f), 1.0f);
 		S.leafSoftEdges = TheSettingManager->GetSettingI(kSection, "LeafSoftEdges") != 0;
+		// UNOFFICIAL 2026-11-13 ForwardLookup
+		S.forwardLookup = TheSettingManager->GetSettingI(kSection, "ForwardLookup") != 0;
+		S.forwardTolerance = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "ForwardDepthTolerance"), 0.002f), 0.2f);
 	}
 
 	const D3DXVECTOR4* Constant(const char* name) {
@@ -161,6 +190,8 @@ namespace {
 
 	void Record(IDirect3DDevice9* Device) {
 		tracedThisFrame = false;
+		forwardThisFrame = false;
+		const bool forward = RtSunShadows::ForwardActive();	// UNOFFICIAL 2026-11-13 ForwardLookup
 		if (imageDepth < 0 || imageNormals < 0 || imageVisibility < 0 || shader < 0) return;
 		const UINT fw = TheRenderManager->width, fh = TheRenderManager->height;
 		const UINT scale = S.halfResolution ? 2u : 1u;
@@ -218,7 +249,8 @@ namespace {
 		c.origin[0] = eye.x; c.origin[1] = eye.y; c.origin[2] = eye.z;
 		const D3DXVECTOR4& sun = shadows->Constants.SmoothedSunDir;	// toward the sun, as the cascades use it
 		c.sun[0] = sun.x; c.sun[1] = sun.y; c.sun[2] = sun.z;
-		c.sun[3] = shadows->Constants.ShadowFade.x < 1.0f ? 1.0f : 0.0f;
+		// (2026-11-13 ForwardLookup: 2 = faces turned from the sun are traced too; the shaders light with the normal-mapped normal)
+		c.sun[3] = shadows->Constants.ShadowFade.x < 1.0f ? (forward ? 2.0f : 1.0f) : 0.0f;
 		c.bias[0] = S.normalBias; c.bias[1] = S.normalBiasPerUnit; c.bias[2] = S.startBias; c.bias[3] = S.rayLength;
 		c.alpha[0] = RtCore::AlphaTested() ? 1.0f : 0.0f;
 		c.alpha[1] = (float)(frames & 1023);								// the jitter's frame
@@ -234,7 +266,9 @@ namespace {
 			float v[3]; DxvkCompute::DisplaceRtSlack(v);
 			RtTessContact::Slack slack; slack.strength = v[0]; slack.fadeStart = v[1]; slack.fadeEnd = v[2];
 			RtTessContact::SlackVec(slack, c.slack);
-			RtTessContact::Contact contact = RtTessContact::Make(S.mode == 1 ? S.contact : 0.0f, S.contactLength);
+			// (2026-11-13: not while Mode 1 runs as Mode 0 because the lookup is not in the shaders: the cascades and raster contact shadows stay)
+			const bool asCombine = S.mode == 1 && !OldReplace() && !forwardCompiled;
+			RtTessContact::Contact contact = RtTessContact::Make(S.mode == 1 && !asCombine ? S.contact : 0.0f, S.contactLength);
 			if (contact.strength > 0.0f && shadows->Constants.ScreenSpaceData.x > 0.0f) {
 				const D3DXVECTOR4* fade = Constant("TESR_ShadowScreenSpaceFade");
 				if (fade && fade->y > 0.0f) RtTessContact::GateBy(contact, fade->x, fade->y);
@@ -259,7 +293,9 @@ namespace {
 				clouds ? clouds->ShadowStrengthForSunFar() : 0.0f, TheRenderManager->CameraPosition.x / 70.0f, TheRenderManager->CameraPosition.y / 70.0f,
 				TheRenderManager->CameraPosition.z / 70.0f);
 		}
-		if (S.cloudShadows && imageCloud >= 0 && clouds && clouds->rtMapValid && clouds->Textures.ShadowTexture && TheShaderManager->GameState.isExterior &&
+		// (2026-11-13 ForwardLookup: not in the visibility the shaders' lookup reads; the clouds' shadow reaches those pixels through its own
+		// passes, forward or SunFar, as without RT, and CloudsApplied stays false)
+		if (S.cloudShadows && !forward && imageCloud >= 0 && clouds && clouds->rtMapValid && clouds->Textures.ShadowTexture && TheShaderManager->GameState.isExterior &&
 			clouds->shadowMapSize == imageCloudSize && S.debugView != 7 && S.debugView != 8) {
 			const float strength = clouds->ShadowStrengthForSunFar();
 			if (strength > 0.0f && RtCore::CopyIn(imageCloud, clouds->Textures.ShadowTexture)) {
@@ -350,6 +386,16 @@ namespace {
 			else denoiseView.valid = false;
 		}
 		tracedThisFrame = RtCore::CopyOut(imageVisibility, visibilitySurface, tw, th);
+		// UNOFFICIAL 2026-11-13 ForwardLookup: the camera this frame is traced with, for the next frame's lookups (Apply's pack keeps it)
+		if (tracedThisFrame && forward) {
+			forwardThisFrame = true;
+			forwardPending.view = view;
+			forwardPending.location = D3DXVECTOR3(TheRenderManager->CameraPosition.x, TheRenderManager->CameraPosition.y, TheRenderManager->CameraPosition.z);
+			forwardPending.p11 = proj._11; forwardPending.p22 = proj._22;
+			forwardPending.sx = (float)rw / (float)fw; forwardPending.sy = (float)rh / (float)fh;	// the frame's part of the screen-size textures
+			forwardPending.jx = c.full[2]; forwardPending.jy = c.full[3];						// the depth's jitter (screen uv)
+			forwardPending.valid = true;
+		}
 		static int rectLogs = 0;
 		if (tracedThisFrame && RenderRect::On && rectLogs < 2) {
 			rectLogs++;
@@ -496,6 +542,76 @@ namespace {
 		}
 		return combine[which];
 	}
+
+	// UNOFFICIAL 2026-11-13 ForwardLookup: RtSunForward.frag (two sampled images, two samplers; push 16 bytes, the samplers' heap indices
+	// at 4 and 8), no blending, red and green written
+	ID3D9NvrExtPipeline* ForwardPipeline() {
+		if (forwardTried) return forwardPipeline;
+		forwardTried = true;
+		std::vector<char> spirv;
+		ID3D9NvrExt* ext = DxvkCompute::Extension();
+		if (!ext || !DxvkCompute::LoadSpirv("RtSunForward", spirv)) return nullptr;
+		NVR_EXT_BINDING_DESC bindings[4] = {
+			{ 1, 0, NVR_EXT_BIND_SAMPLED_IMAGE, 0, NVR_EXT_VIEW_2D, FALSE, 0 },
+			{ 1, 1, NVR_EXT_BIND_SAMPLED_IMAGE, 1, NVR_EXT_VIEW_2D, FALSE, 0 },
+			{ 0, 0, NVR_EXT_BIND_SAMPLER, 0, NVR_EXT_VIEW_2D, FALSE, 4 },
+			{ 0, 0, NVR_EXT_BIND_SAMPLER, 1, NVR_EXT_VIEW_2D, FALSE, 8 },
+		};
+		NVR_EXT_GRAPHICS_PIPELINE_DESC desc = {};
+		desc.pFragmentSpirv = spirv.data();
+		desc.FragmentSpirvSize = (UINT)spirv.size();
+		desc.BindingCount = 4;
+		desc.pBindings = bindings;
+		desc.PushConstantSize = 16;
+		desc.UsesSamplerHeap = TRUE;
+		desc.SamplerHeapSet = 0;
+		desc.SamplerHeapBinding = 0;
+		desc.ColorTargetCount = 1;
+		desc.Blend = NVR_EXT_BLEND_NONE;
+		desc.ColorWriteMask = 0x3u;
+		desc.pDebugName = "RtSunForward (pack)";
+		if (FAILED(ext->CreateGraphicsPipeline(&desc, &forwardPipeline))) {
+			forwardPipeline = nullptr;
+			Logger::Log("[WARNING] UNOFFICIAL Vegas Shaders DXVK: RT sun shadows ForwardLookup: the pack pass could not be made (Compute\\RtSunForward.spv; the DXVK log says why): the shadow maps alone");
+		}
+		return forwardPipeline;
+	}
+
+	// The traced visibility (Source: what Apply would have multiplied in) and the frame's view depth into TESR_RtSunForward. False: not drawn.
+	bool PackForward(IDirect3DDevice9* Device, IDirect3DTexture9* Source) {
+		IDirect3DBaseTexture9* depth = Texture("TESR_DepthBuffer");
+		const D3DXVECTOR4* cameraData = Constant("TESR_CameraData");
+		ID3D9NvrExtPipeline* pipeline = ForwardPipeline();
+		ID3D9NvrExtSampler* point = DxvkCompute::PointClamp();
+		ID3D9NvrExtSampler* linear = DxvkCompute::LinearClamp();
+		if (!forwardSurface || !forwardTexture || !Source || !depth || !cameraData || !pipeline || !point || !linear) return false;
+		static GpuTimer timer("  RT sun shadows pack (ForwardLookup)");
+		GpuProfileScope gpu(timer, Device);
+		// The world's draws left the texture on a sampler stage (s15, the land s13): off the device before it is drawn into
+		for (DWORD stage = 0; stage < 16; stage++) {
+			IDirect3DBaseTexture9* bound = nullptr;
+			if (SUCCEEDED(Device->GetTexture(stage, &bound)) && bound) {
+				const bool ours = bound == forwardTexture;
+				bound->Release();
+				if (ours) { Device->SetTexture(stage, nullptr); TheRenderManager->renderState->NoteDeviceTexture(stage, nullptr); }
+			}
+		}
+		struct { float farZ; UInt32 visibilitySampler, depthSampler, pad; } push = { cameraData->y, 0, 0, 0 };
+		NVR_EXT_RESOURCE_BINDING bindings[4] = {};
+		bindings[0].Slot = 0; bindings[0].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[0].pResource = Source;
+		bindings[1].Slot = 1; bindings[1].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[1].pResource = depth;
+		bindings[2].Slot = 0; bindings[2].Type = NVR_EXT_BIND_SAMPLER; bindings[2].pResource = S.halfResolution ? linear : point;	// half: bilinear up
+		bindings[3].Slot = 1; bindings[3].Type = NVR_EXT_BIND_SAMPLER; bindings[3].pResource = point;
+		NVR_EXT_DRAW_DESC draw = {};
+		draw.pPipeline = pipeline;
+		draw.TargetCount = 1;
+		draw.Targets[0].pResource = forwardSurface;
+		draw.BindingCount = 4;
+		draw.pBindings = bindings;
+		draw.pPushData = &push;
+		draw.PushDataSize = sizeof(push);
+		return SUCCEEDED(DxvkCompute::Extension()->Draw(&draw));
+	}
 }
 
 namespace RtSunShadows {
@@ -539,6 +655,21 @@ namespace RtSunShadows {
 				if (penumbra && RunPenumbra(Device, denoisedTexture)) signalTexture = penumbraTexture;
 			}
 		}
+		// UNOFFICIAL 2026-11-13 ForwardLookup: the visibility goes to the next frame's sun lookups (packed with this frame's depth), not into
+		// the sun shadow buffer: the deferred apply would darken those pixels a second time, and their ambient and lamp light with it
+		const bool forward = forwardThisFrame;
+		forwardThisFrame = false;
+		if (forward) {
+			if (traced && signalTexture && PackForward(Device, signalTexture)) {
+				forwardTraced = forwardPending;
+				forwardTraced.frame = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
+				if (forwardPacks++ == 0)
+					Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT sun shadows Mode 1 through the shaders' own sun lookup (ForwardLookup): the traced visibility + depth packed "
+						"for the next frame's draws (%.0f%% x %.0f%% of %ux%u, depth tolerance %.3f); the deferred apply keeps the contact shadows only.",
+						100.0f * forwardTraced.sx, 100.0f * forwardTraced.sy, TheRenderManager->width, TheRenderManager->height, S.forwardTolerance);
+			}
+			return;
+		}
 		if (!traced || S.debugView == 2 || S.debugView >= 4 || !signalTexture) return;
 		ShadowsExteriorEffect* shadows = TheShaderManager->Effects.ShadowsExteriors;
 		IDirect3DSurface9* target = shadows->Textures.ShadowPassSurface;
@@ -579,7 +710,7 @@ namespace RtSunShadows {
 		if (hitIndoors) tracedThisFrame = false;
 		const bool traced = tracedForDebug || hitIndoors;
 		tracedForDebug = false;
-		if (!traced || S.debugView < 4 || (!signalTexture && !hitIndoors) || !RenderTarget) return;
+		if (!traced || S.debugView < 4 || S.debugView == 15 || (!signalTexture && !hitIndoors) || !RenderTarget) return;	// (15: the lookup's coverage view, drawn by the shaders)
 		IDirect3DTexture9* backbone = S.debugView == 13 || S.debugView == 14 ? RtDenoise::Backbone() : nullptr;	// 2026-10-31 DenoiseBackbone
 		if ((S.debugView == 13 || S.debugView == 14) && !backbone) return;
 		ID3D9NvrExtPipeline* pipeline = CombinePipeline(2);
@@ -609,7 +740,81 @@ namespace RtSunShadows {
 
 	bool CloudsApplied() { return cloudsAppliedFrame == TheFrameRateManager->FrameNumber + 1; }
 
-	bool Replacing() { return S.enabled && S.mode == 1 && S.debugView != 2 && S.debugView < 4 && RtCore::Running() && TheShaderManager->GameState.isExterior; }
+	// (2026-11-13: the old Mode 1 only with ForwardLookup off or without forward lookups; see ForwardActive)
+	bool Replacing() { return S.enabled && S.mode == 1 && S.debugView != 2 && S.debugView < 4 && RtCore::Running() && TheShaderManager->GameState.isExterior && OldReplace(); }
+
+	// UNOFFICIAL 2026-11-13 ForwardLookup (RtSunShadows.h)
+	void Initialize() {
+		forwardCompiled = false;
+		const bool enabled = TheSettingManager->GetSettingI(kSection, "Enabled") != 0;
+		ID3D9NvrExtRt* rt = nullptr;
+		ID3D9NvrExt* ext = DxvkCompute::Extension();
+		if (!enabled) strcpy_s(forwardWhy, "off: RT sun shadows were off at startup (the lookup is compiled into the shaders at startup)");
+		else if (!TheSettingManager->GetSettingI(kSection, "ForwardLookup")) strcpy_s(forwardWhy, "off (ForwardLookup false): Mode 1 the old way, through the deferred apply");
+		else if (!TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.Main", "ForwardShadows"))
+			strcpy_s(forwardWhy, "off: [Shaders.ShadowsExteriors.Main] ForwardShadows is off (no sun lookup in the shaders): Mode 1 the old way");
+		else if (TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.SunSmoothing", "CrossFade"))
+			strcpy_s(forwardWhy, "off: [Shaders.ShadowsExteriors.SunSmoothing] CrossFade is on (its constants sit where the lookup's do): Mode 1 runs as Mode 0");
+		else if (!ext || FAILED(ext->QueryInterface(__uuidof(ID3D9NvrExtRt), (void**)&rt)) || !rt)
+			strcpy_s(forwardWhy, "off: needs Vegas Shaders DXVK with the RT core");
+		else {
+			rt->Release();
+			forwardCompiled = true;
+			strcpy_s(forwardWhy, "the object, skin and land shaders are compiled to read the traced sun shadow (used in Mode 1 once the RT helper runs)");
+		}
+		if (enabled) Logger::Log("UNOFFICIAL RT sun shadows ForwardLookup: %s", forwardWhy);
+	}
+
+	bool ForwardCompiled() { return forwardCompiled; }
+
+	bool ForwardActive() {
+		const bool mode1 = S.enabled && S.mode == 1 && RtCore::Running() && TheShaderManager->GameState.isExterior && !OldReplace();
+		if (mode1 && !forwardCompiled) {
+			static bool told = false;
+			if (!told) {
+				told = true;
+				Logger::Log("[WARNING] UNOFFICIAL Vegas Shaders DXVK: RT sun shadows Mode 1 (replace) runs as Mode 0 (combine) this session: the shaders do not hold the "
+					"traced lookup (%s). With RT sun shadows on, restart the game once.", forwardWhy);
+			}
+		}
+		return mode1 && forwardCompiled && forwardTexture && (S.debugView == 0 || S.debugView == 15);
+	}
+
+	void RegisterForwardTexture() {
+		if (!forwardCompiled || forwardTexture) return;
+		TheTextureManager->InitTexture("TESR_RtSunForward", &forwardTexture, &forwardSurface, TheRenderManager->width, TheRenderManager->height, D3DFMT_G16R16F);
+		if (forwardSurface) TheRenderManager->device->ColorFill(forwardSurface, NULL, 0);
+		else {
+			forwardCompiled = false;	// (shaders already built with the lookup keep its constants at 0: the cascades)
+			strcpy_s(forwardWhy, "off: the lookup's texture could not be made");
+			Logger::Log("[WARNING] UNOFFICIAL RT sun shadows ForwardLookup: %s", forwardWhy);
+		}
+	}
+
+	D3DXVECTOR4* ForwardConstant(int Index) { return &forwardConstants[Index & 3]; }
+
+	// This frame's constants: a camera-relative point of this frame -> the last traced frame's texture uv x w, and its view depth there.
+	// As RtLampShadows::Aim: the traced frame's eye is that frame's CameraPosition; its texel at uv shows the ray through uv + jitter,
+	// and with RenderScale < 1 the frame is the top-left sx x sy part of the texture: texture uv = s (screen uv - jitter).
+	void UpdateForward(bool Exterior, bool LookupsRun) {
+		for (D3DXVECTOR4& v : forwardConstants) v = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
+		if (!forwardCompiled) return;
+		ReadSettings();
+		const UInt32 now = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
+		if (!Exterior || !LookupsRun || !ForwardActive() || !forwardTraced.valid || now - forwardTraced.frame > 2u) return;
+		const ForwardCamera& t = forwardTraced;
+		const D3DXMATRIX& v = t.view;
+		const D3DXVECTOR3 right(v._11, v._21, v._31), up(v._12, v._22, v._32), forward(v._13, v._23, v._33);
+		const D3DXVECTOR4& camera = TheRenderManager->CameraPosition;
+		const D3DXVECTOR3 d(camera.x - t.location.x, camera.y - t.location.y, camera.z - t.location.z);
+		const float dr = D3DXVec3Dot(&d, &right), du = D3DXVec3Dot(&d, &up), df = D3DXVec3Dot(&d, &forward);
+		const float ax = 0.5f * t.p11, bx = 0.5f - t.jx, ay = -0.5f * t.p22, by = 0.5f - t.jy;
+		forwardConstants[0] = D3DXVECTOR4(t.sx * (ax * right.x + bx * forward.x), t.sx * (ax * right.y + bx * forward.y), t.sx * (ax * right.z + bx * forward.z), t.sx * (ax * dr + bx * df));
+		forwardConstants[1] = D3DXVECTOR4(t.sy * (ay * up.x + by * forward.x), t.sy * (ay * up.y + by * forward.y), t.sy * (ay * up.z + by * forward.z), t.sy * (ay * du + by * df));
+		forwardConstants[2] = D3DXVECTOR4(forward.x, forward.y, forward.z, df);
+		forwardConstants[3] = D3DXVECTOR4(S.range, S.debugView == 15 ? -S.forwardTolerance : S.forwardTolerance, t.sx, t.sy);
+		forwardReads++;
+	}
 
 	// UNOFFICIAL 2026-11-01 (the REPORT block's ray tracing line)
 	std::string StatusText() {
@@ -622,7 +827,16 @@ namespace RtSunShadows {
 			Replacing() ? ", replacing now" : "", !RtCore::Running() ? "the RT core is not running: the cascades alone" : !TheShaderManager->GameState.isExterior ? "indoors: not traced" : "the core runs",
 			textureWidth, textureHeight, frames, lastTracedFrame == 0xFFFFFFFF ? 0u : lastTracedFrame, lastTracedFrame == frame ? " (this frame)" : "", S.range, S.sunAngle,
 			S.denoise ? "on" : "off", S.halfResolution ? "on" : "off", S.debugView);
-		return t;
+		std::string text = t;
+		// UNOFFICIAL 2026-11-13 ForwardLookup
+		if (S.mode == 1) {
+			char f[360];
+			sprintf_s(f, " | ForwardLookup %s: %s; frames packed %u, frames read by the shaders %u", S.forwardLookup ? "on" : "off",
+				ForwardActive() ? "Mode 1 runs through the shaders' own sun lookup (traced where last frame's trace saw the point, else the shadow maps)" :
+				Replacing() ? "Mode 1 the old way (the deferred apply)" : forwardWhy, forwardPacks, forwardReads);
+			text += f;
+		}
+		return text;
 	}
 	IDirect3DSurface9* VisibilitySurface() { return lastTracedFrame != 0xFFFFFFFF ? visibilitySurface : nullptr; }
 

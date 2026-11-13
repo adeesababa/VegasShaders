@@ -221,6 +221,56 @@ float CloudSunAt(float3 P) {
     return lerp(1.0f, tex2Dlod(TESR_CloudShadow, float4(suv, 0.0f, 0.0f)).r, inside * NVR_CloudSun.w);
 }
 #endif
+// ---------------------------------------------------------------------------
+// UNOFFICIAL 2026-11-13 RT sun shadows, Mode 1 (replace) with ForwardLookup ([Shaders.ShadowsExteriors.RT]; core/RtSunShadows.cpp).
+// Before, Mode 1 switched the lookups below off and left the sun's shadow to the deferred apply, which can only scale the finished
+// pixel (the sky's and the lamps' light with the sun's) and which the lamps' mask cancels wherever a lamp reaches: a man under a porch
+// roof that the trace had in shade came out sunlit. Now the lookup itself takes the traced visibility: the DLL packs last frame's
+// traced (and denoised) visibility with that frame's view depth into TESR_RtSunForward (red visibility, green view depth in units), a
+// point here is carried into that frame's screen (the three rows: camera-relative position -> u w, v w, w; the RenderScale rect and
+// that frame's jitter are in them), and where the depth stored there is this point's own the traced visibility replaces the cascades
+// (fading back to them over the last 15 % of the RT range). Everywhere else (hidden or off screen last frame, something drawn that
+// the depth buffer does not hold, beyond the range, no traced frame yet) the cascades, exactly as before.
+// Compiled in only when RT sun shadows were on at startup on the DXVK fork (RT_SUN_FORWARD from ShaderRecord::BuildDefines), with the
+// forward path, outdoors, without the sun cross-fade (its registers): everywhere else the shaders are byte for byte what they were.
+// Registers: c162-c165 are the cross-fade's kept centres (never compiled in together); the land takes others (TerrainTemplate.hlsl:
+// the DLL writes c146-c165 for its lamps). s15 is free in every record without lamp-shadow code (the land: s13 below 7 layers).
+// An includer that cannot carry it defines RT_SUN_FORWARD_OFF before this file, or calls GetSunShadowMaps itself.
+#ifndef RT_SUN_FORWARD
+    #define RT_SUN_FORWARD 0
+#endif
+#if RT_SUN_FORWARD && FORWARD_SHADOWS && !SUN_CROSSFADE && !(defined(INTERIOR_SHADOWS) && INTERIOR_SHADOWS) && !defined(RT_SUN_FORWARD_OFF)
+    #define RT_SUN_LOOKUP 1
+#else
+    #define RT_SUN_LOOKUP 0
+#endif
+#if RT_SUN_LOOKUP
+#ifndef RT_SUN_SAMPLER_REG
+    #define RT_SUN_SAMPLER_REG s15
+#endif
+#ifndef RT_SUN_ROWX_REG
+    #define RT_SUN_ROWX_REG c162
+    #define RT_SUN_ROWY_REG c163
+    #define RT_SUN_ROWW_REG c164
+    #define RT_SUN_DATA_REG c165
+#endif
+float4 TESR_RtSunRowX : register(RT_SUN_ROWX_REG); // dot(float4(P, 1), .) = u w of the traced frame's texture
+float4 TESR_RtSunRowY : register(RT_SUN_ROWY_REG); // v w
+float4 TESR_RtSunRowW : register(RT_SUN_ROWW_REG); // w: the point's view depth in the traced frame (units)
+float4 TESR_RtSunData : register(RT_SUN_DATA_REG); // x: the RT range (0 = no traced frame to read: the cascades), y: depth tolerance (share of the depth; negative = the coverage view, DebugView 15), zw: the last uv of the traced part of the texture
+// One line, like TESR_ShadowAtlas above (and POINT lifted round it, like TESR_CharShadowMap below).
+#ifdef POINT
+    #undef POINT
+    #define NVR_RTSUN_POINT_WAS_DEFINED
+#endif
+sampler2D TESR_RtSunForward : register(RT_SUN_SAMPLER_REG) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+#ifdef NVR_RTSUN_POINT_WAS_DEFINED
+    #define POINT
+    #undef NVR_RTSUN_POINT_WAS_DEFINED
+#endif
+#endif
+
+
 #if SHADOW_CHARACTER_MAP
 row_major float4x4 TESR_CharShadowCameraToLight : register(c206); // camera-relative world -> the map's clip space (ortho: w = 1)
 float4 TESR_CharShadowCenter : register(c213); // xyz: the box's centre (camera-relative world), w: its half-extent (world units)
@@ -938,8 +988,9 @@ float SunCascadeTap(float c, float3 worldPos, float3 worldNormal, float offset, 
 
 // ---------------------------------------------------------------------------
 // 1.0 in full light, towards 0 in shadow. Multiply the SUN term by it, before ambient.
+// (2026-11-13: the cascades' lookup alone; GetSunShadow below it is what the shaders call.)
 // ---------------------------------------------------------------------------
-float GetSunShadow(float3 P, float3 Nw) {
+float GetSunShadowMaps(float3 P, float3 Nw) {
     // Nonzero SUPPRESSES the forward path; SunShadows.fx reads the same constant and takes
     // over deferred. A missing constant reads zero and leaves forward running.
     if (TESR_ShadowForwardData.x) return 1.0f;
@@ -1175,4 +1226,38 @@ float GetSunShadow(float3 P, float3 Nw) {
 #endif
 
     return sh;
+}
+
+// UNOFFICIAL 2026-11-13 RT sun shadows' ForwardLookup (see RT_SUN_FORWARD near the top): the traced visibility where last frame's trace
+// saw this point, the cascades elsewhere. Without it: the cascades' lookup, as it always was.
+float GetSunShadow(float3 P, float3 Nw) {
+#if RT_SUN_LOOKUP
+    // The cascades first, the traced lookup after them: nothing of the lookup is alive across the cascades' code, so it adds nothing to
+    // the most temp registers a shader needs (the 5-layer land with lamps is at ps_3_0's 32 already; wrapped round the cascades the
+    // lookup took it over, X4505). The price: the cascades are looked up even where the traced shadow replaces them.
+    float sh = GetSunShadowMaps(P, Nw);
+    [branch] if (TESR_RtSunData.x > 0.0f && !TESR_ShadowForwardData.x) {
+        float4 Q = float4(P, 1.0f);
+        float w = dot(Q, TESR_RtSunRowW);
+        float2 uv = float2(dot(Q, TESR_RtSunRowX), dot(Q, TESR_RtSunRowY)) / max(w, 1.0f);
+        float2 texel = tex2Dlod(TESR_RtSunForward, float4(uv, 0.0f, 0.0f)).rg;   // r visibility, g the view depth traced there
+        // the traced frame saw this very point: in front of its camera, inside the traced part, the same depth
+        bool seen = w > 1.0f && uv.x >= 0.0f && uv.y >= 0.0f && uv.x <= TESR_RtSunData.z && uv.y <= TESR_RtSunData.w &&
+                    abs(texel.g - w) <= abs(TESR_RtSunData.y) * w + 1.0f;
+        float weight = seen ? saturate((TESR_RtSunData.x - w) / (0.15f * TESR_RtSunData.x)) : 0.0f;
+        // the tail of GetSunShadowMaps: the low sun's fade, then the clouds' share
+        float traced = lerp(saturate(texel.r), 1.0f, saturate(TESR_ShadowFade.x));
+#if SHADOW_CLOUD_SAMPLE
+        [branch] if (NVR_CloudSun.w > 0.0f) traced *= CloudSunAt(P);
+#elif SHADOW_CLOUD_FROM_VALUE
+        traced *= NvrCloudSun;
+#endif
+        sh = lerp(sh, traced, weight);
+        // DebugView 15, the coverage view: full sun where the traced shadow is taken, none where the cascades are
+        if (TESR_RtSunData.y < 0.0f) sh = weight;
+    }
+    return sh;
+#else
+    return GetSunShadowMaps(P, Nw);
+#endif
 }

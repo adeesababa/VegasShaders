@@ -53,6 +53,21 @@
 #ifdef PS
     #define SHADOW_CLOUD_VALUE 1   // UNOFFICIAL 2026-11-04 ForwardCloudShadows (Includes/Shadow.hlsl): no sampler is free here, the vertex shader looks the map up
 #endif
+// UNOFFICIAL 2026-11-13 RT sun shadows' ForwardLookup (Includes/Shadow.hlsl RT_SUN_FORWARD): the land's own registers (the DLL writes
+// c146-c165 for the land's lamps; c192, c193, c195, c196 are named only by the skin and object shaders and nothing uploads them by
+// number) and a sampler NormalMap leaves free (as TESR_DisplaceDepth takes BaseMap's): s13 below 7 layers, or with Wetness Effects (its
+// rain cover map is on s13 then) s12 below 6. A piece with no sampler left (7 layers; 6 with Wetness Effects) keeps the cascades.
+#if TEX_COUNT < 7 && !defined(WETNESS_EFFECTS)
+    #define RT_SUN_SAMPLER_REG s13
+#elif TEX_COUNT < 6
+    #define RT_SUN_SAMPLER_REG s12
+#else
+    #define RT_SUN_FORWARD_OFF 1
+#endif
+#define RT_SUN_ROWX_REG c192
+#define RT_SUN_ROWY_REG c193
+#define RT_SUN_ROWW_REG c195
+#define RT_SUN_DATA_REG c196
 #include "includes/Shadow.hlsl"	// shared code
 // UNOFFICIAL 2026-11-04 ForwardCloudShadows: the clouds' shadow per vertex (texc.z; w the sentinel), compiled in only when on at startup.
 #if FORWARD_CLOUD_SHADOWS && FORWARD_SHADOWS && !(defined(INTERIOR_SHADOWS) && INTERIOR_SHADOWS)

@@ -56,7 +56,7 @@ template <> std::string SettingManager::ToString<int>(const int number) {
 }
 
 // The user config's [_Unofficial] SettingsVersion this build brings it up to (UpdateOldDefaults, below).
-static const int UnofficialSettingsVersion = 82;  // (82: GameShaderPairRepair on; 81: CapturedGrass on, for path tracing; 80: the daylight look, only where it was never touched; 79: rain LightingScale; 78: RT defaults replaced since 1.0.5 now reach saved configs; 77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
+static const int UnofficialSettingsVersion = 83;  // (83: RT sun shadows Mode 1 (replace) + RT grass on; 82: GameShaderPairRepair on; 81: CapturedGrass on, for path tracing; 80: the daylight look, only where it was never touched; 79: rain LightingScale; 78: RT defaults replaced since 1.0.5 now reach saved configs; 77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
 
 // UNOFFICIAL 2026-10-30: a setting is read only when the defaults file lists it (FillNode), so a line in the user's toml that
 // this build does not know (a key from a newer or an older build, a typo) silently did nothing. Each one is logged once per
@@ -739,6 +739,23 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 		if (saved && saved->contains("GameShaderPairRepair") && saved->at("GameShaderPairRepair").is_boolean() && !saved->at("GameShaderPairRepair").as_boolean()) {
 			(*saved)["GameShaderPairRepair"] = true;
 			changed += std::string(changed.empty() ? "" : ", ") + "Main.Main.Misc.GameShaderPairRepair false -> true";
+		}
+	}
+	// UNOFFICIAL 2026-11-13 c (83): [Shaders.ShadowsExteriors.RT] Mode 0 -> 1 and [Main.Main.RayTracing] Grass false -> true. The owner's
+	// rule: an enabled ray traced effect replaces its raster twin where the trace has an answer. Mode 1 was wrong before this build (the
+	// deferred apply could not stand in for the shaders' own lookup: people in shade came out sunlit); ForwardLookup fixes it. Without
+	// grass in the traced scene the grass casts no sun shadow inside the RT range, so the two move together. The menu's Save writes every
+	// key, so every saved file holds the old values. Neither does anything unless a ray traced effect is on.
+	if (version < 83) {
+		tomlValue* saved = UserSection("Shaders.ShadowsExteriors.RT");
+		if (saved && saved->contains("Mode") && saved->at("Mode").is_integer() && saved->at("Mode").as_integer() == 0) {
+			(*saved)["Mode"] = 1;
+			changed += std::string(changed.empty() ? "" : ", ") + "Shaders.ShadowsExteriors.RT.Mode 0 -> 1";
+		}
+		saved = UserSection("Main.Main.RayTracing");
+		if (saved && saved->contains("Grass") && saved->at("Grass").is_boolean() && !saved->at("Grass").as_boolean()) {
+			(*saved)["Grass"] = true;
+			changed += std::string(changed.empty() ? "" : ", ") + "Main.Main.RayTracing.Grass false -> true";
 		}
 	}
 	if (!changed.empty())

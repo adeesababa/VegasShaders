@@ -105,6 +105,9 @@ void ShadowsExteriorEffect::UpdateConstants() {
 		// cascades (faded out inside the RT range) and the traced visibility is multiplied in after it (core/RtSunShadows.cpp).
 		if (RtSunShadows::Replacing()) Constants.ForwardData.x = 1.0f;
 		RtSunShadows::ReplaceRange();
+		// UNOFFICIAL 2026-11-13 ForwardLookup: Mode 1 through the lookups themselves (they stay on; the traced visibility where last frame's
+		// trace saw the point). This frame's constants; all 0 (the cascades) when it does not run or the lookups are off.
+		RtSunShadows::UpdateForward(true, Constants.ForwardData.x == 0.0f && Constants.ShadowFade.y != 0.0f);
 #if NVR_TEST_TOOLS
 		// DIAGNOSTIC SkipWhenFadedCheck 3: the lookups off at any hour (what they cost; by day the sun shadows leave the lit
 		// shaders, so the picture changes).
@@ -131,6 +134,7 @@ void ShadowsExteriorEffect::UpdateConstants() {
 	}
 	else {
 		SunFaded = false;	// UNOFFICIAL 2026-10-16 SkipWhenFaded: nothing to skip indoors
+		RtSunShadows::UpdateForward(false, false);	// UNOFFICIAL 2026-11-13 ForwardLookup: nothing indoors
 		Constants.ForwardData.x = Settings.Exteriors.ForwardShadows ? 0.0f : 1.0f;
 		// the interior shadows' enabled flag; point lights always on indoors
 		Constants.ShadowFade.y = TheShaderManager->Effects.ShadowsInteriors->Enabled;
@@ -817,6 +821,11 @@ void ShadowsExteriorEffect::RegisterConstants() {
 	const auto bind = [](const char* name, D3DXVECTOR4* value) { TheShaderManager->RegisterConstant(name, value); };
 	bind("TESR_SmoothedSunDir", &Constants.SmoothedSunDir);
 	bind("TESR_RtSunReplace", RtSunShadows::ReplaceConstant());	// UNOFFICIAL 2026-10-28 RT sun shadows Mode 1
+	// UNOFFICIAL 2026-11-13 ForwardLookup (Includes/Shadow.hlsl RT_SUN_FORWARD)
+	bind("TESR_RtSunRowX", RtSunShadows::ForwardConstant(0));
+	bind("TESR_RtSunRowY", RtSunShadows::ForwardConstant(1));
+	bind("TESR_RtSunRowW", RtSunShadows::ForwardConstant(2));
+	bind("TESR_RtSunData", RtSunShadows::ForwardConstant(3));
 	bind("TESR_ShadowData", &Constants.Data);
 	bind("TESR_ShadowFormatData", &Constants.FormatData);
 	bind("TESR_ShadowForwardData", &Constants.ForwardData);
@@ -904,6 +913,7 @@ static void MakeCascadeSurfaces(ShadowsExteriorEffect& fx, ULONG cascadeSize, UL
 
 void ShadowsExteriorEffect::RegisterTextures() {
 	TerrainShadows.RegisterTextures();	// UNOFFICIAL 2026-10-19
+	RtSunShadows::RegisterForwardTexture();	// UNOFFICIAL 2026-11-13 ForwardLookup: TESR_RtSunForward (nothing unless compiled in)
 	const ULONG cascadeSize = Settings.ShadowMaps.CascadeResolution;
 	const ULONG cubeSize = Settings.Interiors.ShadowCubeMapSize;
 	const ULONG atlasSize = cascadeSize * 2;

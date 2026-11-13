@@ -22,6 +22,7 @@
 #include "LandLight.h"	// UNOFFICIAL 2026-10-25 (SunFar)
 #include "ForwardCloudShadows.h"	// UNOFFICIAL 2026-11-04 ForwardCloudShadows (FORWARD_CLOUD_SHADOWS)
 #include "ShaderFallback.h"	// UNOFFICIAL 2026-11-12 ShaderFallback (a family too long for the driver goes without optional features)
+#include "RtSunShadows.h"	// UNOFFICIAL 2026-11-13 RT sun shadows' ForwardLookup (RT_SUN_FORWARD)
 #include "GameShaderPairs.h"	// UNOFFICIAL 2026-11-13 GameShaderPairs (a freed shader leaves its list of the game's shaders)
 // Small helpers for the shader loader: a template's define list is searched by name, and a held interface
 // is released and cleared in one step.
@@ -563,6 +564,10 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	// carries a shadow position in COLOR1, which DXVK does not clamp). Defined only when on, and last, as above.
 	if (DxvkCompute::DisplaceObjectsLayout())
 		AppendDefine("NVR_DISPLACE_OBJECTS", "1");
+	// UNOFFICIAL 2026-11-13 RT sun shadows' ForwardLookup (core/RtSunShadows.h; Includes/Shadow.hlsl RT_SUN_FORWARD): the sun lookup reads
+	// the traced visibility in Mode 1. Only with RT sun shadows on at startup on the DXVK fork. Defined only when on, and last, as above.
+	if (RtSunShadows::ForwardCompiled())
+		AppendDefine("RT_SUN_FORWARD", "1");
 
 }
 

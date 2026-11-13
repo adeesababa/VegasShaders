@@ -1301,7 +1301,7 @@ static const ConflictRule kConflictRules[] = {
 	{ "Main.Main.RayTracing", "PTReplace", "true", nullptr,
 		"The path-traced picture replaces the game's: Ambient light, ambient occlusion and specular highlights switch off while it runs." },
 	{ "Shaders.ShadowsExteriors.RT", "Mode", "1", nullptr,
-		"Replace: near you only ray-traced sun shadows are used. Leaves, fences and people may lose their sun shadows up close." },
+		"Replace (the default): near you only ray-traced sun shadows are used; the shadow maps take over beyond their range." },
 	{ "Shaders.TAA.DLSS", "RayReconstruction", "true", AnyRtOn,
 		"Ray Reconstruction takes over from Vegas Shaders' own ray-tracing smoothing: those smoothing settings do nothing while it runs." },
 	{ "Shaders.CloudShadows.Main", "Enabled", "true", CloudsCastShadows,

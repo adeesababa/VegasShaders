@@ -2,6 +2,7 @@
 #include "DxvkCompute.h"	// UNOFFICIAL 2026-10-23 (NVR DXVK)
 #include "DxvkLoader.h"	// UNOFFICIAL 2026-11-04: the d3d9.dll in use may be a mod's (DxvkLoader.h)
 #include "RtLampShadows.h"	// UNOFFICIAL 2026-10-28 RT lamp shadows
+#include "RtSunShadows.h"	// UNOFFICIAL 2026-11-13 RT sun shadows' ForwardLookup
 #include "MixCheck.h"	// UNOFFICIAL 2026-10-30 NvrDxvkMixCheck
 #include "TestTools.h"
 #if NVR_TEST_TOOLS
@@ -406,6 +407,7 @@ void RenderManager::Initialize() {
 #endif
 	DxvkCompute::Initialize(device);	// UNOFFICIAL 2026-10-23 (NVR DXVK): is the NVR extension on this d3d9.dll? (logged)
 	RtLampShadows::Initialize();	// UNOFFICIAL 2026-10-28: POINT_SHADOW_RT for the session, before any shader is loaded (logged)
+	RtSunShadows::Initialize();	// UNOFFICIAL 2026-11-13: RT_SUN_FORWARD for the session, likewise
 	ShaderWarmUp2::Install(device);	// UNOFFICIAL ShaderWarmUp2 (off unless [Main.Main.Performance] ShaderWarmUp2 is 1 or 2): before any shader is created
 	SessionLog::OnDevice(device);	// UNOFFICIAL 2026-11-01: the session header's GPU, D3D9 runtime and screen lines (SessionLog.h)
 }

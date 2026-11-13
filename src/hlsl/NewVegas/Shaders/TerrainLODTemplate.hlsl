@@ -167,7 +167,7 @@ PS_OUTPUT main(PS_INPUT pin) {
     // the sun colour only; ambient is added afterwards and stays untouched.
     // ddx/ddy must stay at top level, outside dynamic flow control.
     float3 geoNormal = GetShadowGeometricNormal(pin.shadowPos);
-    float sunShadow = FORWARD_SHADOWS ? GetSunShadow(pin.shadowPos, geoNormal) : 1.0f;
+    float sunShadow = FORWARD_SHADOWS ? GetSunShadowMaps(pin.shadowPos, geoNormal) : 1.0f;	// (2026-11-13: the cascades alone; far land is past the RT sun shadows' range)
 
 #if TERRAIN_MACRO
     const float3 groundColor = MacroVary(LinColor(albedo), pin.shadowPos);	// 2026-11-04 macro variation, as the near land

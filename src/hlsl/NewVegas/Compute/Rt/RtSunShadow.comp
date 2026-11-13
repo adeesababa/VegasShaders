@@ -17,7 +17,8 @@ layout(set = 0, binding = 1, std140) uniform Pass {
 	vec4 up;            // xyz camera up / projection[1][1]
 	vec4 origin;        // xyz the eye in scene space (RtCore::Eye(): 0), w (2026-11-12) LeafTransmission: the share of the sunlight a
 	                    // covered leaf / plant cut-out lets through (0: leaves are solid, the old path; RtSunFoliage.glsl)
-	vec4 sun;           // xyz toward the sun (scene space, normalized), w 1: the sun is up
+	vec4 sun;           // xyz toward the sun (scene space, normalized), w 1: the sun is up; 2 (2026-11-13 ForwardLookup): up, and faces
+	                    // turned from the sun are traced too (see main)
 	vec4 bias;          // x normal offset (units), y normal offset per unit of view distance, z start offset along the ray, w ray length
 	vec4 range;         // x RT range (view distance), y fade length, z cull mask, w debug (1: hit distance / 4096 instead of visibility,
 	                    // 2: state codes, 3: a primary camera ray's hit distance / 8192: FORK-RT-SUN.md "Debug views")
@@ -117,11 +118,18 @@ void main() {
 		vec3 normal = normalize(right * n.x + up * n.y + forward * n.z);
 
 		float facing = dot(normal, p.sun.xyz);
-		if (facing > 0.0) {
+		// UNOFFICIAL 2026-11-13 ForwardLookup (sun.w 2; core\RtSunShadows.cpp): the object shaders read this visibility in place of their
+		// cascade lookup and light with the NORMAL-MAPPED normal, so a face whose flat normal (the buffer's, rebuilt from the depth) is
+		// turned from the sun can still take sunlight: a wall under a porch roof at noon came out lit in streaks, where the cascades had
+		// it in the roof's shade. Those faces are traced too, the ray started on the face's SUN side (inside a wall: the wall or the roof
+		// blocks it; behind a leaf card: lit unless something else is in the way, as the cascades have it). Without it (1): they are "lit",
+		// as before (the deferred apply's pixels are dark there by their own N.L).
+		const bool turned = !(facing > 0.0);
+		if (facing > 0.0 || p.sun.w > 1.5) {
 			// Bias: along the normal (grows with distance: depth and normal precision), then a little toward the sun
 			// (2026-11-07 rtgap-tess 1a) + the bumps' Strength while they are drawn: a point in a hollow of the depth buffer lies under the
 			// flat RT surface, and its ray was blocked at once
-			vec3 start = position + normal * (p.bias.x + p.bias.y * viewZ + rtTessSlack(p.slack, viewZ)) + p.sun.xyz * p.bias.z;
+			vec3 start = position + normal * ((turned ? -1.0 : 1.0) * (p.bias.x + p.bias.y * viewZ + rtTessSlack(p.slack, viewZ))) + p.sun.xyz * p.bias.z;
 			rayQueryEXT q;
 			// Soft shadows: one ray a pixel toward a point of the sun's disc, a different one each pixel and frame (the denoiser averages)
 			vec3 toSun = p.sun.xyz;
@@ -174,7 +182,7 @@ void main() {
 			else
 				result = hit ? through : 1.0;   // (2026-11-12: through leaves; 0 without LeafTransmission)
 			// (2026-11-07 rtgap-tess 1b) ContactShadows: what the depth buffer has and the RT scene lacks (the bumps, grass, small props)
-			if ((!hit || through > 0.0) && debug == 0 && p.contact.w > 0.0) {   // (2026-11-12: also under a leaf's light shadow)
+			if ((!hit || through > 0.0) && debug == 0 && p.contact.w > 0.0 && !turned) {   // (2026-11-13: not from a face turned away: its own surface is in the way)   // (2026-11-12: also under a leaf's light shadow)
 				const float noise = fract(52.9829189 * fract(0.06711056 * float(pixel.x) + 0.00583715 * float(pixel.y)) + 0.618034 * p.alpha.y);
 				const float contact = rtContactShadow(position, normal, toSun, 30000.0, viewZ, p.forward, p.right.xyz, p.up.xyz, p.origin.xyz,
 					p.full.zw, p.full.xy, p.contact, p.contactGate, noise);
