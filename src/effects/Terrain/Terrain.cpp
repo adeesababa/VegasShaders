@@ -314,6 +314,8 @@ void TerrainShaders::UpdateConstants() {
 	ParallaxConstants.ExtraData.z = ParallaxSettings.ShadowsIntensity;
 	ParallaxConstants.IsoData.x = ParallaxSettings.IsoHeightTaps ? 1.0f : 0.0f;
 	ParallaxConstants.IsoData.y = ParallaxSettings.SkipEmptyLayers ? 1.0f : 0.0f;
+	// UNOFFICIAL 2026-11-12 ShadowBounce (TerrainTemplate.hlsl): the light a self-shadowed crack keeps from the sunlit ground beside it
+	ParallaxConstants.IsoData.z = (std::min)((std::max)(TheSettingManager->GetSettingF("Shaders.Terrain.Parallax", "ShadowBounce"), 0.0f), 1.0f);
 
 	// [Main.Main.ReducedQuality] CheapUnderwaterTerrain: ground below the water surface skips parallax and its shadows
 	// (TerrainTemplate.hlsl). .w is the camera-relative height below which terrain counts as under water: the level of

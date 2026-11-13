@@ -14,6 +14,19 @@
 #include "includes/PBR.hlsl"
 #include "includes/PBRScale.hlsl"
 #include "includes/PointShadowForward.hlsl"  // UNOFFICIAL forward point-light shadows (INTERIOR_SHADOWS, interiors)
+// UNOFFICIAL 2026-11-12 HairAndEyes (Includes/FlashBeam.hlsl): the hair takes the flashlight's beam itself, and marks its pixels so the
+// light pass does not light the scalp through it. c4-c12, s6 and s7 are free in this shader and its includes.
+#define FLASH_BEAM_REG c4
+#define FLASH_BEAM_MATRIX_REG c9
+#define FLASH_BEAM_SAMPLER s6
+#define FLASH_BEAM_COOKIE_SAMPLER s7
+#include "includes/FlashBeam.hlsl"
+// The mark is written only where the records exist with their distance (the AlbedoBuffer level, as the light pass needs).
+#if defined(CAPTURED_NORMALS_ON) && CAPTURED_NORMALS_ON >= 3
+    #define FLASH_BEAM_MARK 1
+#else
+    #define FLASH_BEAM_MARK 0
+#endif
 
 uniform float4 AmbientColor    : register(c0);
 uniform float4 EyePosition     : register(c1);
@@ -41,16 +54,26 @@ uniform sampler2D LayerMap  : register(s5);
 struct PixIn {
     float2 f_tex_coord       : TEXCOORD0;
     float4 f_shadow_pos      : TEXCOORD1;
+    float4 f_beam_obj        : TEXCOORD2;   // UNOFFICIAL 2026-11-12 xyz to the flashlight, object space (SM3003.vso; undefined under the game's VS)
     float4 f_vtx_color       : COLOR0;
     float3 f_tan_in          : TEXCOORD3_centroid;
     float3 f_bin_in          : TEXCOORD4_centroid;
     float3 f_nrm_in          : TEXCOORD5_centroid;
     float3 f_obj_pos_in       : TEXCOORD6_centroid;
     float4 f_fog_in          : TEXCOORD7_centroid;
+#if FLASH_BEAM_MARK
+    float2 f_vpos            : VPOS;        // UNOFFICIAL 2026-11-12 the pixel, for the mark's dither
+#endif
 };
 
 struct PixOut {
     float4 f_color_out : COLOR0;
+#if FLASH_BEAM_MARK
+    // UNOFFICIAL 2026-11-12 (ps_3_0 wants COLOR0..3 without a gap: 1 and 2 are written as 0 and masked off by core/CapturedNormals.h)
+    float4 f_pad1 : COLOR1;
+    float4 f_pad2 : COLOR2;
+    float4 f_mark : COLOR3;   // the captured normals' target: only its blue (the distance) is written, and only while the beam is on
+#endif
 };
 
 PixOut main(PixIn src_c) {
@@ -126,6 +149,14 @@ PixOut main(PixIn src_c) {
     // .x enables the sun; .y counts point lights 1..3.
     bool sun_on = ToggleNumLights.x > 0.0f;
 
+    // UNOFFICIAL 2026-11-12 HairAndEyes (Includes/FlashBeam.hlsl): while the hair takes the flashlight's beam itself (after the loop),
+    // the flashlight's game lamp (core/FlashlightLamp.h: the Pip-Boy light, placed at the flashlight) is left out of the lamps, or the
+    // hair would be lit twice: it is the lamp that lies in the beam's own direction from this pixel (within half a degree). The game
+    // draws its blended hair in its sorted list, where no per-object hook shapes that lamp: it lit the hair at full strength, with no
+    // cone and no shadow, or not at all when it was not among the hair's few lamps.
+    const bool beam_on = FLASH_BEAM_ON && SHADOW_VS_PRESENT(src_c.f_shadow_pos.w);
+    const float3 beam_obj = src_c.f_beam_obj.xyz * rsqrt(max(dot(src_c.f_beam_obj.xyz, src_c.f_beam_obj.xyz), 1.0e-12f));
+
     [unroll]
     for (int li_v = 0; li_v < 4; li_v++) {
         float3 lc_v = PBRLight(LightData[li_v * 2].rgb);
@@ -179,9 +210,31 @@ PixOut main(PixIn src_c) {
 
         // Zero out lights that are not active.
         float act_f = (li_v < n_lights) ? 1.0f : 0.0f;
+        if (beam_on && !is_sun && dot(to_l, beam_obj) > 0.99996f * d_len) act_f = 0.0f;   // UNOFFICIAL 2026-11-12: the flashlight's game lamp (see above)
         diff_sum += dif_a * act_f;
         spec_sum += spec_a * act_f;
         spec_sum_game += spec_b * act_f;
+    }
+
+    // UNOFFICIAL 2026-11-12 HairAndEyes (Includes/FlashBeam.hlsl): the flashlight's beam as one more lamp, with the terms a lamp has
+    // above (the diffuse, and the strand highlight with the lamps' tint) and the beam's own strength in place of a lamp's falloff.
+    // Its direction comes from the vertex shader in object space; the cone, reach and shadow are taken at the world position.
+    [branch] if (beam_on) {
+        float3 beam_to_light;
+        const float beam = FlashBeamStrength(src_c.f_shadow_pos.xyz, beam_to_light);
+        [branch] if (beam > 0.0f) {
+            const float3 beam_tan = mul(tbnMat, src_c.f_beam_obj.xyz);
+            const float3 beam_dir = beam_tan * rsqrt(max(dot(beam_tan, beam_tan), 1.0e-12f));
+            const float3 beam_hv = eye_tan + beam_dir;
+            const float beam_hv2 = dot(beam_hv, beam_hv);
+            const float3 beam_half = beam_hv2 > 1.0e-6f ? beam_hv * rsqrt(beam_hv2) : n_tan;   // (the light behind the head: as above)
+            const float beam_a = tex2Dlod(AnisoMap, float4(dot(r_shift, beam_dir), dot(r_shift, beam_half), 0.0f, 0.0f)).a;
+            const float beam_b = tex2Dlod(AnisoMap, float4(dot(trt_shift, beam_dir), dot(trt_shift, beam_half), 0.0f, 0.0f)).a;
+            const float3 beam_lobes = (point_tint * beam_a + beam_b * 0.7f) * (saturate(dot(n_tan, beam_dir)) * beam);
+            spec_sum += beam_lobes * TESR_FlashBeam[2].rgb;
+            spec_sum_game += beam_lobes * LinEncode(TESR_FlashBeam[2].rgb);   // the game's look takes the light in its stored curve
+            diff_sum += PBRDiffuse(0.0f, HAIR_ROUGHNESS, 1.0f, n_tan, eye_tan, beam_dir, TESR_FlashBeam[2].rgb) * beam;
+        }
     }
 
     // Original order: (diffuse + ambient) * (sun tint * albedo) + specular * gain.
@@ -204,6 +257,15 @@ PixOut main(PixIn src_c) {
 
     dst.f_color_out.rgb = out_col;
     dst.f_color_out.a = base_sample.a * MatAlpha.x;
+#if FLASH_BEAM_MARK
+    // UNOFFICIAL 2026-11-12 HairAndEyes: the mark (Includes/FlashBeam.hlsl). Blue = far away, alpha = 1 or 0 by the hair's own alpha
+    // against the pixel's dither: under the hair's blend (SRCALPHA / INVSRCALPHA, each target by its own alpha) the record's distance
+    // becomes "far" or stays; drawn without a blend, far wherever the hair draws. core/CapturedNormals.h lets only the blue through,
+    // and only while the beam is on.
+    dst.f_pad1 = 0.0f;
+    dst.f_pad2 = 0.0f;
+    dst.f_mark = float4(0.0f, 0.0f, FLASH_BEAM_FAR, dst.f_color_out.a > FlashBeamDither(src_c.f_vpos) ? 1.0f : 0.0f);
+#endif
 
     // No texkill. baseTex.a fades smoothly from opaque core to fully transparent at strand
     // tips/edges; clip() at MatAlpha.y's mid-range threshold discarded that entire soft

@@ -111,6 +111,18 @@ Edge cases: a map that has just loaded fades in over `FadeIn` seconds (the specu
 roughness, metal, occlusion, or which objects have a map. MaterialAware reflections read the map's roughness and metal from the
 scene's alpha (`core/ReflMaterial.h`).
 
+Memory (2026-11-12, `Render.cpp` RmaosDraw `Trim` / `Drop`): the loaded maps are a working set, not kept for the session (an install
+can hold 5 GB of them, and they take the game's 4 GB address space). `BudgetMB` (default 512; 0 = no limit, the old behaviour) and
+`KeepSeconds` (default 30), both live. Over the budget, the maps no draw used for `KeepSeconds` are released, the longest unseen
+first, at most 8 a frame, until 85 % of the budget is in use; a released map loads again through the normal queue at its next draw
+(and fades in again). The keep time is counted only over frames in which maps were drawn, so a pause or a loading screen ages
+nothing. If every loaded map was drawn within `KeepSeconds`, nothing is released and the log says so once. Log lines start with
+`UNOFFICIAL Rmaos budget:` (the first pass of the budget, a count at most once a minute, the "needs more than the budget" line).
+A release first takes the texture off the device's stages and out of the game's note of them (`NoteDeviceTexture`); the sampler is
+`NVR_RmaosMap`, not a `TESR_` one, so no shader record holds the pointer. Also: maps start loading only with `On` (they used to load
+with it off), the reading thread waits while 4 read files are waiting to be made into textures, and the per-texture lookups are
+emptied at 4096 entries.
+
 How to check it: an object with a hand-made map whose alpha is dark should show weaker sun and lamp highlights on its non-metal
 parts than before; with Vegas Shaders' generated maps nothing changes.
 

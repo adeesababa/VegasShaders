@@ -135,6 +135,10 @@ namespace RtAmbient {
 		// true; missing key: true): indoors with RoomGI the GI denoiser gets SunGI's settings (AmbientOcclusion.cpp RtDenoisedGI); false = the old ones.
 		bool	RoomGI = false;
 		bool	GIDenoiseRoomGI = true;
+		// UNOFFICIAL 2026-11-13 OcclusionOnD3D9 (default true; missing key: true), BUG FIX: AmbientLight's D3D9 Estimate takes the traced occlusion
+		// (AmbientLight.cpp aoD3D9Texture, AmbientLight.fx.hlsl NVR_ALRT). Before, with [Main.Main.Performance] NvrDxvkAmbientLight off (its default since
+		// 2026-11-01) the occlusion was traced and thrown away: AmbientLight kept its own screen search and only the bounce light (GI) reached the picture.
+		bool	OcclusionOnD3D9 = true;
 		float	RoomGIGlow = 1.0f;	// [0-4] the GlowGI RoomGI uses when GlowGI (GlowGIInterior) is 0; 0 = leave it off
 		// UNOFFICIAL 2026-11-12 (sungi nights) the exterior chain at night and at dusk / dawn; every key works alone, a missing key = its default, and
 		// with the defaults and SunGI off nothing changes (the helpers below return the day values / 0 / false). Outdoors only.
@@ -253,6 +257,7 @@ namespace RtAmbient {
 			// (TESR_SunAmbient), not the cell's own ambient colour AmbientLight reads from the cell. The GIAmbient / GIAmbientInterior keys stay for RoomGI off.
 			Current.RoomGI = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "RoomGI") && node.BoolValue;
 			Current.GIDenoiseRoomGI = !TheSettingManager->Config.FillNode(&node, s, "GIDenoiseRoomGI") || node.BoolValue;
+			Current.OcclusionOnD3D9 = !TheSettingManager->Config.FillNode(&node, s, "OcclusionOnD3D9") || node.BoolValue;	// UNOFFICIAL 2026-11-13
 			if (Current.RoomGI && InteriorNow) {
 				Current.Enabled = Current.GI = Current.RadianceCache = true;
 				Current.GIAmbient = 0.0f;

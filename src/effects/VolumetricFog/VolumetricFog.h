@@ -4,6 +4,8 @@
 class VolumetricFogEffect : public EffectRecord
 {
 public:
+	// UNOFFICIAL 2026-11-12 (memleak) idle targets (core/TextureManager.h, EffectRecord::TargetParkable): the two fog buffers are used only from Render (RenderDedicated), behind the switch
+	bool	TargetParkable(const char* SamplerName) override { return true; }
 	VolumetricFogEffect() : EffectRecord("VolumetricFog"), rainyDisablesSkyFilter(true), cloudyDisablesSkyFilter(true), weatherFilterWasActive(true),
 		nightMinDarkness(1.0f - 0.35f) {	// matches ShadowsExteriors.Main's own NightMinDarkness default (0.35), until the first exterior settings pass sets it for real
 		Constants.WeatherFilterAnimator.Initialize(1);

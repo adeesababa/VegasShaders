@@ -245,7 +245,9 @@ void PBRShaders::UpdateConstants() {
 		DustData = D3DXVECTOR4(here ? DustSettings.Amount : 0.0f, 1.0f / DustSettings.Size, DustSettings.UpFrom, DustSettings.UpFull);
 		DustColor = D3DXVECTOR4(DustSettings.Color.x, DustSettings.Color.y, DustSettings.Color.z, DustSettings.Patchiness);
 		DustOrigin = TheRenderManager->CameraPosition;
+		DustOrigin.w = std::clamp(TheSettingManager->GetSettingF("Shaders.PBR.Dust", "Variation"), 0.0f, 1.0f);	// UNOFFICIAL 2026-11-12 (ObjectDust.hlsl)
 		MicroShadow.x = MicroShadowStrength;
+		MicroShadow.y = std::clamp(TheSettingManager->GetSettingF("Shaders.PBR.MicroShadow", "Bounce"), 0.0f, 1.0f);	// UNOFFICIAL 2026-11-12
 	}
 
 	// UNOFFICIAL 2026-10-21 LampFalloff (Includes/LampFalloff.hlsl), live: the shape outdoors with Exterior, indoors with Interior.

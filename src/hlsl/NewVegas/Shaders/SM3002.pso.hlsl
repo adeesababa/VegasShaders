@@ -17,6 +17,18 @@
 #include "includes/PBR.hlsl"
 #include "includes/PBRScale.hlsl"
 #include "includes/PointShadowForward.hlsl"  // UNOFFICIAL forward point-light shadows (INTERIOR_SHADOWS, interiors)
+// UNOFFICIAL 2026-11-12 HairAndEyes (Includes/FlashBeam.hlsl; as SM3003.pso): the hair takes the flashlight's beam itself, and marks its
+// pixels so the light pass does not light the scalp through it. c4-c12, s6 and s7 are free in this shader and its includes.
+#define FLASH_BEAM_REG c4
+#define FLASH_BEAM_MATRIX_REG c9
+#define FLASH_BEAM_SAMPLER s6
+#define FLASH_BEAM_COOKIE_SAMPLER s7
+#include "includes/FlashBeam.hlsl"
+#if defined(CAPTURED_NORMALS_ON) && CAPTURED_NORMALS_ON >= 3
+    #define FLASH_BEAM_MARK 1
+#else
+    #define FLASH_BEAM_MARK 0
+#endif
 
 uniform float4 AmbientColor    : register(c0);
 uniform float4 HairTint        : register(c2);
@@ -36,16 +48,26 @@ uniform sampler2D LayerMap  : register(s5);
 struct VtxAttrs {
     float2 f_uv             : TEXCOORD0;
     float4 f_shadow_world_pos : TEXCOORD1;
+    float4 f_beam_obj       : TEXCOORD2;   // UNOFFICIAL 2026-11-12 xyz to the flashlight, object space (SM3003.vso; undefined under the game's VS)
     float4 f_color          : COLOR0;
     float3 f_tangent        : TEXCOORD3_centroid;
     float3 f_binormal       : TEXCOORD4_centroid;
     float3 f_normal         : TEXCOORD5_centroid;
     float3 f_obj_pos         : TEXCOORD6_centroid;
     float4 f_fog            : TEXCOORD7_centroid;
+#if FLASH_BEAM_MARK
+    float2 f_vpos           : VPOS;        // UNOFFICIAL 2026-11-12 the pixel, for the mark's dither
+#endif
 };
 
 struct VtxVaryings {
     float4 f_color_0 : COLOR0;
+#if FLASH_BEAM_MARK
+    // UNOFFICIAL 2026-11-12 (ps_3_0 wants COLOR0..3 without a gap: 1 and 2 are written as 0 and masked off by core/CapturedNormals.h)
+    float4 f_pad1 : COLOR1;
+    float4 f_pad2 : COLOR2;
+    float4 f_mark : COLOR3;   // the captured normals' target: only its blue (the distance) is written, and only while the beam is on
+#endif
 };
 
 VtxVaryings main(VtxAttrs pa) {
@@ -108,6 +130,11 @@ VtxVaryings main(VtxAttrs pa) {
     // .x gates the sun; .y counts point lights 1..3.
     bool has_sun = ToggleNumLights.x > 0.0f;
 
+    // UNOFFICIAL 2026-11-12 HairAndEyes (as SM3003.pso): while the hair takes the flashlight's beam itself (after the loop), the
+    // flashlight's game lamp is left out of the lamps: the one in the beam's own direction from this pixel (within half a degree).
+    const bool beam_on = FLASH_BEAM_ON && SHADOW_VS_PRESENT(pa.f_shadow_world_pos.w);
+    const float3 beam_obj = pa.f_beam_obj.xyz * rsqrt(max(dot(pa.f_beam_obj.xyz, pa.f_beam_obj.xyz), 1.0e-12f));
+
     [unroll]
     for (int i = 0; i < 4; i++) {
         float3 light_color = PBRLight(LightData[i * 2].rgb);
@@ -135,8 +162,20 @@ VtxVaryings main(VtxAttrs pa) {
         // Sun only.
         if (is_directional) light_diffuse *= sun_shadow;
 
-        // Mask inactive lights.
-        lambert += light_diffuse * ((i < num_lights) ? 1.0f : 0.0f);
+        // Mask inactive lights (UNOFFICIAL 2026-11-12: and the flashlight's game lamp while the beam below lights the hair).
+        const bool flash_lamp = beam_on && !is_directional && dot(to_light, beam_obj) > 0.99996f * len_v;
+        lambert += light_diffuse * ((i < num_lights && !flash_lamp) ? 1.0f : 0.0f);
+    }
+
+    // UNOFFICIAL 2026-11-12 HairAndEyes (Includes/FlashBeam.hlsl): the flashlight's beam as one more lamp's diffuse, with the beam's own
+    // strength in place of a lamp's falloff. Its direction comes from the vertex shader in object space; the cone, reach and shadow
+    // are taken at the world position.
+    [branch] if (beam_on) {
+        float3 beam_to_light;
+        const float beam = FlashBeamStrength(pa.f_shadow_world_pos.xyz, beam_to_light);
+        const float3 beam_tan = mul(loc_tbn, pa.f_beam_obj.xyz);
+        const float3 beam_dir = beam_tan * rsqrt(max(dot(beam_tan, beam_tan), 1.0e-12f));
+        lambert += PBRDiffuse(0.0f, HAIR_ROUGHNESS, 1.0f, N, N, beam_dir, TESR_FlashBeam[2].rgb) * beam;
     }
 
     // Vanilla: (diffuseSum + AmbientColor) * (tint * albedo), with no highlight to add.
@@ -154,6 +193,13 @@ VtxVaryings main(VtxAttrs pa) {
 
     pr.f_color_0.rgb = result_c;
     pr.f_color_0.a = base_tex.a * MatAlpha.x;
+#if FLASH_BEAM_MARK
+    // UNOFFICIAL 2026-11-12 HairAndEyes: the mark (Includes/FlashBeam.hlsl; as SM3003.pso). Blue = far away, alpha = 1 or 0 by the
+    // hair's own alpha against the pixel's dither; core/CapturedNormals.h lets only the blue through, and only while the beam is on.
+    pr.f_pad1 = 0.0f;
+    pr.f_pad2 = 0.0f;
+    pr.f_mark = float4(0.0f, 0.0f, FLASH_BEAM_FAR, pr.f_color_0.a > FlashBeamDither(pa.f_vpos) ? 1.0f : 0.0f);
+#endif
 
     // No texkill. baseTex.a fades smoothly from opaque core to fully transparent at strand
     // tips/edges; clip() at MatAlpha.y's mid-range threshold discarded that entire soft

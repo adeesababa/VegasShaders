@@ -369,6 +369,20 @@ namespace PointShadowForward {
 
 	// After the cube-map loop, indoors. A slot counts only if its cube map is that light's: slots[i] holds what the cube
 	// was last drawn for (PointShadowSchedule.h redraws at once on a new light, position, radius or cell).
+	// UNOFFICIAL 2026-11-13 [Shaders.ShadowsInteriors.RT] FillLightShadowStrength (-1, off: [Shaders.ShadowsInteriors.Forward]'s value for
+	// traced and cube-map shadows alike, as before). A fill light's shadow was halved for the cube maps' sake (at full strength a fill
+	// light's own ceiling and the staircases under it blacked out whole floor pieces); a traced shadow has none of those faults, and at half
+	// strength the floor under a table lit by fill lights keeps 0.64 of its light (bench rtindoor-d, Ultra-Luxe; cube maps: 0.96; photographs
+	// of lamp-lit rooms: 0.07-0.3). 0-1: the fill lights' strength while the traced lamp shadows run indoors (1 gave 0.30 there); the cube
+	// maps without RT keep the Forward value. The few pixels a traced lamp falls back to its cube map on take the same strength.
+	inline float FillShadowStrength(const ShadowsExteriorEffect::InteriorsStruct::ForwardStruct& forward) {
+		if (RtLampShadows::RtEnabled && !TheShaderManager->GameState.isExterior && RtLampShadows::LiveNow() && RtCore::Running()) {
+			const float traced = TheSettingManager->GetSettingF(RtLampShadows::kSection, "FillLightShadowStrength");
+			if (traced >= 0.0f) return (std::min)(traced, 1.0f);
+		}
+		return forward.FillLightShadowStrength;
+	}
+
 	inline void Publish(const PointShadowSlotState* slots, ShadowSceneLight* const* lights, int count, IDirect3DCubeTexture9* const* cubes) {
 		// FadeIn: when each published lamp got its shadow (kept while it stays published frame after frame).
 		static const ShadowSceneLight* lastLights[ShadowCubeMapsMax] = {};
@@ -508,7 +522,7 @@ namespace PointShadowForward {
 			// light; its shadow is that share of a full one (the light it takes away), so a staircase or a table under it shades
 			// the floor instead of blacking it out. Rides in the per-lamp fade the shader multiplies the shadow by.
 			const NiPointLight* source = lights[i]->sourceLight;
-			if (forward.FillLightRadius > 0.0f && source && source->Spec.r > forward.FillLightRadius) fade *= forward.FillLightShadowStrength;
+			if (forward.FillLightRadius > 0.0f && source && source->Spec.r > forward.FillLightRadius) fade *= FillShadowStrength(forward);
 			// UNOFFICIAL InvisibleLightShadowStrength (2026-10-20): a light with no glowing lamp near it (ShaderManager::GetNearbyLights
 			// gives it no cube map at 0; LampFixtures.h has the answer cached for this frame).
 			// InvisibleLightSize: its fade goes negative (the same amount), the shader's sign for 'use c181.z as the lamp size'.
@@ -606,7 +620,7 @@ namespace PointShadowForward {
 			const double since = hold ? ShadowHold::Since(e.light, now) : e.since;	// UNOFFICIAL 2026-10-30 ShadowHold
 			float fade = forward.FadeIn > 0.0f ? (float)(std::min)(1.0, (now - since) / forward.FadeIn) : 1.0f;
 			const NiPointLight* source = e.light->sourceLight;
-			if (forward.FillLightRadius > 0.0f && source && source->Spec.r > forward.FillLightRadius) fade *= forward.FillLightShadowStrength;
+			if (forward.FillLightRadius > 0.0f && source && source->Spec.r > forward.FillLightRadius) fade *= FillShadowStrength(forward);
 			if ((forward.InvisibleLightShadowStrength < 1.0f || InvisibleSize > 0.0f) && source && !TheShaderManager->GameState.isExterior &&
 				LampFixtures::Invisible(source, forward.FixtureDistance)) {
 				fade *= forward.InvisibleLightShadowStrength;
@@ -711,7 +725,7 @@ namespace PointShadowForward {
 	inline float ManyLampFade(const NiPointLight* source) {
 		const ShadowsExteriorEffect::InteriorsStruct::ForwardStruct& forward = TheShaderManager->Effects.ShadowsExteriors->Settings.Interiors.Forward;
 		float fade = 1.0f;
-		if (forward.FillLightRadius > 0.0f && source->Spec.r > forward.FillLightRadius) fade *= forward.FillLightShadowStrength;
+		if (forward.FillLightRadius > 0.0f && source->Spec.r > forward.FillLightRadius) fade *= FillShadowStrength(forward);
 		if ((forward.InvisibleLightShadowStrength < 1.0f || InvisibleSize > 0.0f) && LampFixtures::Invisible(source, forward.FixtureDistance)) {
 			fade *= forward.InvisibleLightShadowStrength;
 			if (InvisibleSize > 0.0f) fade = -fade;

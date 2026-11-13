@@ -6,6 +6,23 @@
 #include "RtFogGrid.h"
 #include "RtFogLampGrid.h"	// UNOFFICIAL 2026-11-12 LampHazeShadows: the lamps' pass constants and slots
 #include "RtDenoise.h"	// UNOFFICIAL 2026-11-07 (perf-history) HistoryClock
+#include "RtLampShadows.h"	// UNOFFICIAL 2026-11-13 RidersWithSameFrame: SameFrameTraced
+
+// UNOFFICIAL 2026-11-13 [Main.Main.RayTracing] RidersWithSameFrame (on; BUG FIX; a missing key: on). The two riders of this file trace
+// only while another RT effect traces (RtCore::OthersWant: a user whose Wants() is true at the RT point of the frame). The RT lamp
+// shadows' SameFrame mode (their default) traces BEFORE the world and then answers Wants() false for the rest of that frame, so with the
+// RT lamp shadows as the only other RT effect the riders never traced: LampHazeShadows did nothing in a room with RT lamp shadows on
+// (bench 2026-11-13, run 20261113-115304-slotC: "RT fog lamps traced" only once path tracing was switched on). On: a frame whose lamp
+// shadows were traced before the world counts as a host too (the core then makes the frame's second exchange for the rider's pass, the
+// same scene, as it does for RT ambient occlusion beside same-frame lamp shadows). Off: as before.
+namespace {
+	bool HostTraces(const char* rider) {
+		if (RtCore::OthersWant(rider)) return true;
+		if (!RtLampShadows::SameFrameTraced()) return false;
+		SettingManager::Configuration::ConfigNode node;
+		return !TheSettingManager->Config.FillNode(&node, "Main.Main.RayTracing", "RidersWithSameFrame") || node.BoolValue;
+	}
+}
 
 namespace {
 	const char* const kSection = "Shaders.VolumetricLight.RT";
@@ -16,7 +33,22 @@ namespace {
 		RtFogGrid::Settings grid;
 		float	fadeLength = 1000.0f;
 		int		debugView = 0;		// 1: traced, not used (the cascades: an A/B)
+		// UNOFFICIAL 2026-11-13 (rtvol2) Expanded: the look of a current game's traced / froxel volumetric light while the air is traced
+		// (RtFogVisibility.h ExpandedLook). Off (the default): the traced visibility only replaces the shadow maps' lookup, as before.
+		bool	expanded = false;
+		float	expandedDistance = 8000.0f;	// the lit path (planar depth of the grid's far side)
+		float	expandedDensity = 0.015f;	// per 1000 units, by day
+		float	expandedHeight = 1500.0f;	// the dust's scale height above the eye (0: even air)
+		float	expandedGlow = 0.3f;		// the tight forward lobe's share of the scattering
+		float	expandedSharpness = 0.85f;	// its g
+		bool	expandedClouds = true;		// the volumetric clouds' shadow in the air
 	} S;
+	// (rtvol2) ExpandedClouds: the clouds' shadow map in the helper (registered at the helper's start when the map exists then), and
+	// whether this frame's trace carried it
+	int			imageCloud = -1;
+	UINT		imageCloudSize = 0;
+	bool		cloudsInTrace = false;
+	bool		expandedTraced = false;		// the last trace was made with the expanded look's grid and range
 
 	int			shader = -1;
 	int			image[2] = { -1, -1 };	// the ping-pong pair: this frame's output, last frame's (the history)
@@ -39,7 +71,22 @@ namespace {
 		S.debugView = TheSettingManager->GetSettingI(kSection, "DebugView");
 		S.grid.debug = 0;
 		S.grid.jitter = true;
+		// (rtvol2) the expanded look; a missing key: off / the defaults
+		SettingManager::Configuration::ConfigNode node;
+		auto readF = [&](const char* key, float fallback, float lo, float hi) {
+			return TheSettingManager->Config.FillNode(&node, kSection, key) ? std::clamp(TheSettingManager->GetSettingF(kSection, key), lo, hi) : fallback;
+		};
+		S.expanded = TheSettingManager->Config.FillNode(&node, kSection, "Expanded") && node.BoolValue;
+		S.expandedDistance = readF("ExpandedDistance", 8000.0f, 2000.0f, 16000.0f);
+		S.expandedDensity = readF("ExpandedDensity", 0.015f, 0.0f, 2.0f);
+		S.expandedHeight = readF("ExpandedHeight", 1500.0f, 0.0f, 20000.0f);
+		S.expandedGlow = readF("ExpandedSunGlow", 0.3f, 0.0f, 0.9f);
+		S.expandedSharpness = readF("ExpandedGlowSharpness", 0.85f, 0.6f, 0.95f);
+		S.expandedClouds = !TheSettingManager->Config.FillNode(&node, kSection, "ExpandedClouds") || node.BoolValue;
 	}
+
+	// (rtvol2) the expanded look is asked for (it applies once a trace with it exists: ExpandedLook)
+	bool ExpandedWanted() { return S.enabled && S.expanded && S.debugView != 1; }
 
 	// Outdoors, the volumetric light on, the helper already running for another RT effect
 	bool Wants() {
@@ -48,13 +95,26 @@ namespace {
 		VolumetricLightEffect* light = TheShaderManager->Effects.VolumetricLight;
 		ShadowsExteriorEffect* shadows = TheShaderManager->Effects.ShadowsExteriors;
 		if (!light || !light->Enabled || !shadows || !TheShaderManager->GameState.isExterior || TheShaderManager->GameState.isUnderwater) return false;
-		return RtCore::OthersWant(kUserName);
+		return HostTraces(kUserName);	// (2026-11-13 RidersWithSameFrame: was RtCore::OthersWant alone)
 	}
 
 	void Setup() {
 		RtFogGrid::Columns(TheRenderManager->width, TheRenderManager->height, imageColumns, imageRows);
 		image[0] = RtCore::AddImage("NVR RT fog visibility 0", imageColumns * 8, imageRows * 8, NVR_EXT_SHARED_R16F);
 		image[1] = RtCore::AddImage("NVR RT fog visibility 1", imageColumns * 8, imageRows * 8, NVR_EXT_SHARED_R16F);
+		// (rtvol2) ExpandedClouds: the volumetric clouds' shadow map, if it exists at the helper's start (as RtSunShadows' CloudShadows:
+		// clouds switched on later count from the next start). 256 x 256 RGBA16F by default: 0.5 MB.
+		imageCloud = -1;
+		imageCloudSize = 0;
+		{
+			VolumetricCloudsEffect* clouds = TheShaderManager->Effects.VolumetricClouds;
+			D3DSURFACE_DESC desc = {};
+			if (clouds && clouds->Textures.ShadowTexture && SUCCEEDED(clouds->Textures.ShadowTexture->GetLevelDesc(0, &desc)) &&
+				desc.Format == D3DFMT_A16B16G16R16F && desc.Width == desc.Height && desc.Width == clouds->shadowMapSize) {
+				imageCloud = RtCore::AddImage("NVR RT fog cloud shadow", desc.Width, desc.Height, NVR_EXT_SHARED_RGBA16F);
+				imageCloudSize = desc.Width;
+			}
+		}
 		lastView.valid = false;
 		since = 0;
 		lastTracedFrame = 0xFFFFFFFF;
@@ -98,6 +158,11 @@ namespace {
 		s.temporal = RtHistoryTime::Keep(s.temporal, clock);
 		s.temporalMoving = RtHistoryTime::Keep(s.temporalMoving, clock);
 		s.range = (std::min)(s.range, (std::max)(512.0f, TheSettingManager->GetSettingF("Main.Main.RayTracing", "SceneRadius")));
+		// (rtvol2) Expanded: every cell of the longer grid is traced (its corners lie up to ~1.35 x its planar depth away), past SceneRadius
+		// too: a sun ray from there still meets what the scene holds between it and the sun (the far LOD with FarLandLOD / FarObjectLOD),
+		// and what it cannot see counts as lit, as the shadow maps' "past the shadow distance" did.
+		const bool expandedNow = ExpandedWanted();
+		if (expandedNow) s.range = (std::max)(s.range, now.maxDistance * 1.45f);
 		const int atlas = RtCore::AlphaAtlasImage();
 		s.alphaTested = RtCore::AlphaTested() && atlas >= 0;
 		s.mask = 0xFFu;	// land, objects, alpha-tested, actors, the far LOD: every caster the RT sun shadows see
@@ -106,9 +171,27 @@ namespace {
 		RtFogGrid::PassConstants c;
 		RtFogGrid::Fill(c, now, lastView, weight, sunUp, s, frames);
 
+		// (rtvol2) ExpandedClouds: the clouds' shadow map as last drawn (drawn later in the frame: last frame's, with its own centre), as
+		// RtSunShadows' CloudShadows takes it. Without it (or the expanded look off) cloud[0] stays 0 and binding 5 is not bound.
+		cloudsInTrace = false;
+		if (expandedNow && S.expandedClouds && imageCloud >= 0) {
+			VolumetricCloudsEffect* clouds = TheShaderManager->Effects.VolumetricClouds;
+			if (clouds && clouds->Enabled && clouds->rtMapValid && clouds->Textures.ShadowTexture && clouds->shadowMapSize == imageCloudSize) {
+				const float strength = clouds->ShadowStrengthForSunFar();
+				if (strength > 0.0f && RtCore::CopyIn(imageCloud, clouds->Textures.ShadowTexture)) {
+					c.cloud[0] = strength; c.cloud[1] = clouds->rtMapRange; c.cloud[2] = (float)clouds->shadowMapSize; c.cloud[3] = clouds->rtMapBase;
+					c.cloudCentre[0] = clouds->rtMapCentre[0]; c.cloudCentre[1] = clouds->rtMapCentre[1]; c.cloudCentre[2] = 1.0f / 70.0f;
+					c.cloudLight[0] = clouds->rtMapLight[0]; c.cloudLight[1] = clouds->rtMapLight[1]; c.cloudLight[2] = clouds->rtMapLight[2];
+					c.camera[0] = TheRenderManager->CameraPosition.x; c.camera[1] = TheRenderManager->CameraPosition.y; c.camera[2] = TheRenderManager->CameraPosition.z;
+					cloudsInTrace = true;
+				}
+			}
+		}
+
 		const int out = image[nextOut], hist = image[nextOut ^ 1];
-		const int images[3] = { out, hist, s.alphaTested ? atlas : hist };	// [2]: binding 4, a stand-in (never read) without alpha-tested casters
-		if (!RtCore::AddPass(shader, images, 3, 0x1, &c, sizeof(c), (columns * 8 + 7) / 8, (rows * 8 + 7) / 8)) return;
+		const int images[4] = { out, hist, s.alphaTested ? atlas : hist,	// [2]: binding 4, a stand-in (never read) without alpha-tested casters
+			imageCloud };	// [3]: binding 5 (rtvol2), only passed while cloudsInTrace
+		if (!RtCore::AddPass(shader, images, cloudsInTrace ? 4 : 3, 0x1, &c, sizeof(c), (columns * 8 + 7) / 8, (rows * 8 + 7) / 8)) return;
 		if (!RtCore::CopyOut(out, light->Textures.RtVisibilitySurface, columns * 8, rows * 8)) return;
 		lastTracedFrame = frameNow;
 		lastView = now;
@@ -116,6 +199,18 @@ namespace {
 		nextOut ^= 1;
 		tracedDistance = now.maxDistance;
 		tracedRange = s.range;
+		expandedTraced = expandedNow;
+		static int expandedLogs = 0;	// (rtvol2) one line when the look changes (at most 8 a session)
+		static int lastExpandedState = -1;
+		const int expandedState = expandedNow ? (cloudsInTrace ? 2 : 1) : 0;
+		if (expandedState != lastExpandedState && expandedLogs < 8) {
+			lastExpandedState = expandedState;
+			expandedLogs++;
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT light shafts, expanded look %s: grid out to %.0f, traced to %.0f, density %.4f / 1000, dust height %.0f, "
+				"sun glow %.2f (sharpness %.2f), cloud shadows in the air %s.", expandedNow ? "ON" : "off", now.maxDistance, s.range, S.expandedDensity, S.expandedHeight,
+				S.expandedGlow, S.expandedSharpness, cloudsInTrace ? "on" : !S.expandedClouds ? "off (ExpandedClouds)" :
+				imageCloud < 0 ? "not available (no volumetric cloud shadow map at the helper's start)" : "not this frame (clouds off or no shadow)");
+		}
 		if (frames++ == 0 || (frames % 3600) == 0)
 			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT fog visibility traced (frame %u): grid %u x %u x 64 out to %.0f, %d ray%s a cell (%u rays), Temporal %.2f (weight %.2f), "
 				"range %.0f (fade %.0f), alpha-tested casters %s, DebugView %d.", frames, columns, rows, now.maxDistance, s.rays, s.rays > 1 ? "s" : "",
@@ -165,7 +260,7 @@ namespace {
 		if (L.shader < 0 || L.submitCount <= 0 || !RtCore::Running()) return false;
 		if (LampFrameNow() - L.submitFrame > 2u) return false;	// LampHazeShadows or LampHaze off, outdoors, the fog off: nothing asked
 		if (TheShaderManager->GameState.isExterior || TheShaderManager->GameState.isUnderwater) return false;
-		return RtCore::OthersWant(kLampUser);
+		return HostTraces(kLampUser);	// (2026-11-13 RidersWithSameFrame: was RtCore::OthersWant alone)
 	}
 
 	void LampSetup() {
@@ -321,7 +416,23 @@ namespace RtFogVisibility {
 		const UInt32 frameNow = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
 		if (lastTracedFrame != frameNow || S.debugView == 1 || !S.enabled) return D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
 		const float mode = fabsf(GridDistance - tracedDistance) <= 0.01f * (std::max)(tracedDistance, 1.0f) ? 1.0f : 2.0f;
+		// (rtvol2) Expanded: the whole longer grid is traced, so no fade back to the shadow maps inside it (they end at 6000 anyway)
+		if (expandedTraced) return D3DXVECTOR4(mode, tracedRange, 1.0f, tracedDistance);
 		return D3DXVECTOR4(mode, tracedRange, S.fadeLength, tracedDistance);
+	}
+
+	float ExpandedGridDistance() { return ExpandedWanted() ? S.expandedDistance : 0.0f; }
+
+	bool ExpandedLook(Look& Out) {
+		const UInt32 frameNow = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
+		// the last trace was the expanded one, and recent (this frame or the one before: the light's constants may be set before the trace)
+		if (!ExpandedWanted() || !expandedTraced || lastTracedFrame == 0xFFFFFFFF || frameNow - lastTracedFrame > 1u) return false;
+		Out.distance = tracedDistance;
+		Out.density = S.expandedDensity;
+		Out.heightInv = S.expandedHeight > 0.0f ? 1.0f / S.expandedHeight : 0.0f;
+		Out.glow = S.expandedGlow;
+		Out.sharpness = S.expandedSharpness;
+		return true;
 	}
 
 	std::string StatusText() {
@@ -332,5 +443,65 @@ namespace RtFogVisibility {
 			!RtCore::Running() ? "the RT core is not running: the cascades" : "rides along with the other RT effects", imageColumns, imageRows, frames,
 			lastTracedFrame == 0xFFFFFFFF ? 0u : lastTracedFrame, lastTracedFrame == frameNow ? " (this frame)" : "", S.grid.rays, S.grid.temporal, tracedRange, S.debugView, noRoom);
 		return t;
+	}
+
+	// UNOFFICIAL 2026-11-13 (RtFogVisibility.h). The order of the tests is the order a player would have to fix them in. Reads only.
+	int MenuState(std::string& Text, int* Code) {
+		auto say = [&](int state, int code, const std::string& text) { Text = text; if (Code) *Code = code; return state; };
+		ReadSettings();
+		if (!S.enabled) return say(0, 1, "off");
+		ShaderManager* sm = TheShaderManager;
+		VolumetricLightEffect* light = sm->Effects.VolumetricLight;
+		if (!sm->GameState.isExterior) {
+			// the sun's shafts do not exist indoors; the indoor shafts are the fog's lamp haze, with its own traced shadows
+			VolumetricFogEffect* fog = sm->Effects.VolumetricFog;
+			const char* haze = "it is off: Volumetric fog > Interiors > LampHazeEnabled";
+			int code = 10;
+			if (fog && fog->Enabled && fog->lampHaze > 0.0f) {
+				if (!fog->lampHazeShadows) { haze = "it is on, without traced shadows (LampHazeShadows is off)"; code = 11; }
+				else if (LampUsable()) { haze = "it is on, with traced shadows (LampHazeShadows)"; code = 12; }
+				else { haze = "it is on; LampHazeShadows waits for another ray-traced effect to run here"; code = 13; }
+			}
+			return say(0, code, std::string("indoors: the sun's light shafts are outdoors only. Indoor shafts are the fog's lamp haze: ") + haze);
+		}
+		if (sm->GameState.isUnderwater) return say(0, 2, "under water: no light shafts");
+		if (!light || !light->Enabled) return say(2, 3, "on, but Volumetric light is off: there are no light shafts to trace");
+		if (!light->ShouldRender())
+			return say(2, 4, "on, but no light shafts are drawn now (the sun's shadows are off or faded out: sunrise, sunset, a dim moon)");
+		if (!RtCore::Running() || !HostTraces(kUserName))
+			return say(2, 5, "waiting: it traces only while another ray-traced effect runs here (sun shadows, occlusion, reflections, lamp shadows "
+				"or path tracing). Now the shafts use the shadow maps");
+		if (RtCore::LeftOut(kUserName)) return say(2, 6, "on, but its images did not fit when ray tracing started: the shafts use the shadow maps");
+		const UInt32 frameNow = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
+		if (lastTracedFrame == 0xFFFFFFFF || frameNow - lastTracedFrame > 2u)
+			return say(2, 7, "on, but not traced these frames (the frame's ray tracing passes are full, or the grid does not fit the screen): "
+				"the shafts use the shadow maps");
+		if (S.debugView == 1) return say(2, 8, "traced but not used (DebugView 1): the shafts use the shadow maps");
+		// Running. It only moves the shadows in the lit air: against the shadow maps the picture changes within its frame-to-frame noise
+		// at the default look (bench 2026-11-13, og-goodsprings: mean |difference| 0.7 of 255 against 0.6 between two equal shots), so say
+		// what to expect and where the look is set
+		char t[400];
+		if (expandedTraced) {	// (rtvol2)
+			sprintf_s(t, "running, modern look (Expanded): the lit air reaches %.0f units, all of it traced (far hills, buildings and people cast "
+				"shafts of shade), the dust thins with height, the glow gathers round the sun; cloud shadows in the air %s", tracedDistance,
+				cloudsInTrace ? "on" : !S.expandedClouds ? "off" : imageCloud < 0 ? "not available (Volumetric clouds' shadows were off when ray tracing started)" : "none now");
+			return say(1, cloudsInTrace ? 22 : 21, t);
+		}
+		sprintf_s(t, "running: the lit air's shadows are traced out to %.0f units (fences, leaves, people and far buildings shade the air as "
+			"they shade the ground). Expect a small change against the shadow maps: it adds no light of its own. How strong the lit air and "
+			"its shafts are is Volumetric light > Strength, Density and Darken", tracedRange);
+		return say(1, 20, t);
+	}
+
+	void LogIfChanged() {
+		static int lastCode = -1, lines = 0;
+		if (lines >= 12 || !RtCore::Running()) return;
+		std::string text;
+		int code = 0;
+		MenuState(text, &code);
+		if (code == lastCode) return;
+		lastCode = code;
+		lines++;
+		Logger::Log("RT LIGHT SHAFTS ([Shaders.VolumetricLight.RT], line %d of at most 12): %s. | %s | %s", lines, text.c_str(), StatusText().c_str(), RtFogLamps::StatusText().c_str());
 	}
 }

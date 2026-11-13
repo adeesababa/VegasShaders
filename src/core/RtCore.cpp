@@ -184,6 +184,9 @@ namespace {
 		// 2 the source op sent (its instances are flagged), 3 never (no texcoords, no textures, a vertex layout the data cannot take)
 		UInt32	dispData[3] = { 0, 0, 0 };
 		UInt8	dispState = 0;
+		// UNOFFICIAL 2026-11-12 (memleak) [Main.Main.RayTracing] DisplaceTextureRelease: the texture ids its source op named (Core::DispHold;
+		// 0 none), given back when the entry goes (Core::DispDrop)
+		UInt16	dispTex[7] = { 0, 0, 0, 0, 0, 0, 0 };
 		UInt32	triangles = 0;		// (2026-11-07 ptaaa-emissive) its triangle count when built (PTEmissive's list; 0: unknown)
 	};
 
@@ -456,6 +459,52 @@ namespace {
 		int			atlasImage = -1;
 		UInt32		atlasUsed = 0, atlasThisFrame = 0, glowSlots = 0;	// glowSlots: slots with a glow map (GlowTextures)
 		std::unordered_map<UInt64, int> alphaSlots;			// diffuse texture | glow texture << 32 -> slot (-1: unreadable)
+		// UNOFFICIAL 2026-11-12 slot reuse ([Main.Main.RayTracing] AtlasSlotReuse; a tester's audit of a long session: "the RT atlas has 1,024
+		// texture slots, and they're never freed. Each trip Mojave -> [another worldspace] -> Mojave reloads the same textures under new
+		// addresses, so they take fresh slots"; with the table full, new see-through meshes were left out of the traced scene and no new
+		// texture reached the helper, for the rest of the session). A slot nobody asked for in kSlotIdle scene frames is given to the next
+		// new texture. Safe because every geometry that holds a slot asks for it again each scene frame it is met (AddGeometry, the leaf
+		// cards, the skinned parts), and a geometry not met for kReleaseAfterFrames (120) is released in the helper: nothing alive can
+		// still name a slot that has been idle for 900. Counted in scene frames (not exchanges): while the scene is not gathered nothing
+		// ages. slotKey: the slot's key in alphaSlots (0 = none); slotUse: the scene frame it was last asked for.
+		std::vector<UInt64> slotKey;
+		std::vector<UInt32> slotUse;
+		bool		slotReuse = true;
+		UInt32		slotCapTest = 0;
+		UInt32		slotsReused = 0, slotsFullTold = 0;
+		static const UInt32 kSlotIdle = 900;
+		void		EvictSlot(UInt32 slot);
+		// UNOFFICIAL 2026-11-12 [Main.Main.RayTracing] RealTextureKeepFrames (the same audit: "once a texture is sent to the ray tracer it stays
+		// in video memory ... the budget only grows"): textures were released only to make room once RealTextureBudgetMB was full, and each
+		// one also holds a reference on the game's own copy, so a texture the game had dropped stayed in video memory twice until then.
+		// Now a texture not used for this many exchanges is released whatever the budget (its slot falls back to the atlas and sends it
+		// again when next used, as after a budget release). 0 = as before.
+		UInt64		texKeepFrames = 3600;
+		UInt32		texStaleReleased = 0;
+		void		TrimTextures(NvrRtFrame& f, UInt64 n);
+		// UNOFFICIAL 2026-11-12 (memleak) [Main.Main.RayTracing] IdleStopMinutes (live; 0 = never, as before). A helper nobody traces with
+		// used to stay up for the rest of the session ("idle"): its process and video memory, and on the game's side the shared images, the
+		// transfer images, the upload targets and a reference on every texture sent. All the releasing above runs only on gathered frames,
+		// so none of it ran either. After this many minutes of frames in which no ray tracing effect wanted to trace, the helper is stopped
+		// as a screen-size change stops it (Core::Stop: everything given back); it starts again when an effect next wants it. Counted over
+		// drawn frames (each at most a quarter second): a pause, a loading screen or the game in the background does not run the clock.
+		double		idleMs = 0.0;				// frames with the helper up and no user wanting it, in milliseconds
+		ULONGLONG	idleLastTick = 0, idleCheckedAt = 0;
+		float		idleStopMinutes = 5.0f;
+		UInt32		idleStops = 0;
+		void		IdleFrame();
+		// UNOFFICIAL 2026-11-12 (memleak) [Main.Main.RayTracing] DisplaceTextureRelease (read at each helper start; off = as before). A
+		// texture the displacement asked for was pinned for the session (RtTexturePack::Residency::Pin): the helper's copy and the reference
+		// on the game's texture never went, and every cell's land brought more (a reload brings the same textures at new addresses). The pin
+		// is there because the helper's displaced copies keep reading the texture; but a copy lives only as long as its geometry, and that is
+		// released when not met for kReleaseAfterFrames. So: dispRefs counts, per texture id, the live geometries whose source op named it;
+		// at zero the pin comes off and the texture ages like any other (RealTextureKeepFrames, the budget). A texture asked for again is
+		// sent again (TextureIdFor). The helper reads a texture it no longer has as "no height" (NvrRtDisplace.inl), never as garbage.
+		bool		dispUnpin = true;
+		std::vector<UInt16> dispRefs;
+		UInt32		dispUnpinned = 0;
+		void		DispHold(GeometryEntry& entry, const uint32_t* ids, uint32_t count);
+		void		DispDrop(GeometryEntry& entry);
 		IDirect3DTexture9* alphaUpload = nullptr;			// 64 x 64 R16F: the colour pass's alpha target (a scratch since 2026-11-06)
 		IDirect3DTexture9* alphaDetailUpload = nullptr;	// (2026-11-06) AlphaDetail x AlphaDetail R16F: one slot's alpha on its way to the alpha atlas
 		UInt32		alphaDetail = 256;				// (2026-11-06) [Main.Main.RayTracing] AlphaDetail (64 / 128 / 256, restart): the alpha atlas' texels a texture
@@ -685,12 +734,35 @@ namespace {
 				if ((size_t)s < slotReal.size() && slotReal[s].state != 1) { slotReal[s].state = 1; QueueSlot(s, texture, normal, glow); }
 			}
 			if (s >= 0 && realTextures) NoteSlotUse(s, texture, normal, glow);	// (2026-11-07, protocol 8) last use / resend
+			if (s >= 0 && (size_t)s < slotUse.size()) slotUse[s] = sceneFrame;	// UNOFFICIAL 2026-11-12 slot reuse
 			return s;
 		}
-		const UInt32 capacity = NVR_RT_ALPHA_ATLAS_SLOTS * NVR_RT_ALPHA_ATLAS_SLOTS;
-		if (atlasImage < 0 || atlasUsed >= capacity) return -1;
+		// (slotCapTest: [Main.Develop.Main] RtAtlasSlotCap, tests only: a smaller table, so a bench run fills it and exercises the reuse)
+		const UInt32 capacity = slotCapTest ? (std::min)(slotCapTest, (UInt32)(NVR_RT_ALPHA_ATLAS_SLOTS * NVR_RT_ALPHA_ATLAS_SLOTS)) : NVR_RT_ALPHA_ATLAS_SLOTS * NVR_RT_ALPHA_ATLAS_SLOTS;
+		if (atlasImage < 0) return -1;
+		UInt32 at = atlasUsed;
+		bool reused = false;
+		if (atlasUsed >= capacity) {	// UNOFFICIAL 2026-11-12 slot reuse: the table is full: the slot idle the longest, if any is idle
+			int victim = -1;
+			if (slotReuse && slotUse.size() >= capacity) {
+				UInt32 oldest = sceneFrame;
+				for (UInt32 i = 0; i < capacity; i++)
+					if (sceneFrame - slotUse[i] > kSlotIdle && slotUse[i] <= oldest) { oldest = slotUse[i]; victim = (int)i; }
+			}
+			if (victim < 0) {
+				if (slotsFullTold < 4) { slotsFullTold++; Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT texture table: all %u slots are %s: a new texture gets no slot (its see-through mesh is left out of the traced scene, an opaque one keeps its plain colour)",
+					capacity, slotReuse ? "in use (none idle for 900 scene frames)" : "taken and AtlasSlotReuse is off"); }
+				return -1;
+			}
+			// a slot that named real textures tells the helper so in this exchange's op list: no room there = next frame
+			const SlotReal* was = (UInt32)victim < slotReal.size() ? &slotReal[victim] : nullptr;
+			if (was && (was->ids[0] || was->ids[1] || was->ids[2]) && (!record || record->opCount >= NVR_RT_MAX_OPS)) return -2;
+			at = (UInt32)victim;
+			reused = true;
+		}
 		if (atlasThisFrame >= 8) return -2;
 		atlasThisFrame++;
+		if (reused) EvictSlot(at);
 		const UInt32 S = NVR_RT_ALPHA_SLOT_SIZE;
 		static ID3D9NvrExtPipeline* pipelines[2] = {};	// [0] alpha only (RtAlphaToAtlas), [1] alpha + colour (RtTextureToAtlas)
 		static bool triedPipelines[2] = {};
@@ -752,8 +824,7 @@ namespace {
 			draw.pPushData = push;
 			draw.PushDataSize = sizeof(push);
 			const RECT all = { 0, 0, (LONG)S, (LONG)S };
-			const UInt32 at = atlasUsed;
-			const UInt32 x = (at % NVR_RT_ALPHA_ATLAS_SLOTS) * S, y = (at / NVR_RT_ALPHA_ATLAS_SLOTS) * S;
+			const UInt32 x = (at % NVR_RT_ALPHA_ATLAS_SLOTS) * S, y = (at / NVR_RT_ALPHA_ATLAS_SLOTS) * S;	// (at: the next new slot, or the reused one)
 			// (2026-11-06) the alpha atlas at AlphaDetail texels a texture: the alpha-only pass into its own target (the 64-texel colour pass
 			// above keeps the albedo / glow / normal atlases; its alpha target is a scratch). Thin cut-outs (chain-link wires) survive at 256.
 			auto detailAlpha = [&]() {
@@ -809,7 +880,7 @@ namespace {
 						normalTarget->Release();
 					}	// (no map in the slot: it reads 0, the shaders keep the triangle's normal)
 				}
-				if (slot >= 0) { atlasUsed++; if (glow) glowSlots++; }
+				if (slot >= 0) { if (!reused) atlasUsed++; if (glow) glowSlots++; }
 				if (slot >= 0 && realTextures && (UInt32)slot < slotReal.size()) {	// (2026-11-07, protocol 7)
 					QueueSlot(slot, texture, normal, glow);
 					slotReal[slot] = SlotReal();
@@ -824,7 +895,67 @@ namespace {
 		// diffuse + 1024 glow textures alive for the session, GBs of VRAM after a long walk). The remaining ABA risk there is a wrong
 		// alpha / albedo atlas slot for a texture reallocated at a freed one's address (no crash); see SunGI-study F2.
 		alphaSlots.emplace(key, slot);
+		if (slot >= 0 && (size_t)slot < slotKey.size()) { slotKey[slot] = key; slotUse[slot] = sceneFrame; }	// UNOFFICIAL 2026-11-12 slot reuse
 		return slot;
+	}
+
+	// UNOFFICIAL 2026-11-12 slot reuse: the slot leaves its old texture (AlphaSlotOf: idle for kSlotIdle scene frames, about to be drawn
+	// over). Its key goes (the texture, met again, gets a new slot), the helper is told the slot names no real textures any more (they
+	// would be read in place of the new atlas contents until the new ones arrive), a want still queued for it is dropped.
+	void Core::EvictSlot(UInt32 slot) {
+		if (slot < slotKey.size() && slotKey[slot]) {
+			auto it = alphaSlots.find(slotKey[slot]);
+			if (it != alphaSlots.end() && it->second == (int)slot) alphaSlots.erase(it);
+			if ((slotKey[slot] >> 32) != 0 && glowSlots) glowSlots--;
+			slotKey[slot] = 0;
+		}
+		if (slot < slotUse.size()) slotUse[slot] = sceneFrame;
+		if (slot < slotReal.size()) {
+			SlotReal& s = slotReal[slot];
+			if ((s.ids[0] || s.ids[1] || s.ids[2]) && record && record->opCount < NVR_RT_MAX_OPS) {
+				NvrRtTextureOp op = { NVR_RT_OP_SLOT_TEXTURES, slot, 0u, 0u, 0u, 0, 0, 0 };
+				memcpy(&record->ops[record->opCount++], &op, sizeof(op));
+				texSlotsSent++;
+			}
+			s = SlotReal();
+		}
+		if (slot < slotNormals.size()) slotNormals[slot] = nullptr;
+		for (size_t i = 0; i < slotQueue.size(); ) {
+			if (slotQueue[i].slot == (int)slot) {
+				for (IDirect3DBaseTexture9* x : slotQueue[i].tex) if (x) x->Release();
+				slotQueue.erase(slotQueue.begin() + i);
+			}
+			else i++;
+		}
+		slotsReused++;
+		if (slotsReused == 1 || (slotsReused % 200) == 0)
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT texture table: full (%u slots); slots idle for %u scene frames are reused for new textures (%u so far)",
+				(UInt32)(NVR_RT_ALPHA_ATLAS_SLOTS * NVR_RT_ALPHA_ATLAS_SLOTS), kSlotIdle, slotsReused);
+	}
+
+	// UNOFFICIAL 2026-11-12 RealTextureKeepFrames: every 64th exchange, up to 16 textures unused for texKeepFrames are released (ReleaseTexture:
+	// the helper frees its copy, the reference on the game's texture is given back, the slots that named it fall back to the atlas and
+	// send it again when next used).
+	void Core::TrimTextures(NvrRtFrame& f, UInt64 n) {
+		// (the audit of the same day: this tested the exchange counter n. With two exchanges a frame (RT reflections with any other RT effect,
+		// the lamp shadows' early exchange) the gathering exchange keeps one parity, and while that is odd (n & 63) never passed: the release
+		// by age did nothing. The scene frame counts gathered frames.)
+		if (!realTextures || !texKeepFrames || (sceneFrame & 63) != 0) return;
+		std::vector<uint32_t> stale;
+		texRes.PickStale(n, texKeepFrames, 16u, stale);
+		UInt32 freedNow = 0;
+		const UInt64 before = texRes.alive;
+		for (uint32_t id : stale) {
+			if (f.opCount + 1 >= NVR_RT_MAX_OPS) break;
+			ReleaseTexture((UInt32)id, f, n);
+			freedNow++;
+		}
+		if (!freedNow) return;
+		const bool first = texStaleReleased == 0;
+		texStaleReleased += freedNow;
+		if (first || (texStaleReleased / 256) != ((texStaleReleased - freedNow) / 256))
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT real textures: %u released because unused for %llu exchanges (RealTextureKeepFrames; %u in all), %llu MB given back now, %u alive = %llu MB",
+				freedNow, (unsigned long long)texKeepFrames, texStaleReleased, (unsigned long long)((before - texRes.alive) >> 20), texRes.count, (unsigned long long)(texRes.alive >> 20));
 	}
 	// (2026-11-07, protocol 7; protocol 8 rtgap-textures) a texture's levels into this exchange's half of its route's transfer image + a
 	// TEXTURE op (bytes 0: on the GPU). Returns its id, 0 = not now (the slot keeps the atlas: not a 2D texture, a format left out, or the
@@ -864,6 +995,10 @@ namespace {
 		}
 		if (f.opCount + victims.size() + 2 > NVR_RT_MAX_OPS) return -1;
 		uint32_t x = 0, y = 0;
+		// UNOFFICIAL 2026-11-12 (RT memory audit): a texture with no smaller level than the cap (a single-level one bigger than the route's
+		// transfer half) can never be placed. Returning "no room this exchange" for it kept it at the head of the queue for good: no later
+		// texture reached the helper, and every queued want held its references. It keeps the atlas instead.
+		if (p.fw > texW[p.route] || p.fh > texHalfH[p.route]) return no("bigger than the transfer image and no smaller level", p.fw, p.fh);
 		if (!texShelf[p.route].Place(p.fw, p.fh, texW[p.route], texHalfH[p.route], x, y)) return -1;
 		y += (UInt32)(n & 1) * texHalfH[p.route];
 		for (UInt32 l = 0; l < p.levels; l++) {
@@ -900,7 +1035,9 @@ namespace {
 		NvrRtTextureOp op = { NVR_RT_OP_TEXTURE_RELEASE, id, 0u, 0u, 0u, 0u, 0u, 0u };
 		memcpy(&f.ops[f.opCount++], &op, sizeof(op));
 		texRes.Free(id, n, kTexReuse);
+		const IDirect3DBaseTexture9* released = nullptr;
 		if (id < texKeyOf.size()) {
+			released = texKeyOf[id];	// (its address only: compared with the slots' keys below, never read through)
 			auto it = texIds.find(texKeyOf[id]);
 			if (it != texIds.end() && it->second.id == id) texIds.erase(it);
 			// UNOFFICIAL 2026-11-11 (sungi, ABA guard F2): the key is erased first (the Release may free the texture and its address)
@@ -910,6 +1047,19 @@ namespace {
 		for (SlotReal& s : slotReal)
 			for (UInt32 k = 0; k < 3; k++)
 				if (s.ids[k] == id) { s.ids[k] = 0; s.state = 3; s.retryAt = n; }
+		// UNOFFICIAL 2026-11-12 (RT memory audit): the reference given back above may free the game's texture, and a new texture can then
+		// come at its address: a slot still keyed by that address would hand it the old texture's alpha and colour. A slot whose diffuse
+		// this was, and which nobody has asked for since its geometries were released, loses its key: the texture, met again, gets a
+		// slot of its own (this one is free for reuse).
+		for (size_t slot = 0; slot < slotReal.size() && slot < slotKey.size() && slot < slotUse.size(); slot++) {
+			if (!slotKey[slot] || sceneFrame - slotUse[slot] <= kReleaseAfterFrames + 30) continue;
+			if ((UInt32)(slotKey[slot] & 0xFFFFFFFFu) != (UInt32)(uintptr_t)released) continue;
+			auto it = alphaSlots.find(slotKey[slot]);
+			if (it != alphaSlots.end() && it->second == (int)slot) alphaSlots.erase(it);
+			if ((slotKey[slot] >> 32) != 0 && glowSlots) glowSlots--;
+			slotKey[slot] = 0;
+			slotUse[slot] = 0;
+		}
 		texReleased++;
 	}
 
@@ -988,7 +1138,7 @@ namespace {
 				e.tried = true;
 				e.id = (UInt32)r;
 				e.retryAt = !r && budget ? n + kTexRetry : 0;
-				if (r > 0) texRes.Pin((uint32_t)r);
+				if (r > 0 && !dispUnpin) texRes.Pin((uint32_t)r);	// (2026-11-12 memleak: with DisplaceTextureRelease the source op that names it pins it, DispHold)
 				if (!r) texFailed++;
 			}
 			DropLoose(loose);
@@ -1126,6 +1276,21 @@ namespace {
 		glowSlots = 0;
 		ReleaseTexRefs();	// UNOFFICIAL 2026-11-11 (sungi, ABA guard F2): the references of the keys cleared here and below
 		alphaSlots.clear();
+		// UNOFFICIAL 2026-11-12 slot reuse / RealTextureKeepFrames (read at each helper start). A missing key = on / 3600.
+		slotKey.assign(NVR_RT_ALPHA_ATLAS_SLOTS * NVR_RT_ALPHA_ATLAS_SLOTS, 0);
+		slotUse.assign(NVR_RT_ALPHA_ATLAS_SLOTS * NVR_RT_ALPHA_ATLAS_SLOTS, 0);
+		slotsReused = 0; slotsFullTold = 0; texStaleReleased = 0;
+		{
+			SettingManager::Configuration::ConfigNode node;
+			slotReuse = !TheSettingManager->Config.FillNode(&node, "Main.Main.RayTracing", "AtlasSlotReuse") || node.BoolValue;
+			texKeepFrames = TheSettingManager->Config.FillNode(&node, "Main.Main.RayTracing", "RealTextureKeepFrames") ? (UInt64)(std::max)(TheSettingManager->GetSettingI("Main.Main.RayTracing", "RealTextureKeepFrames"), 0) : 3600;
+			if (texKeepFrames && texKeepFrames < 600) texKeepFrames = 600;	// (never under the budget release's own idle time, kTexIdle)
+			dispUnpin = !TheSettingManager->Config.FillNode(&node, "Main.Main.RayTracing", "DisplaceTextureRelease") || node.BoolValue;	// UNOFFICIAL 2026-11-12 (memleak): a missing key = on
+			dispRefs.assign(NVR_RT_MAX_TEXTURES, 0);
+			dispUnpinned = 0;
+			slotCapTest = TheSettingManager->Config.FillNode(&node, "Main.Develop.Main", "RtAtlasSlotCap") ? (UInt32)(std::max)(TheSettingManager->GetSettingI("Main.Develop.Main", "RtAtlasSlotCap"), 0) : 0u;
+			if (slotCapTest) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT texture table: TEST cap of %u slots (RtAtlasSlotCap), reuse %s, RealTextureKeepFrames %llu", slotCapTest, slotReuse ? "on" : "off", (unsigned long long)texKeepFrames);
+		}
 		// (2026-11-07, protocol 7) real textures: read at each helper start (restart), with the atlases they follow
 		realTextures = (alphaOn || hitTextures) && TheSettingManager->GetSettingI("Main.Main.RayTracing", "RealTextures") != 0;
 		texIds.clear(); ClearTextureQueues(); dispSentOn = false; texSent = texFailed = texSlotsSent = texReleased = 0; texCpuMs = 0.0;
@@ -1506,6 +1671,8 @@ namespace {
 		if (albedoDetailUpload) { albedoDetailUpload->Release(); albedoDetailUpload = nullptr; }
 		if (albedoDetailScratch) { albedoDetailScratch->Release(); albedoDetailScratch = nullptr; }
 		if (glowUpload) { glowUpload->Release(); glowUpload = nullptr; }
+		if (normalUpload) { normalUpload->Release(); normalUpload = nullptr; }	// (2026-11-12 audit: was left out)
+		RtHairTint::Wanted = false;
 	}
 
 	void Core::Poll() {
@@ -2398,6 +2565,25 @@ namespace {
 
 	// ---- UNOFFICIAL 2026-11-07 (rtgap-tessblas, protocol 8) displaced geometry (docs/next/RT-DETAIL-GAPS.md 1c) --------------------------
 
+	// UNOFFICIAL 2026-11-12 (memleak) DisplaceTextureRelease: a displaced source's textures, counted per id while its geometry lives
+	void Core::DispHold(GeometryEntry& entry, const uint32_t* ids, uint32_t count) {
+		DispDrop(entry);	// (not expected: one source op a geometry)
+		for (uint32_t i = 0; i < count && i < 7; i++) {
+			const uint32_t id = ids[i];
+			if (!id || id >= dispRefs.size() || !texRes.Live(id)) continue;
+			entry.dispTex[i] = (UInt16)id;
+			if (dispRefs[id] < 0xFFFF) dispRefs[id]++;
+			texRes.Pin(id);
+		}
+	}
+	void Core::DispDrop(GeometryEntry& entry) {
+		for (UInt16& id : entry.dispTex) {
+			if (!id) continue;
+			if (id < dispRefs.size() && dispRefs[id] && --dispRefs[id] == 0 && texRes.Pinned(id)) { texRes.Unpin(id, frame); dispUnpinned++; }
+			id = 0;
+		}
+	}
+
 	// (merged with rtgap-textures, protocol 8) an id the displacement takes is pinned: the helper's displaced copies keep reading it (their
 	// DISPLACE_SOURCE names it), so the budget's least-recently-used release never takes it (it still counts in RealTextureBudgetMB). A
 	// texture the budget refused is pending (-1), asked again from its retry exchange on, not "never".
@@ -2406,7 +2592,7 @@ namespace {
 		auto it = texIds.find(texture);
 		if (it != texIds.end() && it->second.tried) {
 			const TexEntry& e = it->second;
-			if (e.id) { texRes.Pin(e.id); texRes.Use(e.id, frame); return (int)e.id; }
+			if (e.id) { if (!dispUnpin) texRes.Pin(e.id); texRes.Use(e.id, frame); return (int)e.id; }	// (2026-11-12 memleak: pinned by DispHold with DisplaceTextureRelease)
 			if (!e.retryAt) return 0;
 			if (frame < e.retryAt) return -1;
 		}
@@ -2570,6 +2756,7 @@ namespace {
 			memcpy(&record->ops[record->opCount++], &op, sizeof(op));
 			entry.dispState = 2;
 			dispSources++;
+			if (dispUnpin) DispHold(entry, ids, land ? layers : 1u);	// UNOFFICIAL 2026-11-12 (memleak): pinned while this geometry lives
 			static int toldSource = 0;
 			if (toldSource < 4) {
 				toldSource++;
@@ -3142,6 +3329,9 @@ namespace {
 				it = geometries.erase(it);
 			}
 			FreeFaces(true);	// (2026-11-07) the heads' states are keyed as their partitions
+			// UNOFFICIAL 2026-11-12 (RT memory audit): "unreadable" entries are keyed by a texture's address and lived until the helper stopped:
+			// another texture later at that address was left out of the traced scene for the session. Tried again after a cell change.
+			for (auto it = alphaSlots.begin(); it != alphaSlots.end(); ) it = it->second < 0 ? alphaSlots.erase(it) : std::next(it);
 			lastCell = cell;
 		}
 		// the releases that did not fit an earlier frame's op list go first
@@ -3271,6 +3461,7 @@ namespace {
 				if (sceneFrame - it->second.lastSeen > kReleaseAfterFrames) {
 					if (it->second.sent) Release(it->second.id);
 					for (UInt32 d : it->second.dispData) if (d) Release(d);	// (2026-11-07 rtgap-tessblas) its DATA ids
+					DispDrop(it->second);	// UNOFFICIAL 2026-11-12 (memleak): its displaced copy goes with it (the helper's Displace::Release)
 					it = geometries.erase(it);
 				}
 				else ++it;
@@ -3376,7 +3567,10 @@ namespace {
 		if (state == Core::Off) return false;
 		bool wanted = false;
 		for (const RtCore::User& user : users) wanted = wanted || (!Out(user) && user.Wants && user.Wants());
-		if (!wanted) return false;	// a running helper stays up (idle); the game's exit stops it (RtCore::Shutdown)
+		// (a running helper stayed up, idle, until the game's exit: now IdleFrame stops it after IdleStopMinutes. 2026-11-12 audit: the hair tint
+		// map is only pruned by the scene walk: no notes while nothing traces)
+		if (!wanted) { RtHairTint::Wanted = false; IdleFrame(); return false; }
+		idleMs = 0.0; idleLastTick = 0;
 		if (state == Core::Idle) { Start(); return false; }
 		Poll();
 		if (state != Core::Running) return false;
@@ -3386,6 +3580,31 @@ namespace {
 			return false;
 		}
 		return true;
+	}
+
+	// UNOFFICIAL 2026-11-12 (memleak) IdleStopMinutes: a frame in which no user wants to trace (Core::Ready). Only a helper that is up and
+	// ready is stopped (one still starting is left to get ready, as before). Render thread, outside a recording, like the screen-size stop.
+	void Core::IdleFrame() {
+		if (state != Running || recording) { idleMs = 0.0; idleLastTick = 0; return; }
+		const ULONGLONG now = GetTickCount64();
+		if (idleLastTick) idleMs += (double)(std::min)(now - idleLastTick, (ULONGLONG)250);
+		idleLastTick = now;
+		if (now - idleCheckedAt < 1000) return;
+		idleCheckedAt = now;
+		SettingManager::Configuration::ConfigNode node;
+		idleStopMinutes = TheSettingManager->Config.FillNode(&node, "Main.Main.RayTracing", "IdleStopMinutes") ?
+			TheSettingManager->GetSettingF("Main.Main.RayTracing", "IdleStopMinutes") : 5.0f;	// (a missing key: 5)
+		if (!(idleStopMinutes > 0.0f) || idleMs < (double)idleStopMinutes * 60000.0 || pendingN) return;
+		const NvrRtShared* s = shared;
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK: no ray tracing effect has traced for %.1f minutes of play: the RT helper is stopped and its memory given back "
+			"(the helper held %u geometries, %llu MB; %u textures, %llu MB; [Main.Main.RayTracing] IdleStopMinutes, 0 = never). It starts again when an effect "
+			"next traces (stop %u of this session).", idleMs / 60000.0, s ? (unsigned)s->geometries : 0u, s ? (unsigned long long)(s->geometryBytes >> 20) : 0ull,
+			texRes.count, (unsigned long long)(texRes.alive >> 20), idleStops + 1);
+		Stop("idle (IdleStopMinutes)");
+		state = Idle;
+		_snprintf_s(status, sizeof(status), _TRUNCATE, "stopped while idle (starts again when an effect traces)");
+		idleStops++;
+		idleMs = 0.0; idleLastTick = 0;
 	}
 
 	// One frame record = one exchange with the helper. The record counter (frame) counts exchanges, so each exchange has its own
@@ -3431,6 +3650,7 @@ namespace {
 			c.glows.clear();
 			c.Gather();
 			c.PumpTextures(f, n);	// (2026-11-07, protocol 7) the new slots' textures, before the ops list closes
+			c.TrimTextures(f, n);	// UNOFFICIAL 2026-11-12 RealTextureKeepFrames: textures unused for long leave the helper
 			c.frameGlows = c.glows;
 			// 2026-10-30: with fork 0034 the texel after this frame's geometry gets the frame's sequence number, written after the
 			// conversions; the helper checks it before building (a reordered copy = an earlier flush's data: built empty, logged once)
@@ -3544,8 +3764,9 @@ namespace {
 			c.budgetWaits = c.culledSmall = 0;
 			if (c.dispLand || c.dispObjects || c.dispSources)	// (2026-11-07 rtgap-tessblas)
 				Logger::Log("RT CORE: displacement (land %s, objects %s): %u instances flagged this frame; %u geometries described to the helper, %u data sends, "
-					"%u left flat (no texcoords / textures / layout)", c.dispLand ? "on" : "off", c.dispObjects ? "on" : "off", c.dispInstances, c.dispSources,
-					c.dispData, c.dispNever);
+					"%u left flat (no texcoords / textures / layout); textures held for the displaced copies now %u, given back %u (DisplaceTextureRelease %s)",
+					c.dispLand ? "on" : "off", c.dispObjects ? "on" : "off", c.dispInstances, c.dispSources, c.dispData, c.dispNever, c.texRes.PinnedCount(),
+					c.dispUnpinned, c.dispUnpin ? "on" : "off: held for the session");
 			if (PlantWind::StaticsOn || c.swayed)	// (2026-10-30) PlantSway
 				Logger::Log("RT CORE: plant sway %s: %.1f plant instances leaned a frame (plant wind statics %s)", c.plantSway ? "on" : "off",
 					c.swayed / (float)(n == 60 ? 60 : n == 600 ? 540 : 600), PlantWind::StaticsOn ? "on" : "off");

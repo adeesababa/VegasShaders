@@ -885,7 +885,7 @@ PS_OUTPUT main(PS_INPUT pin)
     #ifndef PAR_LIT
         po.capturedPad2 = CapturedMaterialOut(-1.0f);	// UNOFFICIAL 2026-10-29 MaterialBuffer (0 without it; no litSum, no rough)
     #else
-        po.capturedPad2 = CapturedMaterialOut(rough);	// UNOFFICIAL 2026-10-31: the rough it was lit with (no metal path here)
+        po.capturedPad2 = CapturedMaterialOutNoHighlight(rough);	// UNOFFICIAL 2026-10-31: the rough it was lit with (no metal path here); 2026-11-12 ptbump: coded where the game draws the mesh with no highlight (Includes/CapturedNormals.hlsl)
     #endif
     // UNOFFICIAL 2026-10-28 CapturedNormals: the smooth vertex nmap, before the nmap map and the parallax offset. The displacement
     // layout (NVR DXVK object tessellation) has no channel for it (uv.zw is the object nmap there): none, the depth-rebuilt nmap stays.

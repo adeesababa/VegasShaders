@@ -18,6 +18,8 @@
 class TAAEffect : public EffectRecord
 {
 public:
+	// UNOFFICIAL 2026-11-12 (memleak) idle targets (core/TextureManager.h, EffectRecord::TargetParkable): the resolve and history buffers (the upscalers' inputs look after themselves: made and released by size)
+	bool	TargetParkable(const char* SamplerName) override { return strncmp(SamplerName, "TESR_TAA", 8) == 0; }
 	TAAEffect() : EffectRecord("TAA") {};
 
 	struct TAASettingsStruct {

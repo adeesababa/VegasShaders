@@ -58,9 +58,25 @@ void FlashlightEffect::UpdateSettings() {
 	Deferred.GameLightUnderPT = FlashSettingOr(deferredSection, "GameLightUnderPT", 0.0f) != 0.0f;	// (a missing key: off)
 	Deferred.DebugView = (std::max)(0, (std::min)(3, (int)FlashSettingI(deferredSection, "DebugView")));
 	Deferred.TestForceOn = FlashSettingI(deferredSection, "TestForceOn") != 0;
+	Deferred.HairAndEyes = FlashSettingOr(deferredSection, "HairAndEyes", 1.0f) != 0.0f;	// UNOFFICIAL 2026-11-12 (a missing key: on, it is a bug fix)
+	Deferred.HairUnderPT = FlashSettingOr(deferredSection, "HairUnderPT", 1.0f) != 0.0f;	// UNOFFICIAL 2026-11-13 (a missing key: on, it is a bug fix)
+	{	// UNOFFICIAL 2026-11-13, test only (core/FlashlightLamp.h): the ones the mode, 10 or more = one frame logged
+		const int test = (int)FlashSettingOr(deferredSection, "GameLightTest", 0.0f);
+		FlashlightLamp::TestMode = test % 10; FlashlightLamp::DiagRaw = test;
+	}
 
 	if (!SpotLight) SpotLight = NiSpotLight::CreateObject();
 };
+
+// UNOFFICIAL 2026-11-12 HairAndEyes: the beam for the hair and eye shaders (Includes/FlashBeam.hlsl), filled round the world's main list
+// by FlashlightDeferred::BeamBegin / BeamEnd; all zero (off) at any other time.
+void FlashlightEffect::RegisterConstants() {
+	TheShaderManager->RegisterConstant("TESR_FlashBeam", FlashlightDeferred::Beam);
+}
+// The lens pattern for the same shaders: the light pass's own texture, empty until the pass loads it (a Cookie above 0).
+void FlashlightEffect::RegisterTextures() {
+	TheTextureManager->RegisterTexture("TESR_FlashBeamCookie", &FlashlightDeferred::CookieSlot);
+}
 
 // The weapon types the light does not ride on: melee, grenades, mines and thrown weapons (there is no sight to look down).
 static bool IsMeleeWeaponType(UInt8 type) {

@@ -41,6 +41,7 @@
 #include "RtPtCost.h"        // (2026-11-07 perf-ptcost) the path tracer's ray budget keys (src/core): the NVR_RT_HOST_PTCOST knob
 #include "RtFlashlightCode.h" // (2026-11-07 perf-reflfix2) the path tracer's flashlight code (src/core), run by the ptflashlight scene
 #include "RtHairTint.h"      // (2026-11-08 perf-reflfix3) the hair's tint for the RT scene (src/core), run by the hairtint scene
+#include "RtFarHandOver.h"   // (2026-11-12) the path tracer's far hand-over: PTGameFog / PTFarMatch / PTFarBlend (src/core), run by the farhandover scene
 #include "../../src/effects/Reflections/RtReflLamps.h"   // (2026-11-07 perf-reflfix2) RT reflections' lamps as the game lights them (reflorbs)
 #include <d3dcompiler.h>
 
@@ -1364,6 +1365,7 @@ static bool sceneCameraMove(Ctx& c) {
 #include "rt_host_rrrect.inl"	// (2026-11-07 perf-rr) DLSS RR at RenderScale < 1: the guide pass at the render size, the composite's rect mapping
 #include "rt_host_screenown.inl"	// (2026-11-11 PTScreenOwn) hair and skin in front of a wall: the first surface's colour / material are their own, not the wall's
 #include "rt_host_flashhead.inl"	// (2026-11-07 perf-flashlight) a lamp in the hidden first-person head under SameFrame lamp shadows (RtLampPrimary + RtLampTrace / Sigma + RtLampEye)
+#include "rt_host_far.inl"	// (2026-11-12) the path tracer's far hand-over at the loaded cells' edge: fog, level gain, band, shadow buffer, measurement
 
 // ------------------------------------------------------------------------------------------------------------------------------
 int main(int argc, char** argv) {
@@ -1522,6 +1524,7 @@ int main(int argc, char** argv) {
 		{ "ptviewmodel", "the first-person view model lit by the path tracer (PTViewModel: its G-buffer, its own FOV, the hidden body round the eye passed over; not-captured pixels keep the game's) (RtPathTrace)", [&] { return scenePtViewModel(c); } },
 		{ "screenown", "hair and skin take on the wall's material (PTScreenOwn): a blended hair cap over a head, a face, a body before a wall and an armour plate, the G-buffer as the game leaves it; the prep pass's marks (RtViewModel.h, ps_3_0) vs the CPU, then the first surface's colour / roughness / metal / normal before and after (RtPathTrace)", [&] { return sceneScreenOwn(c); } },
 		{ "vmprep", "PTViewModel's prep pass (src/core/RtViewModel.h, ps_3_0 on the fork's D3D9 device): the view model's code (4 + s / -1), its captured view-space normal, people 2, the world 1, vs the CPU", [&] { return sceneVmPrep(c); } },
+		{ "farhandover", "the path tracer's far hand-over (src/core/RtFarHandOver.h, ps_3_0 on the fork's D3D9 device): the weather's fog on traced pixels, the level gain's ramp, the band into the game's own pixel at the loaded square's edge, the shadow buffer in the band, the measured ratio, vs the CPU", [&] { return sceneFarHandOver(c); } },
 		{ "hiddennear","rays that start or end within reach of the eye pass over the hidden first-person body (a lamp in the head, a counter under the third-person gun); beyond reach its shadow stays (RtSunShadow, RtLampTrace, RtAOTrace)", [&] { return sceneHiddenNear(c); } },
 		{ "flashhead", "a lamp inside the hidden first-person head (the Pip-Boy light as a game lamp) under SameFrame lamp shadows: camera rays, the lamp trace, the denoiser's signal and the eye pass match the absent body bit for bit; a visible head blocks it (RtLampPrimary + RtLampTrace + RtLampTraceSigma + RtLampEye)", [&] { return sceneFlashHead(c); } },
 		{ "shutdown", "the RT helper's shutdown on second hosts: quit with 4 frames pending, then the game killed mid-flight (a frame whose inputs never come + 2 never run): every published frame's output ready signalled, the GPU idle, the helper exits by itself (NvrRtHelper ShutdownDrain + RtCore Core::Stop's order)", [&] { return sceneShutdown(); } },

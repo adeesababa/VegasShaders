@@ -29,6 +29,12 @@
 #include <d3dx9.h>
 #include <vector>
 
+// UNOFFICIAL 2026-11-12 PTGrassOwnPixel ([Main.Main.RayTracing] PTGrassOwnPixel; core/CapturedNormals.h GrassOwnDraw): the same mask also takes
+// GRASS that wrote no record of its own (the game's own grass shaders: lamp-lit grass, all grass with [Shaders.Grass.Status] off; any
+// grass with [Main.Main.Quality] CapturedGrass off) and was drawn after the land: its pixels had the land's records behind them, and
+// were the game's own pixel or the LAND's colour by the view angle (RtViewModel.h, "GRASS under the in-front rule"). Redrawn into the mask
+// (depth test EQUAL: only where that draw's own depth is in the depth buffer, so not where its alpha test or fade cut it), they are the
+// game's own pixel from every angle. GrassOn works without Enabled (the water's key): the mask is then made by the grass alone.
 namespace WaterMask {
 	inline bool Enabled = true;					// [Main.Main.RayTracing] PTWaterMask (RtPathTrace.cpp's settings read; a missing key: on)
 	inline bool Failed = false;					// the mask could not be made: off for the session
@@ -42,6 +48,8 @@ namespace WaterMask {
 	inline D3DVIEWPORT9 Rect = {};				// the viewport of the frame's water draws (the world's render rect)
 	inline IDirect3DPixelShader9* PS2 = nullptr;  inline IDirect3DPixelShader9* PS3 = nullptr;	// "return 1" for vs_2_x / vs_3_0
 	inline UInt32 Draws = 0, Frames = 0, LoggedDraws = 0;
+	inline bool GrassOn = true;				// [Main.Main.RayTracing] PTGrassOwnPixel (RtPathTrace.cpp's settings read; a missing key: on)
+	inline UInt32 GrassDraws = 0, GrassFrame = 0xFFFFFFFFu, GrassFrames = 0, GrassLogged = 0;
 
 	// The path tracer takes its first surface from the screen this frame (RtPathTrace.cpp Record, every PTPrimary frame).
 	inline void Request(UInt32 frame) { WantedFrame = frame; }
@@ -144,18 +152,41 @@ namespace WaterMask {
 	// What the prep pass binds this frame (null: no water drawn in this frame's world scene, or off): the multisampled mask is resolved
 	// here, once (the share of the pixel's samples), so a frame without a path traced picture never pays for it.
 	inline IDirect3DTexture9* ThisFrame(IDirect3DDevice9* d, UInt32 frame) {
-		if (!Enabled || Failed || !Texture || WrittenFrame != frame) return nullptr;
+		if ((!Enabled && !GrassOn) || Failed || !Texture || WrittenFrame != frame) return nullptr;
 		if (!Resolved) {
 			if (MsaaSurface && FAILED(d->StretchRect(MsaaSurface, NULL, TextureSurface, NULL, D3DTEXF_NONE))) return nullptr;
 			Resolved = true;
 			// the first frames with water, then now and then: a report that water still shows its bed starts here (no line = no water draw came
 			// through the hook: the game drew it another way, or the mask was not asked for)
-			if (LoggedDraws < 3 || (Frames % 1800) == 0) {
+			if (Draws && (LoggedDraws < 3 || (Frames % 1800) == 0)) {	// (Draws: the mask may hold grass alone, PTGrassOwnPixel)
 				LoggedDraws++;
 				Logger::Log("UNOFFICIAL RT path trace: PTWaterMask: %u water draws redrawn into the mask over %u frames with water in view (%s; water rect %ux%u of %ux%u)",
 					Draws, Frames, MsaaSurface ? "multisampled, resolved" : "single-sampled", (unsigned)Rect.Width, (unsigned)Rect.Height, Made.Width, Made.Height);
 			}
 		}
 		return Texture;
+	}
+
+	// (PTGrassOwnPixel) right after a grass draw that wrote no record: the same draw once more into the mask, where its own depth stands
+	// (EQUAL; the draw wrote depth where its pixels survived). The z function is put back.
+	template <typename DrawFn> inline void RedrawGrass(IDirect3DDevice9* d, UInt32 frame, DrawFn draw) {
+		if (!GrassOn || Failed) return;
+		DWORD zfunc = D3DCMP_LESSEQUAL;
+		if (FAILED(d->GetRenderState(D3DRS_ZFUNC, &zfunc))) return;
+		d->SetRenderState(D3DRS_ZFUNC, D3DCMP_EQUAL);
+		const UInt32 before = Draws;
+		Redraw(d, frame, draw);
+		d->SetRenderState(D3DRS_ZFUNC, zfunc);
+		if (Draws == before) return;
+		Draws = before;	// (the water's own count: Redraw counted this one)
+		GrassDraws++;
+		if (GrassFrame != frame) {
+			GrassFrame = frame; GrassFrames++;
+			if (GrassLogged < 3 || (GrassFrames % 1800) == 0) {
+				GrassLogged++;
+				Logger::Log("UNOFFICIAL RT path trace: PTGrassOwnPixel: %u grass draws without records redrawn into the mask over %u frames (grass drawn after the land by a shader that writes no record: the game's own pixel under path tracing, from every angle)",
+					GrassDraws, GrassFrames);
+			}
+		}
 	}
 }

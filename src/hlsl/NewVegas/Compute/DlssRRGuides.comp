@@ -92,6 +92,9 @@ void main() {
     if (cb.options.z > 0.5) {
         material = texelFetch(sampler2D(t_material, POINT_S), pixel, 0);
         if (material.r > 0.5 && material.b >= 0.0) roughness = material.b;
+        // (2026-11-12 ptbump) b in -3 .. -2: coded "no highlight on this mesh" for the path tracer (Shaders/Includes/CapturedNormals.hlsl):
+        // the same roughness as before the code, -2 - b
+        else if (material.r > 0.5 && material.b < -1.99 && material.b > -3.01) roughness = -2.0 - material.b;
     }
     roughness = sky ? 1.0 : saturate(roughness);
 

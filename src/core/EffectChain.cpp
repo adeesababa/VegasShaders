@@ -1398,6 +1398,12 @@ void ShaderManager::PostStep_DitherBuster(ChainContext& ctx) {
 
 void ShaderManager::PostStep_SMAA(ChainContext& ctx) {
 	static GpuTimer smaaTimer("SMAA");
+	// UNOFFICIAL 2026-11-12 [Shaders.SMAA.Main] WithTAA (off): TAA is on by default now (FSR 3.1 at native size under the DXVK build, its own
+	// resolve on plain Direct3D 9). SMAA stays enabled as the fallback and stands aside while TAA runs: one anti-aliasing at a time.
+	if (Effects.TAA && Effects.TAA->Enabled) {
+		SettingManager::Configuration::ConfigNode node;
+		if (!(TheSettingManager->Config.FillNode(&node, "Shaders.SMAA.Main", "WithTAA") && node.BoolValue)) return;
+	}
 	IDirect3DDevice9* Device = ctx.Device;
 	IDirect3DSurface9* RenderTarget = ctx.RenderTarget;
 	IDirect3DSurface9* SourceSurface = ctx.SourceSurface;
@@ -1613,6 +1619,7 @@ static const EffectChain::Step PostTonemapSteps[] = {
 };
 
 void EffectChain::Run(ShaderManager* manager, Stage stage, ChainContext& ctx) {
+	TheTextureManager->TargetsFrame();	// UNOFFICIAL 2026-11-12 (memleak) idle targets: an effect switched on since the frame began
 	const Step* steps = stage == PreTonemap ? PreTonemapSteps : PostTonemapSteps;
 	const size_t count = stage == PreTonemap ? _countof(PreTonemapSteps) : _countof(PostTonemapSteps);
 	for (size_t i = 0; i < count && !ctx.stop; i++) {

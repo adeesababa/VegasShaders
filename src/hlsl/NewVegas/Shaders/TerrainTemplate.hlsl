@@ -609,6 +609,7 @@ PS_OUTPUT main(PS_INPUT pin) {
     float3 sunTS = mul(tbnMat, SunDir.xyz);
     float sunMul = 1.0;
     [branch] if (parallax) sunMul = getParallaxShadowMultipler(viewDist, offsetUV, gradX, gradY, sunTS, texLayers, blendW, hStat, BaseMap);
+    const float crackShadow = sunMul;	// UNOFFICIAL 2026-11-12 ShadowBounce: the self-shadow alone, before the cast shadows fold in
 
     // Forward sun shadows. Folded into sunMul, which getSunLighting
     // applies to the sun colour only -- ambient is added afterwards and stays untouched.
@@ -618,6 +619,7 @@ PS_OUTPUT main(PS_INPUT pin) {
     #endif
     sunMul *= GetSunShadow(camPos, geoN);
     #endif
+    const float castSun = sunMul / max(crackShadow, 1.0e-3f);	// the cast shadows alone (1 without them)
 
     #ifdef TERRAIN_WETNESS	// UNOFFICIAL 2026-11-04 Wetness Effects: the albedo darkens before any light sees it (land is porous: full darkening)
         float3 wetWorldNormal = normalize(mul(combinedNormal, tbnMat));	// tangent space -> the land piece's (world-aligned) space
@@ -635,6 +637,17 @@ PS_OUTPUT main(PS_INPUT pin) {
         baseColor = WetAlbedo(baseColor, wet.darkening, 1.0f);
     #endif
     float3 litCol = getSunLighting(sunTS, LinColor(SunColor.rgb), toEye, combinedNormal, LinColor(AmbientColor.rgb), baseColor, glossV, specPow, 1.0, sunMul, geoN);
+    // UNOFFICIAL 2026-11-12 [Shaders.Terrain.Parallax] ShadowBounce (the owner: the ground's small shadows "appear to be pure black", "give
+    // those ... a bit more depth"). The ground's relief takes the sun away twice: the parallax self-shadow (a crack's floor behind its wall)
+    // and the bumps' own shaded sides (the normal map facing away from the sun). Both left only the sky's ambient, so under a strong sun
+    // they read as black holes. A hollow is lit by the sunlit ground beside it: one bounce off that ground (its colour) onto the hollow (its
+    // colour again). The sun the relief took (what the flat land would get, less what this pixel got) comes back times the ground's colour x
+    // ShadowBounce. (Tinted once: tinted twice, as two real bounces would be, left nothing on dark ground such as asphalt, bench the same
+    // day.) Not inside a cast shadow (castSun). 0 = as before.
+    // (First try the same day: the parallax self-shadow alone. It changed nothing visible on the bench: the dark parts were the bumps'
+    // shaded sides.)
+    const float reliefLoss = max(0.0f, saturate(sunTS.z) - crackShadow * saturate(dot(combinedNormal, sunTS)));
+    litCol += LinColor(SunColor.rgb) * LinScale(TESR_TerrainData.z) * baseColor * (reliefLoss * castSun * TESR_TerrainParallaxIso.z);
     #ifdef TERRAIN_WETNESS	// the water film: the sun's highlight on it and its reflection of the sky, over the land
         [branch] if (wet.gloss > 0.001f) {
             float3 wetV = -normalize(camPos);
@@ -720,6 +733,17 @@ PS_OUTPUT main(PS_INPUT pin) {
     // replace) it overwrites an object's albedo in the fade strip, as the normal does
     po.capturedPad1 = CapturedAlbedoOut(baseColor);
     po.capturedPad2 = CapturedMaterialOutClass(4.0f, -1.0f);	// UNOFFICIAL 2026-10-29 MaterialBuffer: class 4, land (0 without it)
+    // UNOFFICIAL 2026-11-12 (ptbump) [Main.Main.Quality] CapturedBumpNormals (CAPTURED_PT 2: the DXVK fork, the AlbedoBuffer level): the
+    // layers' normal-mapped normal, in world axes (the land is not rotated), in the record's g / b for the path tracer's first hit, which
+    // lit the land with the smooth normal below (Includes/CapturedNormals.hlsl CapturedLandBumpOut; no other reader takes g or b from a
+    // land texel). Not the 6- and 7-layer shaders (no temp register left: see CapturedCoverage's note below): their land stays smooth there.
+    #if defined(CAPTURED_PT) && CAPTURED_PT >= 2 && CAPTURED_NORMALS_ON >= 3 && TEX_COUNT <= 5
+        #ifdef TERRAIN_WETNESS
+            po.capturedPad2 = CapturedLandBumpOut(wetWorldNormal);
+        #else
+            po.capturedPad2 = CapturedLandBumpOut(mul(combinedNormal, tbnMat));
+        #endif
+    #endif
     // UNOFFICIAL 2026-10-28 CapturedNormals: the land's interpolated vertex normal (the land is not rotated: object space is world space;
     // with tessellation the normal its evaluation shader passes on), before the layers' normal maps. Alpha 1 also with terrain blending's
     // Smooth fade (the land drawn blended over objects): the land's normal replaces what is there, with its depth.

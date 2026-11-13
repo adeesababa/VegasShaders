@@ -56,7 +56,7 @@ template <> std::string SettingManager::ToString<int>(const int number) {
 }
 
 // The user config's [_Unofficial] SettingsVersion this build brings it up to (UpdateOldDefaults, below).
-static const int UnofficialSettingsVersion = 79;  // (78: RT defaults replaced since 1.0.5 now reach saved configs; 77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
+static const int UnofficialSettingsVersion = 82;  // (82: GameShaderPairRepair on; 81: CapturedGrass on, for path tracing; 80: the daylight look, only where it was never touched; 79: rain LightingScale; 78: RT defaults replaced since 1.0.5 now reach saved configs; 77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
 
 // UNOFFICIAL 2026-10-30: a setting is read only when the defaults file lists it (FillNode), so a line in the user's toml that
 // this build does not know (a key from a newer or an older build, a typo) silently did nothing. Each one is logged once per
@@ -656,6 +656,89 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 				else if (value.is_integer()) dryScale = (double)value.as_integer();
 			}
 			if (dryScale < 1.0) replace(rain.c_str(), "LightingScale", 1.0, 0.725, false);
+		}
+	}
+	// 80 (2026-11-12, the owner: "make a nice preset ... and ship that to users as the real default and they can go from there"): the daylight
+	// look tuned on the bench against photos of the real Mojave (a blue sky in place of the lavender one, sunlit ground about 1.7x as bright and
+	// warmer; night and interiors have their own groups and do not change). A look is a choice, so a saved configuration moves ONLY when every
+	// one of its values is still the old default (or was never saved): one changed value means the player tuned the look, and nothing moves.
+	if (version < 80) {
+		struct LookKey { const char* section; const char* key; double oldDefault, newDefault; };
+		static const LookKey look[] = {
+			{ "Shaders.Sky.Main", "TintDayR", 1.0, 0.55 }, { "Shaders.Sky.Main", "TintDayG", 1.0, 0.78 }, { "Shaders.Sky.Main", "TintDayB", 1.0, 1.0 },
+			{ "Shaders.Sky.Main", "SaturationDay", 1.0, 1.6 },
+			{ "Shaders.Tonemapping.Main", "Exposure", 1.5, 2.5 }, { "Shaders.Tonemapping.Main", "SkyMultiplier", 1.0, 0.6 },
+			{ "Shaders.PBR.Main", "LightingScale", 0.725, 1.15 }, { "Shaders.Terrain.Main", "LightingScale", 0.725, 1.15 },
+			{ "Shaders.PBR.Rain", "LightingScale", 0.725, 1.15 }, { "Shaders.Terrain.Rain", "LightingScale", 0.725, 1.15 }, { "Shaders.Grass.Main", "Brightness", 1.0, 1.3 },
+		};
+		const LookKey* touched = nullptr;
+		bool anySaved = false;
+		for (const LookKey& k : look) {
+			const tomlValue* saved = UserSection(k.section);
+			if (!saved || !saved->contains(k.key)) continue;	// never saved: the new default applies by itself
+			anySaved = true;
+			const tomlValue& value = saved->at(k.key);
+			const double v = value.is_integer() ? (double)value.as_integer() : value.is_floating() ? value.as_floating() : -1.0e9;
+			if (v != k.oldDefault) { touched = &k; break; }
+		}
+		if (touched)
+			Logger::Log("UNOFFICIAL settings: this build's new daylight look was NOT applied, because your saved %s.%s is your own value. To try it: "
+				"[Shaders.Sky.Main] TintDay 0.55 0.78 1.0, SaturationDay 1.6; [Shaders.Tonemapping.Main] Exposure 2.5, SkyMultiplier 0.6; LightingScale 1.15 in "
+				"[Shaders.PBR.Main], [Shaders.Terrain.Main] and their Rain groups; [Shaders.Grass.Main] Brightness 1.3.", touched->section, touched->key);
+		else if (anySaved) {
+			for (const LookKey& k : look) if (k.oldDefault != k.newDefault) replace(k.section, k.key, k.oldDefault, k.newDefault, false);
+			Logger::Log("UNOFFICIAL settings: the new daylight look was applied (none of its values had been changed). The old look: [Shaders.Sky.Main] TintDay "
+				"1 1 1, SaturationDay 1.0; [Shaders.Tonemapping.Main] Exposure 1.5, SkyMultiplier 1.0; LightingScale 0.725 in [Shaders.PBR.Main], "
+				"[Shaders.Terrain.Main] and their Rain groups; [Shaders.Grass.Main] Brightness 1.0.");
+		}
+	}
+	// 80, second part (2026-11-12, the owner: "have the default ... use taa fsr 3.1 native render scale with sharpening. use less repeating
+	// ground too"). Anti-aliasing is a choice too: the saved file moves only when all five of its keys are still the old defaults (TAA
+	// off, FSR off, FSR version 0, FSR sharpness 0, RenderScale 1): someone who switched TAA on, or FSR on with TAA, keeps exactly what they chose.
+	// RenderScale goes to 0.67 with it (FSR 3.1 Quality). Less-repeating ground is a plain switch: a saved false moves to true.
+	if (version < 80) {
+		auto savedIs = [&](const char* section, const char* key, bool wantBool, bool boolValue, double number) {
+			const tomlValue* saved = UserSection(section);
+			if (!saved || !saved->contains(key)) return true;	// never saved: the new default applies by itself
+			const tomlValue& value = saved->at(key);
+			if (wantBool) return value.is_boolean() && value.as_boolean() == boolValue;
+			return (value.is_integer() && (double)value.as_integer() == number) || (value.is_floating() && value.as_floating() == number);
+		};
+		auto setBool = [&](const char* section, const char* key) {
+			tomlValue* saved = UserSection(section);
+			if (!saved || !saved->contains(key) || !saved->at(key).is_boolean() || saved->at(key).as_boolean()) return;
+			(*saved)[key] = true;
+			changed += std::string(changed.empty() ? "" : ", ") + section + "." + key + " false -> true";
+		};
+		if (savedIs("Shaders.TAA.Status", "Enabled", true, false, 0) && savedIs("Shaders.TAA.FSR", "Enabled", true, false, 0) &&
+			savedIs("Shaders.TAA.FSR", "Version", false, false, 0.0) && savedIs("Shaders.TAA.FSR", "Sharpness", false, false, 0.0) &&
+			savedIs("Shaders.TAA.FSR", "RenderScale", false, false, 1.0)) {
+			setBool("Shaders.TAA.Status", "Enabled");
+			setBool("Shaders.TAA.FSR", "Enabled");
+			replace("Shaders.TAA.FSR", "Version", 0, 1, true);
+			replace("Shaders.TAA.FSR", "Sharpness", 0.0, 0.4, false);
+			replace("Shaders.TAA.FSR", "RenderScale", 1.0, 0.67, false);	// FSR's Quality mode (native cost 5.6 ms on a GTX 1070 at 1080p)
+		}
+		setBool("Shaders.Terrain.Variation", "Enabled");
+	}
+	// 81 (2026-11-13): [Main.Main.Quality] CapturedGrass false -> true. The key was added on 2026-11-12 and switched off the same day (bright
+	// speckles on an RTX card, since fixed: the grass's own normal, shade and vertex colour are recorded now), so every file saved by 1.0.8
+	// holds false. Without its records, grass under path tracing took the land's colour or the game's own pixel by view angle (a tester:
+	// "grass disappears / reappears depending on viewing angle"). It only does anything while path tracing or ray traced bounce light runs.
+	if (version < 81) {
+		tomlValue* saved = UserSection("Main.Main.Quality");
+		if (saved && saved->contains("CapturedGrass") && saved->at("CapturedGrass").is_boolean() && !saved->at("CapturedGrass").as_boolean()) {
+			(*saved)["CapturedGrass"] = true;
+			changed += std::string(changed.empty() ? "" : ", ") + "Main.Main.Quality.CapturedGrass false -> true";
+		}
+	}
+	// UNOFFICIAL 2026-11-13 b (82): [Main.Main.Misc] GameShaderPairRepair false -> true. The key is one day old and was never released with
+	// false, so only files saved by the development builds of 2026-11-13 hold it.
+	if (version < 82) {
+		tomlValue* saved = UserSection("Main.Main.Misc");
+		if (saved && saved->contains("GameShaderPairRepair") && saved->at("GameShaderPairRepair").is_boolean() && !saved->at("GameShaderPairRepair").as_boolean()) {
+			(*saved)["GameShaderPairRepair"] = true;
+			changed += std::string(changed.empty() ? "" : ", ") + "Main.Main.Misc.GameShaderPairRepair false -> true";
 		}
 	}
 	if (!changed.empty())

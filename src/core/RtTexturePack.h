@@ -147,6 +147,10 @@ namespace RtTexturePack {
 		// (merged with rtgap-tessblas) a pinned id is never a victim (the displacement's height textures: the helper's displaced copies
 		// keep their ids); it still counts in the budget. Freeing it unpins it.
 		void Pin(uint32_t id) { if (Live(id)) pinned[id] = 1; }
+		// UNOFFICIAL 2026-11-12 (memleak, DisplaceTextureRelease): the last displaced copy that read it is gone: an ordinary texture again,
+		// used `now` (so it has the usual idle time before the budget or RealTextureKeepFrames may take it)
+		void Unpin(uint32_t id, uint64_t now) { if (Live(id)) { pinned[id] = 0; lastUse[id] = now; } }
+		uint32_t PinnedCount() const { uint32_t n = 0; for (size_t id = 1; id < live.size(); id++) n += live[id] && pinned[id]; return n; }
 		bool Pinned(uint32_t id) const { return Live(id) && pinned[id]; }
 		uint32_t Alloc(uint64_t now) {
 			for (size_t i = 0; i < freed.size(); i++)
@@ -178,6 +182,15 @@ namespace RtTexturePack {
 			}
 			if (alive - freedBytes + need > budget) { victims.clear(); return false; }
 			return true;
+		}
+		// UNOFFICIAL 2026-11-12 (a tester: "the budget only grows"): the ids not used for `stale` exchanges, oldest first, at most `most`:
+		// released by age, whether or not the budget is full (a texture the game dropped long ago should not sit in video memory until
+		// something else needs its room). Pinned ids never.
+		void PickStale(uint64_t now, uint64_t stale, uint32_t most, std::vector<uint32_t>& out) const {
+			out.clear();
+			for (uint32_t id = 1; id < bytes.size(); id++) if (live[id] && !pinned[id] && lastUse[id] + stale <= now) out.push_back(id);
+			std::sort(out.begin(), out.end(), [&](uint32_t a, uint32_t b) { return lastUse[a] != lastUse[b] ? lastUse[a] < lastUse[b] : a < b; });
+			if (out.size() > most) out.resize(most);
 		}
 		uint64_t alive = 0;		// bytes of the live ids
 		uint32_t count = 0;		// live ids

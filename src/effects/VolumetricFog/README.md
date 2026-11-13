@@ -415,3 +415,6 @@ about 120 and two reads for one it passes through (two atan, two sincos, two exp
 - compile-compute.sh (full run) stops at `SunShadowsApply c1` (variants.txt names `SunShadowsApply.frag`, which is not in this tree since
   the wave-3 SunShadows rewrite); every other shader and variant, the fog's included, compiles and validates.
 - The loader for `[_Shaders.VolumetricFog.Status] Enabled` was not traced (unchanged).
+
+## Idle targets (2026-11-12)
+With `[Main.Main.Performance] TargetReleaseSeconds` above 0 (default 20) the texture manager keeps 1 x 1 stand-ins in place of this effect's render targets while it is off (not made at start-up when it starts off; released that many seconds after it is switched off; made again, zero filled, before the frame draws when it is switched on). Which targets and why that is safe here: the two fog buffers are used only from Render (RenderDedicated), behind the switch. A new reader or writer of these targets outside the effect's own switch, or a copy of their pointers kept past a frame, breaks this: then answer false in `TargetParkable` (the header). See `core/TextureManager.h`.

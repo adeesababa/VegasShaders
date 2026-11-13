@@ -89,6 +89,13 @@ sampler2D NVR_ALAlbedo : register(s12) = sampler_state { ADDRESSU = CLAMP; ADDRE
 float4 NVR_ALGI;
 sampler2D NVR_ALRTGI : register(s7) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
 sampler2D NVR_ALGIHistory : register(s5) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+// UNOFFICIAL 2026-11-13 RT occlusion on the D3D9 passes ([Shaders.AmbientOcclusion.RT] OcclusionOnD3D9, on), BUG FIX: with NvrDxvkAmbientLight off
+// (the default) these passes kept their own screen search, so the traced occlusion was made every frame and read by nothing: RT ambient occlusion
+// changed no pixel while the log said it ran. NVR_ALRT.x 1: Estimate takes the traced visibility (NVR_ALRTAO, bound by hand on s6, the stage of
+// Estimate's own target, which it never reads; denoised when the RT denoiser ran) with AmbientLightEstimateRT.frag's mapping and skips its screen
+// search. 0 (never set, the key off, nothing traced): Estimate exactly as before.
+float4 NVR_ALRT;
+sampler2D NVR_ALRTAO : register(s6) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
 
 static const float Radius = max(TESR_AmbientLightData.x, 1.0f);
 static const float OcclusionStrength = TESR_AmbientLightData.y;
@@ -285,6 +292,16 @@ float4 Estimate(VSOUT IN) : COLOR0 {
 	[branch] if (DebugView > 2.5f && DebugView < 3.5f) return float4(normal * 0.5f + 0.5f, 1.0f);
 	[branch] if (DebugView > 3.5f && DebugView < 4.5f) return float4(origin.z / 2000.0f, frac(origin.z / 100.0f), 0.0f, 1.0f);
 	[branch] if (DebugView > 4.5f && DebugView < 5.5f) return float4(screenRadius * 10.0f, Radius / 1000.0f, 1.0f);
+	// UNOFFICIAL 2026-11-13 RT occlusion on the D3D9 passes (NVR_ALRT.x, see the samplers): the traced visibility in place of the screen search
+	// below, as AmbientLightEstimateRT.frag writes it: Estimate's mapping (OcclusionStrength means the same on both), the near / far fade and
+	// RtFarFade (the trace stops at endFade); rgb the traced bounce light when it is on (NVR_ALGI.x), else none.
+	[branch] if (NVR_ALRT.x > 0.5f) {
+		float rtFade = fade * (NVR_ALReach.w > 0.5f ? 1.0f - smoothstep(0.75f * endFade, (float)endFade, origin.z) : 1.0f);
+		float rtVisibility = pow(saturate(tex2Dlod(NVR_ALRTAO, float4(uv, 0.0f, 0.0f)).x), 1.5f * OcclusionStrength);
+		float3 rtBounce = 0.0f;
+		[branch] if (NVR_ALGI.x > 0.5f) rtBounce = tex2Dlod(NVR_ALRTGI, float4(uv, 0.0f, 0.0f)).rgb * rtFade;
+		return float4(rtBounce, saturate(lerp(1.0f, rtVisibility, rtFade)));
+	}
 	float visibility = 0.0f, weightSum = 0.0f;
 	float3 bounce = 0.0f;
 	float firstCos = 0.0f, firstLow = 0.0f;

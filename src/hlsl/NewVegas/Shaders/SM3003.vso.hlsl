@@ -15,6 +15,10 @@
 #define SHADOW_INVPROJ_REG c240
 #define SHADOW_INVVIEW_REG c244
 #include "includes/Shadow.hlsl"
+// UNOFFICIAL 2026-11-12 HairAndEyes (Includes/FlashBeam.hlsl): the vector to the flashlight in object space for the hair's pixel
+// shaders (TEXCOORD2, which the game's shaders leave unused). c10-c14: free here (c0-c3, c44, c45 and c240-c247 are taken).
+#define FLASH_BEAM_REG c10
+#include "includes/FlashBeam.hlsl"
 
 uniform row_major float4x4 ModelViewProj : register(c0);
 uniform float4 FogParam : register(c44);
@@ -33,6 +37,7 @@ struct VtxVaryings {
     float4 f_position       : POSITION;
     float2 f_uv             : TEXCOORD0;
     float4 f_shadow_world_pos : TEXCOORD1;   // the only addition to vanilla
+    float4 f_beam_obj       : TEXCOORD2;   // UNOFFICIAL 2026-11-12 xyz from the vertex to the flashlight, object space (a direction)
     float4 f_color          : COLOR0;
     float3 f_tangent        : TEXCOORD3;   // object space, unnormalised, as vanilla passes them
     float3 f_binormal       : TEXCOORD4;
@@ -60,6 +65,8 @@ VtxVaryings main(VtxAttrs va) {
     vr.f_obj_pos = va.f_position.xyz;
 
     vr.f_shadow_world_pos = float4(GetShadowWorldPos(vr.f_position), SHADOW_VS_SENTINEL);
+    // UNOFFICIAL 2026-11-12 HairAndEyes: from the vertex to the flashlight, in the object's axes (the pixel shader lights in them)
+    vr.f_beam_obj = float4(FlashBeamToObject(TESR_FlashBeam[0].xyz - vr.f_shadow_world_pos.xyz, ModelViewProj), 0.0f);
 
     return vr;
 };

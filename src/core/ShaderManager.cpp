@@ -32,6 +32,7 @@
 #include "ScopeCamera.h"	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] the picture-in-picture scope (its settings; BeginExtraCamera below)
 #include "FailOnce.h"	// UNOFFICIAL 2026-11-02 RetryFailedEffects: the cell serial its latches wait for
 #include "ShaderFallback.h"	// UNOFFICIAL 2026-11-12 ShaderFallback (the family's members loaded again after a drop)
+#include "GameShaderPairs.h"	// UNOFFICIAL 2026-11-13 [Main.Main.Misc] GameShaderPairCheck / GameShaderPairRepair (its settings, read below)
 #include <unordered_map>	// UNOFFICIAL 2026-10-27 RenderScale v2 (RenderRect::RescaleRegistered)
 extern D3DXVECTOR4 NvrGameMultisample;	// UNOFFICIAL 2026-11-04 Hooks/Settings.cpp (TESR_GameMultisample)
 
@@ -304,6 +305,17 @@ void RenderRect::RescaleAfterUpscale(IDirect3DSurface9* Surface) {
 	RescaleList.push_back(Surface);
 }
 
+// UNOFFICIAL 2026-11-12 (memleak): the buffer is released (TextureManager's idle targets): its spare goes with it (it was kept for the
+// session, keyed by a pointer that then names nothing, or another surface)
+void RenderRect::ForgetSurface(IDirect3DSurface9* Surface) {
+	RescaleList.erase(std::remove(RescaleList.begin(), RescaleList.end(), Surface), RescaleList.end());
+	auto found = RescaleTemps.find(Surface);
+	if (found == RescaleTemps.end()) return;
+	if (found->second.Surface) found->second.Surface->Release();
+	if (found->second.Texture) found->second.Texture->Release();
+	RescaleTemps.erase(found);
+}
+
 void RenderRect::RescaleRegistered(IDirect3DDevice9* Device) {
 	for (IDirect3DSurface9* buffer : RescaleList) {
 		D3DSURFACE_DESC desc = {};
@@ -340,10 +352,13 @@ template <typename T> void ShaderManager::RegisterEffect(T** slot) {
 	*slot = made;
 
 	EffectsNames[made->Name] = (EffectRecord**)slot;
+	// UNOFFICIAL 2026-11-12 (memleak) idle targets (TextureManager.h): the effect's object and its switch, before it makes its targets
+	TheTextureManager->NoteEffect(made, sizeof(T), TheSettingManager->GetMenuShaderEnabled(made->Name));
 	made->UpdateSettings();
 	made->RegisterConstants();
 	made->RegisterTextures();
 	made->LoadEffect();
+	TheTextureManager->StartingEffect = nullptr;
 }
 
 
@@ -544,6 +559,7 @@ void ShaderManager::UpdateConstants() {
 		GameShadersInMenus = !TheSettingManager->Config.FillNode(&node, "Shaders.PBR.Main", "GameShadersInMenus") || node.BoolValue;
 	}
 	ScopeOverlay::ReadSettings();	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] KeepOverlayBlack, FullFrame (core/ScopeOverlay.h; Render.cpp SetShadersHook, RenderHook)
+	GameShaderPairs::ReadSettings();	// UNOFFICIAL 2026-11-13 [Main.Main.Misc] GameShaderPairCheck, GameShaderPairRepair (core/GameShaderPairs.h; Render.cpp SetShadersHook)
 	ScopeOverlay::UpscalerSmall = Effects.TAA && Effects.TAA->Enabled && Effects.TAA->FSRSettings.Enabled && Effects.TAA->FSRSettings.RenderScale < 0.999f;	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] KeepRenderScale
 	ScopeCamera::ReadSettings();	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Detect, OwnCamera, ... (core/ScopeCamera.h; live, read every 30th frame)
 	GameShaderEyes = TheSettingManager->GetSettingI("Shaders.PBR.Main", "GameShaderEyes") != 0;	// UNOFFICIAL 2026-10-27 (Render.cpp SetShadersHook)
@@ -793,6 +809,8 @@ void ShaderManager::UpdateConstants() {
 		sunAmount.w = TheSettingManager->GetSettingF("Shaders.Sky.Main", "GlareStrength");
 		updateClock.LogTime("ShaderManager::UpdateSettings for shaders & effects");
 	}
+
+	TheTextureManager->TargetsFrame();	// UNOFFICIAL 2026-11-12 (memleak) idle targets: an effect switched on has its real buffers before it draws
 
 	// Constants of what is on: the families, then the effects (each effect's time kept for the menu).
 	for (const auto& entry : ShaderNames) {

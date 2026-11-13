@@ -5,6 +5,15 @@
 #include "../../core/RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
 #include "../../core/RtFogVisibility.h"	// UNOFFICIAL 2026-11-12 LampHazeShadows (RtFogLamps)
 
+// UNOFFICIAL 2026-11-13 (rtvol2) [Shaders.VolumetricLight.RT] Expanded: while the volumetric light's expanded look is in use, its own grid
+// composite draws the light (its height falloff and sun glow; this .fx has no constant register left for them), so the fog leaves its
+// FogGridLight out (NVR_FogGridFlags.y / push.gridFlags.y 0) and reports the grid not applied. The fog's own sun shading from the grid (x)
+// stays. Off: as before.
+static bool VlOwnComposite() {
+	const VolumetricLightEffect* light = TheShaderManager->Effects.VolumetricLight;
+	return light && light->expandedComposite;
+}
+
 extern D3DXVECTOR4 NvrGameMultisample;	// UNOFFICIAL 2026-11-05 Hooks/Settings.cpp (TESR_GameMultisample: x samples, y shares made, z MsaaEdgeFix)
 
 namespace {
@@ -700,7 +709,7 @@ bool VolumetricFogEffect::RenderDedicated(IDirect3DDevice9* Device, IDirect3DSur
 		bool extGrid = false;
 		if (ExtDedicated(Device, RenderTarget, RenderedSurface, scene, composite, extLayout, extGrid)) {
 			compositeApplied = composite;
-			gridApplied = extGrid;
+			gridApplied = extGrid && !VlOwnComposite();	// (UNOFFICIAL 2026-11-13 rtvol2: Expanded, the light's own composite draws it)
 			return true;
 		}
 	}
@@ -747,7 +756,7 @@ bool VolumetricFogEffect::RenderDedicated(IDirect3DDevice9* Device, IDirect3DSur
 	const bool grid = gridTexture && gridHandle;
 	IDirect3DBaseTexture9* skyCoverage = grid ? FogSkyCoverage("D3D9") : nullptr;	// UNOFFICIAL 2026-11-05 MsaaEdgeFix (stage 15)
 	if (gridHandle) {
-		D3DXVECTOR4 gridFlags(grid ? 1.0f : 0.0f, grid ? 1.0f : 0.0f, skyCoverage ? 1.0f : 0.0f, 0.0f);
+		D3DXVECTOR4 gridFlags(grid ? 1.0f : 0.0f, grid && !VlOwnComposite() ? 1.0f : 0.0f, skyCoverage ? 1.0f : 0.0f, 0.0f);	// (y: rtvol2 VlOwnComposite)
 		Effect->SetVector(gridHandle, &gridFlags);
 	}
 	if (grid) {
@@ -850,7 +859,7 @@ bool VolumetricFogEffect::RenderDedicated(IDirect3DDevice9* Device, IDirect3DSur
 		return false;
 	}
 	compositeApplied = composite;
-	gridApplied = grid;
+	gridApplied = grid && !VlOwnComposite();	// (UNOFFICIAL 2026-11-13 rtvol2)
 	static bool reportedComposite = false;
 	if (composite && !reportedComposite) {
 		Logger::Log("UNOFFICIAL composite apply active: sun shadows %s, AO %s folded into the fog pass.",
@@ -1237,7 +1246,7 @@ bool VolumetricFogEffect::ExtDedicated(IDirect3DDevice9* Device, IDirect3DSurfac
 	}
 	grid = gridTexture && ParameterHandle(paramGridFlags, "NVR_FogGridFlags");
 	IDirect3DBaseTexture9* skyCoverage = grid ? FogSkyCoverage("Vulkan") : nullptr;	// UNOFFICIAL 2026-11-05 MsaaEdgeFix (binding 13)
-	push.gridFlags = grid ? D3DXVECTOR4(1.0f, 1.0f, skyCoverage ? 1.0f : 0.0f, 0.0f) : D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
+	push.gridFlags = grid ? D3DXVECTOR4(1.0f, VlOwnComposite() ? 0.0f : 1.0f, skyCoverage ? 1.0f : 0.0f, 0.0f) : D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// (y: rtvol2)
 	if (grid) inputs[7] = gridTexture;
 	if (skyCoverage) inputs[13] = skyCoverage;
 

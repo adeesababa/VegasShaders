@@ -83,6 +83,8 @@
 // Shots start from the user's settings each time: a shot without changes is the user's own picture.
 #include <algorithm>
 #include <atomic>
+#include <windows.h>
+#include <psapi.h>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -131,8 +133,17 @@ namespace SettingShots {
 	inline Job* FinalJob = nullptr;
 	inline std::atomic<unsigned> FinalFrame{ 0 };	// UNOFFICIAL 2026-11-01: the rendered frame the Vulkan 'final' picture was read at
 	// UNOFFICIAL 2026-11-01 (bench <-> log sync): the frame the shot's picture shows, as the "[time fN]" prefix of every log line counts them
+	// UNOFFICIAL 2026-11-12: + the process's memory at the shot (address space in use, committed private bytes), so a list that visits the
+	// same places in a loop shows a leak as a rising figure at the same stop (bench list memsoak).
 	inline void LogCaptured(unsigned frame, const char* how) {
-		if (Index < List.size()) Logger::Log("SETTING SHOTS %s: shot '%s' captured at frame %u (%s)", Run, List[Index].slug.c_str(), frame, how);
+		if (Index >= List.size()) return;
+		MEMORYSTATUSEX memory = { sizeof(memory) };
+		GlobalMemoryStatusEx(&memory);
+		PROCESS_MEMORY_COUNTERS_EX counters = {};
+		counters.cb = sizeof(counters);
+		K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&counters, sizeof(counters));
+		Logger::Log("SETTING SHOTS %s: shot '%s' captured at frame %u (%s) | memory: address space %.0f MB, committed %.0f MB", Run, List[Index].slug.c_str(), frame, how,
+			(memory.ullTotalVirtual - memory.ullAvailVirtual) / 1048576.0, counters.PrivateUsage / 1048576.0);
 	}
 
 	inline bool Requested() { return GetFileAttributesA(RequestFile) != INVALID_FILE_ATTRIBUTES; }

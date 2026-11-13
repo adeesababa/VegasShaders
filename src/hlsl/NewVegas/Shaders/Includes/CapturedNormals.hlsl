@@ -40,15 +40,50 @@
         // 2026-10-31: the draw's class and bound radius ride in NVR_SpecFade.w (c211, Includes/PBR.hlsl: class + 8 x floor(radius), set per draw
         // by Render.cpp MaterialForPass through core/PbrPop.h). They were on c217 until then, which the RT lamp shadows' NVR_PointShadowRTSlot[2]
         // (c216-c217) also holds: every interior lamp-shadow shader with POINT_SHADOW_RT failed to compile with MaterialBuffer on.
-        #define NVR_MATERIAL_RADIUS floor(NVR_SpecFade.w * 0.125f)
-        #define NVR_MATERIAL_CLASS (NVR_SpecFade.w - 8.0f * NVR_MATERIAL_RADIUS)
+        // UNOFFICIAL 2026-11-12 (ptbump; core/CapturedNormals.h NoHighlightFlag, ShaderRecord's CAPTURED_PT: the DXVK fork with the AlbedoBuffer
+        // level, where path tracing runs). The roughness written here is 1 - the normal map's alpha for EVERY object, also for a mesh the
+        // game draws with no highlight at all (no specular shader flag: these shaders' plain Lambert variants never use it). Their alpha is
+        // often 1 (a DXT1 map has none): roughness 0.04, and the path tracer's first hit, which reads this record, mirrored the sky off
+        // rocks and walls the game draws matte. While the path tracer runs, Render.cpp MaterialForPass sends such a draw's c211.w NEGATIVE
+        // (the same class + 8 x radius): the *NoHighlight macros then write b = -2 - roughness (-3 .. -2; a missing roughness stays -1),
+        // which the path tracer reads as matte and every other reader of b decodes back. Without the flag (path tracing off, native
+        // Direct3D 9): w is positive and the records are bit for bit what they were (abs is a source modifier: no instruction).
+        #if defined(CAPTURED_PT) && CAPTURED_PT
+            #define NVR_MATERIAL_W abs(NVR_SpecFade.w)
+            #define CapturedNoHighlight(roughness) (NVR_SpecFade.w < 0.0f ? -2.0f - (roughness) : (roughness))
+        #else
+            #define NVR_MATERIAL_W NVR_SpecFade.w
+        #endif
+        #define NVR_MATERIAL_RADIUS floor(NVR_MATERIAL_W * 0.125f)
+        #define NVR_MATERIAL_CLASS (NVR_MATERIAL_W - 8.0f * NVR_MATERIAL_RADIUS)
         #define CapturedMaterialOut(roughness) float4(NVR_MATERIAL_CLASS, NVR_MATERIAL_RADIUS, (roughness), 1.0f)
         #define CapturedMaterialOutClass(materialClass, roughness) float4((materialClass), NVR_MATERIAL_RADIUS, (roughness), 1.0f)
         #define CapturedMaterialOutMetal(roughness, metal) float4(NVR_MATERIAL_CLASS + 0.49f * saturate(metal), NVR_MATERIAL_RADIUS, (roughness), 1.0f)
+        // the one-pass and base-pass records of a mesh that may have no highlight (metal pixels keep theirs: the game's metal reflects).
+        // Without CAPTURED_PT they ARE the plain forms, token for token (the compiled shaders are the same bytes as before: shcheck).
+        #if defined(CAPTURED_PT) && CAPTURED_PT
+            #define CapturedMaterialOutNoHighlight(roughness) CapturedMaterialOut(CapturedNoHighlight(roughness))
+            #define CapturedMaterialOutMetalNoHighlight(roughness, metal) CapturedMaterialOutMetal(((metal) > 0.0f ? (roughness) : CapturedNoHighlight(roughness)), (metal))
+        #else
+            #define CapturedMaterialOutNoHighlight(roughness) CapturedMaterialOut(roughness)
+            #define CapturedMaterialOutMetalNoHighlight(roughness, metal) CapturedMaterialOutMetal(roughness, metal)
+        #endif
+        // UNOFFICIAL 2026-11-12 (ptbump) the LAND's record with its normal-mapped normal for the path tracer's first hit (CAPTURED_PT 2:
+        // [Main.Main.Quality] CapturedBumpNormals): n = the blended layers' bumped normal in world axes (the land is not rotated), any
+        // length. g = 3 + e.x, b = -7 + e.y, e hemi-octahedral about +z (-1 .. 1 each; a normal below the horizon is laid on it). A land
+        // texel's g held the last object's radius and its b -1 (no roughness): no reader takes either from the land (they test the class,
+        // or b >= 0), and b stays "no roughness" to them.
+        float4 CapturedLandBumpOut(float3 n) {
+            n.z = max(n.z, 0.0f);
+            const float2 h = n.xy / max(abs(n.x) + abs(n.y) + n.z, 1.0e-6f);
+            return float4(4.0f, 3.0f + h.x + h.y, -7.0f + h.x - h.y, 1.0f);
+        }
     #else
         #define CapturedMaterialOut(roughness) 0.0f
         #define CapturedMaterialOutClass(materialClass, roughness) 0.0f
         #define CapturedMaterialOutMetal(roughness, metal) 0.0f
+        #define CapturedMaterialOutNoHighlight(roughness) 0.0f
+        #define CapturedMaterialOutMetalNoHighlight(roughness, metal) 0.0f
     #endif
 
     // UNOFFICIAL 2026-10-31 AlbedoBuffer (core/CapturedNormals.h; [Main.Main.Quality] AlbedoBuffer, restart, with MaterialBuffer; CAPTURED_NORMALS_ON 3;

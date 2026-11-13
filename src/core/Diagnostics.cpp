@@ -2185,9 +2185,11 @@ namespace {
 		Logger::Log("REPORT %u environment: %s", n, SessionLog::Environment().c_str());
 		{	// UNOFFICIAL 2026-11-01: every setting that differs from the defaults NOW (a tester's preset, loaded live after the SESSION
 			// header, changed ~190 settings the header never saw): the same list as the header's, from the live values
-			char settingsHead[48];
+			char settingsHead[72];
 			sprintf_s(settingsHead, "REPORT %u settings", n);
 			SessionLog::LogSettingsDiff(settingsHead);
+			sprintf_s(settingsHead, "REPORT %u test / internal settings changed", n);	// UNOFFICIAL 2026-11-12: the Developer options and Internal ones
+			SessionLog::LogTestSettingsDiff(settingsHead);
 		}
 		Logger::Log("REPORT %u ray tracing: core: %s | %s | %s | %s", n, RtCore::StatusText() ? RtCore::StatusText() : "?", RtSunShadows::StatusText().c_str(),
 			TheShaderManager->Effects.Reflections ? TheShaderManager->Effects.Reflections->RtStatusText().c_str() : "no Reflections effect", AmbientOcclusionEffect::RtStatusText().c_str());

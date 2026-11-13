@@ -44,7 +44,17 @@
 // the world scene passed the depth test on), c9 = (1 the mask on, its uv scale x, y: the mask's texel for this target's, 0). A world
 // pixel (not the view model's, which keeps its own rules above) with a mask above 0.45 is coded -1: the game's own pixel, whatever the
 // depth and the captured buffers say (ScreenHit: unwritten). c9 = 0 (the host's scenes that set nothing; no water drawn; the key off):
-// s5 is not looked at and the pass is exactly as it was.
+// s5 is not looked at and the pass is exactly as it was. (2026-11-13 PTAlbedoCoverage) c9.w: the mask's threshold when above 0 (0: 0.45).
+// With the game's MSAA the mask is the share of the pixel's samples, and the trace takes a pixel as a surface only where ALL its samples
+// were written: 0.1 there (one sample of eight counts), so a pixel with any water or unrecorded grass in it is the game's own.
+// 2026-11-12 (ptgrass; a tester: "grass disappears / reappears depending on viewing angle") GRASS under the "in front" rule, written
+// down because the rule's result for it depends on the view angle. Grass without records ([Main.Main.Quality] CapturedGrass off, the
+// game's own grass shaders, lamp-lit grass) that is drawn AFTER the land has the land's records behind it; what the mark compares is the
+// blade's distance before the land ALONG THE VIEW RAY: its height over the ground / sin(the angle between the ray and the ground).
+// Seen along the ground that is many times the height (a sure mark: the game's own pixel); seen from above, or on a slope that faces
+// the camera, it is the height itself, and with the tolerance growing by 1 % of the distance (22 units at 2000) the lower part of a
+// tuft, or all of it, carries no mark: the land's colour at the blade's place. With the land's tessellation on, the reach adds to it.
+// With the grass's own records the captured distance is the blade's: no mark at any angle (tools/nvr-rt-host scene `screenown`, GRASS).
 namespace RtViewModel {
 	inline const char* const kPrepPS =
 		"sampler2D N : register(s0); sampler2D C : register(s1); sampler2D M : register(s2); sampler2D D : register(s3); sampler2D K : register(s4);"
@@ -57,7 +67,7 @@ namespace RtViewModel {
 		"  bool rev = Q.x > 0.5;"
 		"  bool vm = S.x > 0.5 && (rev ? raw > 0.01 : raw < 0.9);"
 		"  if (!vm) {"
-		"    if (U.x > 0.5 && wm > 0.45) return float4(nb.rgb, -1.0);"
+		"    if (U.x > 0.5 && wm > (U.w > 0.0 ? U.w : 0.45)) return float4(nb.rgb, -1.0);"
 		"    float a = c.a > 1.5 ? 2.0 : 1.0;"
 		"    if (S.y > 0.5 && dw > 0.0 && dw < 0.9999 && c.a > 0.99) {"
 		"      float2 r = uv * R.xy + R.zw;"

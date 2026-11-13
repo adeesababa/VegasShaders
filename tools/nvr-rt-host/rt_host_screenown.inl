@@ -41,17 +41,21 @@ static bool ownInside(const OwnQuad& q, const Camera& cam, float px, float py) {
 	return p.x > q.x0 && p.x < q.x1 && p.z > q.z0 && p.z < q.z1;
 }
 
-enum { kOwnWall, kOwnArmour, kOwnBody, kOwnHead, kOwnHair, kOwnThing, kOwnLand, kOwnBump5, kOwnBump20, kOwnBump60, kOwnHairLand, kOwnRubble, kOwnQuads };
+enum { kOwnWall, kOwnArmour, kOwnBody, kOwnHead, kOwnHair, kOwnThing, kOwnLand, kOwnBump5, kOwnBump20, kOwnBump60, kOwnHairLand, kOwnRubble,
+	kOwnMeadow, kOwnGrassA, kOwnGrassB, kOwnGrassC, kOwnGrassD, kOwnQuads };   // (2026-11-12 ptgrass: the grass cases, see sceneScreenOwn's last block)
 // the regions (a pixel whose centre and four corners agree; -1 an edge pixel)
 enum { kRegWall, kRegArmour, kRegBodyArmour, kRegBodyWall, kRegHead, kRegHairHead, kRegHairWall, kRegThing,
-	kRegLand, kRegBump5, kRegBump20, kRegBump60, kRegHairLand, kRegRubble, kRegions };
+	kRegLand, kRegBump5, kRegBump20, kRegBump60, kRegHairLand, kRegRubble,
+	kRegMeadow, kRegGrassA, kRegGrassB, kRegGrassC, kRegGrassD, kRegions };
 static const char* const kOwnRegionName[kRegions] = { "the wall", "the armour", "the body before the armour", "the body before the wall", "the head (face)",
 	"hair over the head", "hair over the wall alone", "the untraced thing", "the land", "the land's bump, 5 units", "the land's bump, 20 units",
-	"the land's bump, 60 units", "hair 10 units before the land", "the blended rubble" };
+	"the land's bump, 60 units", "hair 10 units before the land", "the blended rubble",
+	"the meadow (land)", "grass A, 30 units before the meadow", "grass B, drawn before the land", "grass C, 30 units before the meadow", "grass D, 3 units before the meadow" };
 
 struct OwnBuffers {
 	std::vector<float> depth, normals, captured, albedo, material, blur;
 	std::vector<int> region;
+	std::vector<float> blade;   // (2026-11-12 ptgrass) 1 where a grass card is the pixel's depth (the PTGrassOwnPixel mask's input)
 };
 
 // Part 0: one blended draw into two render targets under the scene's separate alpha blend; returns target 0's and target 1's texel
@@ -103,7 +107,7 @@ static bool ownBlendDraw(Host& h, bool fixed, float out0[4], float out1[4]) {
 // The prep pass on the fork's D3D9 device: textures of size W (the world in the top-left S x S), as RtPathTrace.cpp ViewModelPrep
 // (2026-11-12 PTWaterMask) water: the game's water mask (S x S, 1 = water; RtViewModel.h s5 / c9), null = none (c9 = 0: the pass as it was)
 static bool ownPrep(Host& h, const Camera& cam, const OwnBuffers& b, UINT W, bool marks, int skinMode, float reach, std::vector<float>& outAlpha, std::vector<float>* outFull = nullptr,
-	const std::vector<float>* water = nullptr) {
+	const std::vector<float>* water = nullptr, float maskThreshold = 0.0f) {
 	auto place = [&](const std::vector<float>& v, int ch) {
 		if (W == S) return v;
 		std::vector<float> o(size_t(W) * W * ch, 0.0f);
@@ -129,7 +133,7 @@ static bool ownPrep(Host& h, const Camera& cam, const OwnBuffers& b, UINT W, boo
 		{ 0.0f, marks ? 1.0f : 0.0f, RtViewModel::kFrontShare, RtViewModel::kFrontUnits },   // no view model (third person)
 		{ scale, scale, 0.0f, 0.0f },
 		{ marks ? float(skinMode) : 0.0f, reach, 0.0f, 0.0f },
-		{ water ? 1.0f : 0.0f, 1.0f, 1.0f, 0.0f } };   // (PTWaterMask) the mask in the buffers' own layout: uv scale 1
+		{ water ? 1.0f : 0.0f, 1.0f, 1.0f, maskThreshold } };   // (PTWaterMask) the mask in the buffers' own layout: uv scale 1
 	h.dev->SetVertexShader(nullptr); h.dev->SetPixelShader(ps);
 	h.dev->SetPixelShaderConstantF(0, &k[0][0], 10);
 	h.dev->SetTexture(0, tn.t); h.dev->SetTexture(1, tc.t); h.dev->SetTexture(2, tn.t); h.dev->SetTexture(3, td.t); h.dev->SetTexture(4, skinMode == 2 ? tk.t : tn.t);
@@ -184,9 +188,16 @@ static bool sceneScreenOwn(Ctx& c) {
 		{ 150, 190, -110, -60, 380 },         // 20 units
 		{ 200, 260, -110, -60, 340 },         // 60 units
 		{ 100, 230, -10, 70, 390 },           // a hair card 10 units before the land
-		{ -480, -270, 120, 330, 600 } };      // the blended rubble
+		{ -480, -270, 120, 330, 600 },        // the blended rubble
+		// (2026-11-12 ptgrass) a second piece of land across the top of the picture and four grass cards before it (the last block)
+		{ -300, 300, 340, 460, 400 },         // the meadow
+		{ -255, -150, 340, 425, 370 },        // grass A
+		{ -120, -15, 340, 425, 370 },         // grass B
+		{ 15, 120, 340, 425, 370 },           // grass C
+		{ 150, 255, 350, 445, 397 } };        // grass D: 3 units before the meadow (a blade's base)
 	const V3 wallC = { 0.30f, 0.60f, 0.30f }, armourC = { 0.70f, 0.20f, 0.10f }, skinRecord = { 0.55f, 0.40f, 0.33f }, skinScreen = { 0.60f, 0.45f, 0.35f };
 	const V3 landC = { 0.45f, 0.40f, 0.30f }, rubbleC = { 0.70f, 0.60f, 0.50f };
+	const V3 meadowC = { 0.40f, 0.30f, 0.20f }, grassC = { 0.20f, 0.35f, 0.10f }, twinC = { 0.05f, 0.80f, 0.05f };   // (ptgrass) the meadow's record, the grass's own record, the traced tufts' record
 	const V3 tintStored = { 0.55f, 0.25f, 0.12f };
 	const V3 tint = { RtScenePick::TintLinear(tintStored.x), RtScenePick::TintLinear(tintStored.y), RtScenePick::TintLinear(tintStored.z) };
 	const float frameStored[3] = { 0.3f, 0.6f, 0.9f };
@@ -213,7 +224,7 @@ static bool sceneScreenOwn(Ctx& c) {
 
 	// ---- the RT scene
 	World w;
-	w.meshes.resize(8);
+	w.meshes.resize(13);
 	auto mq = [&](int m, const OwnQuad& o) { w.meshes[m].quad({ o.x0, o.y, o.z0 }, { o.x1, o.y, o.z0 }, { o.x1, o.y, o.z1 }, { o.x0, o.y, o.z1 }); };
 	mq(0, q[kOwnWall]); mq(1, q[kOwnArmour]); mq(2, q[kOwnBody]); mq(3, q[kOwnHead]); mq(4, q[kOwnHair]); mq(5, q[kOwnLand]); mq(6, q[kOwnHairLand]); mq(7, q[kOwnRubble]);
 	w.slots[slot] = [alpha](int, int) { return alpha; };
@@ -228,7 +239,15 @@ static bool sceneScreenOwn(Ctx& c) {
 	Object hairLand = hair; hairLand.mesh = 6; hairLand.id = 7;
 	const V3 rubbleRecord = { 0.35f, 0.30f, 0.25f };   // (the traced copy's own colour: not what the screen's surface shows)
 	Object rubble; rubble.mesh = 7; rubble.albedo = rubbleRecord; rubble.id = 8;
-	w.objects = { wall, armour, body, head, hair, land, hairLand, rubble };
+	// (2026-11-12 ptgrass) the meadow, and the traced scene's own grass (RtCore::AddGrass: each tuft a still copy of its model, a foliage
+	// cut-out; here alpha 0.6 everywhere = 59.8 % of the camera's rays), standing 2 / 1 units off the screen's blades (wind, bending)
+	OwnQuad twinQ[4] = { q[kOwnGrassA], q[kOwnGrassB], q[kOwnGrassC], q[kOwnGrassD] };
+	twinQ[0].y += 2.0f; twinQ[1].y += 2.0f; twinQ[2].y += 2.0f; twinQ[3].y += 1.0f;
+	mq(8, q[kOwnMeadow]); for (int k = 0; k < 4; k++) mq(9 + k, twinQ[k]);
+	Object meadow; meadow.mesh = 8; meadow.land = true; meadow.albedo = meadowC; meadow.id = 9;
+	Object twin[4];
+	for (int k = 0; k < 4; k++) { twin[k].mesh = 9 + k; twin[k].alphaTested = true; twin[k].alphaSlot = slot; twin[k].alphaRef = 128; twin[k].kind = NVR_RT_KIND_FOLIAGE; twin[k].albedo = twinC; twin[k].id = 10 + k; }
+	w.objects = { wall, armour, body, head, hair, land, hairLand, rubble, meadow, twin[0], twin[1], twin[2], twin[3] };
 	if (!RtScenePick::IsTinted(hair.recordFlags()) || NvrRtKindOf(body.recordFlags()) != NVR_RT_KIND_SKIN) {
 		say("    packing: hair flags %08X (expected a tinted cut-out), body flags %08X (expected skin)\n", hair.recordFlags(), body.recordFlags()); ok = false; }
 	std::vector<uint32_t> ids;
@@ -239,9 +258,16 @@ static bool sceneScreenOwn(Ctx& c) {
 	// alpha code 2.05 + 0.4 x roughness also with AlbedoBuffer on) + SkinFill (class 6); else the skin's material texel is what lies behind;
 	// rubbleA: the alpha the rubble's blended draw left in the three targets (part 0's measurement)
 	const float skinRough = 0.45f;
-	auto build = [&](bool blurOn, bool newSkin, float rubbleA, OwnBuffers& b) {
+	// (2026-11-12 ptgrass) grass: 0 = the grass cards wrote depth only, as the game's grass does without records ([Main.Main.Quality]
+	// CapturedGrass off, the game's own grass shaders, lamp-lit grass): A, C and D were drawn AFTER the land (its records lie behind
+	// them), B BEFORE it (GrassFirst: the land failed the depth test there, nothing is recorded); 1 = the cards wrote their own records
+	// (GRASS23x000TMS.pso: colour, class 7 with the grass mark g = 0.5, roughness 0.9, their own distance) and MergeIntoNormals put the
+	// record's normal into the normals buffer: A and D facing the camera, B EDGE-ON ((1, 0, 0): 2 to 15 degrees off the view's tangent
+	// across the card, as the grass shader leaves a tuft's normal seen along the ground: bent just enough to face the eye), C facing
+	// AWAY from the camera (a two-sided card seen from behind)
+	auto build = [&](bool blurOn, bool newSkin, float rubbleA, OwnBuffers& b, int grass = 0) {
 		b.depth.assign(S * S, 1.0f); b.normals.assign(S * S * 4, 0.5f); b.captured.assign(S * S * 4, 0.0f);
-		b.albedo.assign(S * S * 4, 0.0f); b.material.assign(S * S * 4, 0.0f); b.blur.assign(S * S * 4, 0.0f); b.region.assign(S * S, -1);
+		b.albedo.assign(S * S * 4, 0.0f); b.material.assign(S * S * 4, 0.0f); b.blur.assign(S * S * 4, 0.0f); b.region.assign(S * S, -1); b.blade.assign(S * S, 0.0f);
 		for (UINT j = 0; j < S; j++) for (UINT i = 0; i < S; i++) {
 			const UINT p = j * S + i;
 			bool in[kOwnQuads]; bool interior = true;
@@ -261,7 +287,10 @@ static bool sceneScreenOwn(Ctx& c) {
 			// the captured normals: the nearest of the main list's NVR templates (wall, armour, land, rubble: 1; the body's skin: 2, or its
 			// roughness code). The land's bumps are the land's own draw: its captured distance, the FLAT land's.
 			int cap = -1;
-			for (int k : { kOwnWall, kOwnArmour, kOwnBody, kOwnLand, kOwnRubble }) if (in[k] && (cap < 0 || q[k].y < q[cap].y)) cap = k;
+			for (int k : { kOwnWall, kOwnArmour, kOwnBody, kOwnLand, kOwnRubble, kOwnMeadow }) if (in[k] && (cap < 0 || q[k].y < q[cap].y)) cap = k;
+			const int blade = nearest >= kOwnGrassA && nearest <= kOwnGrassD ? nearest : -1;   // (ptgrass) a grass card is the pixel's depth
+			if (blade >= 0) b.blade[p] = 1.0f;
+			if (blade == kOwnGrassB || (blade >= 0 && grass == 1)) cap = -1;
 			if (cap >= 0) {
 				float ex, ey; octEncodeSigned(V3(0, -1, 0), ex, ey);
 				float* cp = &b.captured[p * 4];
@@ -270,13 +299,14 @@ static bool sceneScreenOwn(Ctx& c) {
 			}
 			// the albedo and material buffers: the object / land templates only; skin: the fills after the list
 			int obj = -1;
-			for (int k : { kOwnWall, kOwnArmour, kOwnLand, kOwnRubble }) if (in[k] && (obj < 0 || q[k].y < q[obj].y)) obj = k;
+			for (int k : { kOwnWall, kOwnArmour, kOwnLand, kOwnRubble, kOwnMeadow }) if (in[k] && (obj < 0 || q[k].y < q[obj].y)) obj = k;
+			if (blade == kOwnGrassB || (blade >= 0 && grass == 1)) obj = -1;
 			float* al = &b.albedo[p * 4]; float* mt = &b.material[p * 4];
 			if (obj >= 0) {
-				const V3 col = obj == kOwnWall ? wallC : obj == kOwnArmour ? armourC : obj == kOwnLand ? landC : rubbleC;
+				const V3 col = obj == kOwnWall ? wallC : obj == kOwnArmour ? armourC : obj == kOwnLand ? landC : obj == kOwnMeadow ? meadowC : rubbleC;
 				const float a = obj == kOwnRubble ? rubbleA : 1.0f;
 				al[0] = col.x; al[1] = col.y; al[2] = col.z; al[3] = a;
-				if (obj == kOwnLand) { mt[0] = 4.0f; mt[1] = 100.0f; mt[2] = -1.0f; mt[3] = a; }            // class 4 (land): roughness 0.95
+				if (obj == kOwnLand || obj == kOwnMeadow) { mt[0] = 4.0f; mt[1] = 100.0f; mt[2] = -1.0f; mt[3] = a; }            // class 4 (land): roughness 0.95
 				else if (obj == kOwnRubble) { mt[0] = 1.0f; mt[1] = 100.0f; mt[2] = 0.7f; mt[3] = a; }      // class 1, no metal
 				else { mt[0] = 1.0f + 0.49f * 1.0f; mt[1] = 100.0f; mt[2] = obj == kOwnWall ? 0.1f : 0.2f; mt[3] = a; }   // class 1 (object), metal 1
 			}
@@ -287,9 +317,20 @@ static bool sceneScreenOwn(Ctx& c) {
 				}
 				if (newSkin) { mt[0] = 6.0f; mt[1] = 0.0f; mt[2] = skinRough; mt[3] = 1.0f; }   // SkinFill: clip(a - 2.02) passes only with the roughness code
 			}
+			if (blade >= 0 && grass == 1) {   // (ptgrass) the grass's own records
+				const V3 gn = blade == kOwnGrassB ? V3(1, 0, 0) : blade == kOwnGrassC ? V3(0, 1, 0) : V3(0, -1, 0);
+				float ex, ey; octEncodeSigned(gn, ex, ey);
+				float* cp = &b.captured[p * 4];
+				cp[0] = ex; cp[1] = ey; cp[2] = (q[blade].y - eye.y) * len; cp[3] = 1.0f;
+				al[0] = grassC.x; al[1] = grassC.y; al[2] = grassC.z; al[3] = 1.0f;
+				mt[0] = 7.0f; mt[1] = 0.5f; mt[2] = 0.9f; mt[3] = 1.0f;
+				n[0] = 0.5f + 0.5f * dot(gn, cam.r); n[1] = 0.5f + 0.5f * dot(gn, cam.u); n[2] = 0.5f + 0.5f * dot(gn, cam.f);   // the view-space normal, as the merge writes it
+			}
 			if (!interior) continue;
 			int r = -1;
-			if (in[kOwnHair]) r = in[kOwnHead] ? kRegHairHead : kRegHairWall;
+			if (blade >= 0) r = kRegGrassA + (blade - kOwnGrassA);
+			else if (in[kOwnMeadow]) r = kRegMeadow;
+			else if (in[kOwnHair]) r = in[kOwnHead] ? kRegHairHead : kRegHairWall;
 			else if (in[kOwnHead]) r = kRegHead;
 			else if (in[kOwnThing]) r = kRegThing;
 			else if (in[kOwnRubble]) r = kRegRubble;
@@ -368,7 +409,7 @@ static bool sceneScreenOwn(Ctx& c) {
 				int want = 0;
 				if (r.marks) {
 					if (reg == kRegHead || reg == kRegHairHead || reg == kRegHairWall || reg == kRegThing || (body && r.mode == 1)) want = 2;
-					else if (reg == kRegBump20 || reg == kRegBump60 || reg == kRegHairLand) want = r.reach > 0.0f ? 1 : 2;
+					else if (reg == kRegBump20 || reg == kRegBump60 || reg == kRegHairLand || reg == kRegGrassA || reg == kRegGrassC) want = r.reach > 0.0f ? 1 : 2;   // (ptgrass: grass 30 units before the land's record)
 				}
 				if (markOf((*r.out)[p]) != want) wrong++;
 				if (body != ((*r.out)[p] > 1.5f)) wrong++;   // the person code on the body's skin only
@@ -399,6 +440,19 @@ static bool sceneScreenOwn(Ctx& c) {
 				say("  prep pass, PTWaterMask (buffers %u, world %u): %d masked pixels must be -1, the rest as without a mask: %d pixels differ from the CPU -> %s\n", W, S, masked, bad, pass ? "ok" : "BAD");
 				if (!pass) ok = false;
 			}
+			// (2026-11-13 PTAlbedoCoverage) c9.w = 0.1, as with the game's MSAA: the strip at one sample of four (0.25) is masked too
+			{
+				if (!ownPrep(h, cam, t, S, true, 2, reach, aWater, nullptr, &mask, 0.1f)) return false;
+				int bad = 0, strip = 0;
+				for (UINT p = 0; p < S * S; p++) {
+					const bool wet = mask[p] > 0.1f;
+					if (wet && mask[p] < 0.3f) strip++;
+					if (aWater[p] != (wet ? -1.0f : wantAlpha(t, p, true, 2, reach))) bad++;
+				}
+				const bool pass = bad == 0 && strip > 0;
+				say("  prep pass, the mask's threshold 0.1 (PTAlbedoCoverage, MSAA): %d pixels at one sample of four are masked too; %d pixels differ from the CPU -> %s\n", strip, bad, pass ? "ok" : "BAD");
+				if (!pass) ok = false;
+			}
 		}
 		// the normal passes through untouched
 		int nbad = 0;
@@ -415,6 +469,9 @@ static bool sceneScreenOwn(Ctx& c) {
 	// hairBits: frame row texel 30.x (RtPathTrace.cpp: 3 = BlendedHair, 2 = BlendedHair with PTBlendedLayer: no first-surface bit)
 	// (2026-11-12) the frame row's texels 291.y PTAlbedoGamma's exponent, 292.x PTScreenOwnNarrow, 292.y PTHairOverSky (0: as the 11-11 build)
 	float keyGamma = 0.0f, keyNarrow = 0.0f, keyHairSky = 0.0f;
+	// (2026-11-12 ptbump) 293.y PTBumpNormals, 294.x PTBumpDetail, 294.y PTMatteNoHighlight (0: as before)
+	float keyBump = 0.0f, keyBumpDetail = 0.0f, keyMatte = 0.0f;
+	float keyCover = 0.0f;   // (2026-11-12 ptgrass) texel 297.x PTAlbedoCoverage (set by the DLL only in a frame with the game's MSAA)
 	auto run = [&](const OwnBuffers& b, const std::vector<float>& alphaCode, int view, float hairBits, std::vector<float>& out) {
 		std::vector<float> normals = b.normals;
 		for (UINT p = 0; p < S * S; p++) normals[p * 4 + 3] = alphaCode[p];
@@ -424,6 +481,10 @@ static bool sceneScreenOwn(Ctx& c) {
 		image[size_t(kLightTexels) * kFrameRowIndex * 2 + 2 * 291 + 1] = keyGamma;
 		image[size_t(kLightTexels) * kFrameRowIndex * 2 + 2 * 292] = keyNarrow;
 		image[size_t(kLightTexels) * kFrameRowIndex * 2 + 2 * 292 + 1] = keyHairSky;
+		image[size_t(kLightTexels) * kFrameRowIndex * 2 + 2 * 293 + 1] = keyBump;
+		image[size_t(kLightTexels) * kFrameRowIndex * 2 + 2 * 294] = keyBumpDetail;
+		image[size_t(kLightTexels) * kFrameRowIndex * 2 + 2 * 294 + 1] = keyMatte;
+		image[size_t(kLightTexels) * kFrameRowIndex * 2 + 2 * 297] = keyCover;
 		if (!h.Upload(gM.ptLamps, image)) return false;
 		PathConstants k = {};
 		cameraConstants(cam, k.size, k.forward, k.right, k.up, k.origin);
@@ -472,7 +533,7 @@ static bool sceneScreenOwn(Ctx& c) {
 	{
 		Want before[kRegions] = {}, after[kRegions] = {};
 		const V3 same[kRegions] = { wallC, armourC, skinScreen, skinScreen, wallC, wallC, wallC, wallC, landC, landC, landC, landC, landC, rubbleC };
-		for (int r = 0; r < kRegions; r++) { before[r] = { true, same[r] }; after[r] = { true, same[r] }; }
+		for (int r = 0; r < kRegMeadow; r++) { before[r] = { true, same[r] }; after[r] = { true, same[r] }; }   // (the grass cases: the last block)
 		before[kRegHairHead] = { true, mix(tint, wallC) }; before[kRegHairWall] = { true, mix(tint, wallC) }; before[kRegHairLand] = { true, mix(tint, landC) };
 		after[kRegHead] = { true, skinRecord }; after[kRegHairHead] = { true, mix(tint, skinRecord) }; after[kRegHairWall] = { true, mix(tint, wallC) };
 		after[kRegThing] = { true, frameLin }; after[kRegHairLand] = { true, mix(tint, landC) };
@@ -548,7 +609,7 @@ static bool sceneScreenOwn(Ctx& c) {
 	{
 		Want after[kRegions] = {};
 		const V3 same[kRegions] = { wallC, armourC, skinScreen, skinScreen, wallC, wallC, wallC, wallC, landC, landC, landC, landC, landC, rubbleC };
-		for (int r = 0; r < kRegions; r++) after[r] = { true, same[r] };
+		for (int r = 0; r < kRegMeadow; r++) after[r] = { true, same[r] };
 		after[kRegHead] = { true, skinRecord }; after[kRegHairHead] = { true, mix(tint, skinRecord) }; after[kRegHairWall] = { true, mix(tint, wallC) };
 		after[kRegThing] = { true, frameLin }; after[kRegHairLand] = { true, mix(tint, landC) };
 		keyNarrow = 1.0f;
@@ -591,6 +652,154 @@ static bool sceneScreenOwn(Ctx& c) {
 		if (!run(sky, ones, 1, 3.0f, o)) return false;
 		judge("AFTER PTHairOverSky: the rays the card keeps are the traced hair, the rest the game's pixel", sky, o, hs, 0.012f);
 		keyHairSky = 0.0f;
+	}
+	// ---- 2026-11-12 (ptbump; a tester: "textures are missing their normals/bumpmaps", "a gross sheen over everything")
+	// -- PTMatteNoHighlight: the rubble's record coded "the game draws no highlight on this mesh" (b = -2 - its roughness 0.1: a normal
+	// map's alpha of 0.9 on a mesh without the specular flag, Includes/CapturedNormals.hlsl). Key off: the roughness as recorded before
+	// the code (0.1: a near mirror to the tracer); on: matte (1). The wall's and the armour's uncoded records (0.1 / 0.2, metal 1) and
+	// the land (0.95) stay.
+	{
+		OwnBuffers coded = gBlur;
+		for (UINT p2 = 0; p2 < S * S; p2++) if (coded.material[p2 * 4] > 0.5f && coded.material[p2 * 4] < 1.2f && coded.material[p2 * 4 + 2] == 0.7f) coded.material[p2 * 4 + 2] = -2.0f - 0.1f;
+		Want m[kRegions] = {}; m[kRegRubble] = { true, { 0.1f, 0, 0 } }; m[kRegWall] = { true, { 0.1f, 1, 0 } }; m[kRegArmour] = { true, { 0.2f, 1, 0 } }; m[kRegLand] = { true, { 0.95f, 0, 0 } };
+		keyNarrow = 1.0f;
+		if (!run(coded, aBlur, 4, 3.0f, o)) return false;
+		judge("BEFORE PTMatteNoHighlight, roughness / metal: a no-highlight mesh's coded record reads as its old roughness 0.1 (a mirror)", coded, o, m, 0.004f);
+		m[kRegRubble] = { true, { 1.0f, 0, 0 } };
+		keyMatte = 1.0f;
+		if (!run(coded, aBlur, 4, 3.0f, o)) return false;
+		judge("AFTER PTMatteNoHighlight: that mesh is matte (roughness 1); the shiny wall and armour and the land as before", coded, o, m, 0.004f);
+		keyMatte = 0.0f;
+	}
+	// -- PTBumpNormals, the land's record: its bumped normal in the MaterialBuffer's g / b (TerrainTemplate.hlsl / CapturedLandBumpOut:
+	// g = 3 + e.x, b = -7 + e.y, e hemi-octahedral about +z). Key off: the smooth normal (0, -1, 0) everywhere; on: the land's pixels
+	// (flat, where the traced hit is the same surface, and its 60-unit bump, where only the screen's surface counts) take the recorded
+	// normal as their shading normal; the wall (no record) keeps its own. The display's alpha says where: 2 + PTBumpDetail.
+	{
+		const V3 bump = normalize(V3(0.30f, -0.80f, 0.52f));
+		const float sum = std::fabs(bump.x) + std::fabs(bump.y) + bump.z, hx = bump.x / sum, hy = bump.y / sum;
+		OwnBuffers land2 = gBlur;
+		for (UINT p2 = 0; p2 < S * S; p2++) if (land2.material[p2 * 4] == 4.0f) { land2.material[p2 * 4 + 1] = 3.0f + hx + hy; land2.material[p2 * 4 + 2] = -7.0f + hx - hy; }
+		const V3 flatN = { 0.5f, 0.0f, 0.5f }, bumpN = bump * 0.5f + V3(0.5f, 0.5f, 0.5f);
+		Want n[kRegions] = {}; n[kRegLand] = { true, flatN }; n[kRegBump60] = { true, flatN }; n[kRegWall] = { true, flatN };
+		keyNarrow = 1.0f;
+		if (!run(land2, aBlur, 2, 3.0f, o)) return false;
+		judge("BEFORE PTBumpNormals, normal: the land with a recorded bump is lit with its smooth normal (0, -1, 0)", land2, o, n, 0.004f);
+		n[kRegLand] = { true, bumpN }; n[kRegBump60] = { true, bumpN };
+		keyBump = 1.0f; keyBumpDetail = 0.25f;
+		if (!run(land2, aBlur, 2, 3.0f, o)) return false;
+		judge("AFTER PTBumpNormals: the land's shading normal is its recorded bumped normal (0.30, -0.80, 0.52); the wall keeps its own", land2, o, n, 0.004f);
+		// the display's alpha (the show pass's PTDetail share + 2): 2.25 on the land, 1 on the wall
+		double aLand = 0, aWall = 0; int nLand = 0, nWall = 0;
+		for (UINT p2 = 0; p2 < S * S; p2++) { if (land2.region[p2] == kRegLand) { aLand += o[p2 * 4 + 3]; nLand++; } else if (land2.region[p2] == kRegWall) { aWall += o[p2 * 4 + 3]; nWall++; } }
+		aLand /= std::max(nLand, 1); aWall /= std::max(nWall, 1);
+		const bool alphaOk = std::fabs(aLand - 2.25) < 2e-3 && std::fabs(aWall - 1.0) < 2e-3;
+		say("  PTBumpNormals, the display's alpha (PTDetail's share there = it - 2): the land %.3f (expected 2.250 with PTBumpDetail 0.25), the wall %.3f (1: all of PTDetail) -> %s\n", aLand, aWall, alphaOk ? "ok" : "BAD");
+		if (!alphaOk) ok = false;
+		// a record averaged at an edge (the land's class, its g out of the code's range): no bump
+		OwnBuffers edge = land2;
+		for (UINT p2 = 0; p2 < S * S; p2++) if (edge.material[p2 * 4] == 4.0f) edge.material[p2 * 4 + 1] = 100.0f;
+		n[kRegLand] = { true, flatN }; n[kRegBump60] = { true, flatN };
+		if (!run(edge, aBlur, 2, 3.0f, o)) return false;
+		judge("PTBumpNormals, a land texel without the code (g = a radius, as the 6- and 7-layer shaders leave it): the smooth normal", edge, o, n, 0.004f);
+		keyBump = 0.0f; keyBumpDetail = 0.0f; keyNarrow = 0.0f;
+	}
+	// ---- 2026-11-12 (ptgrass; a tester: "grass disappears / reappears depending on viewing angle" under path tracing): GRASS.
+	// Without records ([Main.Main.Quality] CapturedGrass off; the game's own grass shaders; lamp-lit grass) a blade's pixel has the grass's
+	// depth and whatever the buffers held before it. What it becomes is decided by how far the blade stands before the recorded land ALONG
+	// THE VIEW RAY against the prep pass's tolerance (1 % of the distance + 2 units; + the tessellation's reach): beyond it the game's own
+	// pixel, within it the LAND's colour at the blade's place: the blade is gone. That distance is the blade's height over the ground
+	// divided by the sine of the angle between the ray and the ground: it changes with the view angle. With the records every blade pixel
+	// is the grass's own surface, whatever its normal does and whatever the traced scene's own tufts do.
+	{
+		OwnBuffers gOff, gOn;
+		build(true, false, rubbleAlpha[1], gOff, 0); build(true, false, rubbleAlpha[1], gOn, 1);
+		std::vector<float> aOffSure, aOffReach, aOn, aOnReach;
+		if (!ownPrep(h, cam, gOff, S, true, 2, 0.0f, aOffSure) || !ownPrep(h, cam, gOff, S, true, 2, reach, aOffReach) ||
+			!ownPrep(h, cam, gOn, S, true, 2, 0.0f, aOn) || !ownPrep(h, cam, gOn, S, true, 2, reach, aOnReach)) return false;
+		// the prep pass: recorded grass carries no mark (its captured distance is its own), with or without the tessellation's reach
+		{
+			int marked = 0, n = 0;
+			for (UINT p2 = 0; p2 < S * S; p2++) if (gOn.region[p2] >= kRegGrassA) { n++; if (markOf(aOn[p2]) != 0 || markOf(aOnReach[p2]) != 0) marked++; }
+			say("  GRASS, prep pass with the grass's own records: %d of %d grass pixels marked (must be 0) -> %s\n", marked, n, marked == 0 && n > 80 ? "ok" : "BAD");
+			if (marked != 0 || n <= 80) ok = false;
+		}
+		keyNarrow = 1.0f;   // (as 1.0.8: PTScreenOwn + PTScreenOwnNarrow)
+		Want g[kRegions] = {};
+		// -- no records: A and C (30 units before the land's record: a sure mark) and B (nothing recorded behind it) are the game's own
+		// pixel; D (3 units before it, inside the tolerance: a blade's base, or a whole blade seen from above at a distance) is the LAND
+		g[kRegMeadow] = { true, meadowC }; g[kRegGrassA] = { true, frameLin }; g[kRegGrassB] = { true, frameLin }; g[kRegGrassC] = { true, frameLin }; g[kRegGrassD] = { true, meadowC };
+		if (!run(gOff, aOffSure, 1, 3.0f, o)) return false;
+		judge("GRASS without records, colour: 30 units before the land = the game's own pixel; 3 units before it = the LAND's colour (the blade is gone)", gOff, o, g, 0.012f);
+		// -- no records, the tessellation on (its reach makes the 30 unit blades a MAYBE mark): they take the land's colour too
+		g[kRegGrassA] = { true, meadowC }; g[kRegGrassC] = { true, meadowC };
+		if (!run(gOff, aOffReach, 1, 3.0f, o)) return false;
+		judge("GRASS without records, land tessellation on (reach 81), colour: the blades 30 units before the land are the LAND's colour as well", gOff, o, g, 0.012f);
+		// -- PTGrassOwnPixel: the grass draws that wrote no record are drawn once more into the mask of the game's own pixels (core/
+		// WaterMask.h RedrawGrass; the prep pass's s5 / c9): every blade is the game's own pixel, also the one inside the tolerance and the
+		// ones inside the tessellation's reach: nothing of the grass takes the land's colour, at any distance before it
+		{
+			std::vector<float> aMask, aMaskReach;
+			if (!ownPrep(h, cam, gOff, S, true, 2, 0.0f, aMask, nullptr, &gOff.blade) || !ownPrep(h, cam, gOff, S, true, 2, reach, aMaskReach, nullptr, &gOff.blade)) return false;
+			Want gm2[kRegions] = {};
+			gm2[kRegMeadow] = { true, meadowC };
+			for (int r = kRegGrassA; r <= kRegGrassD; r++) gm2[r] = { true, frameLin };
+			if (!run(gOff, aMask, 1, 3.0f, o)) return false;
+			judge("GRASS without records, PTGrassOwnPixel (the grass in the mask), colour: all four blades the game's own pixel, the meadow the land", gOff, o, gm2, 0.012f);
+			if (!run(gOff, aMaskReach, 1, 3.0f, o)) return false;
+			judge("GRASS without records, PTGrassOwnPixel, land tessellation on: the same", gOff, o, gm2, 0.012f);
+		}
+		// -- PTAlbedoCoverage (the game's MSAA; captured frame of bench run 20261113-005828-slotC): the meadow as a resolve leaves it where a
+		// grass card without records covered one sample of four (left third), two (middle), three (right): the colour, the material and
+		// the alpha at 3 / 4, 2 / 4, 1 / 4 of the land's. Before: from half the alpha up the pixel is a surface with the land's colour at
+		// 75 % / 50 % (and a class of 3 / 2), below it the game's own pixel. With the key: the game's own pixel at every share, and a frame
+		// whose alphas are all 1 is not touched. (What would have caught the first form: that one only made the 75 % land its own colour
+		// again; the picture needs the pixel NOT to be a surface at all.)
+		{
+			OwnBuffers gMs = gOff;
+			int third[3] = {};
+			for (UINT p2 = 0; p2 < S * S; p2++) if (gMs.region[p2] == kRegMeadow) {
+				const int k3 = int(p2 % S) * 3 / int(S);
+				const float share = k3 == 0 ? 0.75f : k3 == 1 ? 0.5f : 0.25f;
+				for (int ch = 0; ch < 4; ch++) { gMs.albedo[p2 * 4 + ch] *= share; gMs.material[p2 * 4 + ch] *= share; }
+				gMs.region[p2] = k3 == 0 ? kRegMeadow : k3 == 1 ? kRegGrassA : kRegGrassC;   // (the three shares, judged as three regions; the cards' own pixels below)
+				third[k3]++;
+			}
+			for (UINT p2 = 0; p2 < S * S; p2++) if (gOff.region[p2] >= kRegGrassA) gMs.region[p2] = -1;
+			Want gc[kRegions] = {};
+			gc[kRegMeadow] = { true, meadowC * 0.75f }; gc[kRegGrassA] = { true, meadowC * 0.5f }; gc[kRegGrassC] = { true, frameLin };
+			if (!run(gMs, aOffSure, 1, 3.0f, o)) return false;
+			judge("MSAA means, BEFORE PTAlbedoCoverage, colour (regions: the meadow = 3 of 4 samples written, grass A = 2 of 4, grass C = 1 of 4): surfaces at 75 % and 50 % of the land's colour, the game's pixel at 25 %", gMs, o, gc, 0.012f);
+			keyCover = 1.0f;
+			gc[kRegMeadow] = { true, frameLin }; gc[kRegGrassA] = { true, frameLin }; gc[kRegGrassC] = { true, frameLin };
+			if (!run(gMs, aOffSure, 1, 3.0f, o)) return false;
+			judge("MSAA means, PTAlbedoCoverage, colour: the game's own pixel at every share", gMs, o, gc, 0.012f);
+			if (third[0] < 20 || third[1] < 20 || third[2] < 20) { say("    too few pixels in a share (%d %d %d)\n", third[0], third[1], third[2]); ok = false; }
+			// ... and a frame without unwritten samples (every alpha 1) is not touched by the key
+			Want gs[kRegions] = {}; gs[kRegMeadow] = { true, meadowC }; gs[kRegWall] = { true, wallC }; gs[kRegLand] = { true, landC };
+			if (!run(gOff, aOffSure, 1, 3.0f, o)) return false;
+			judge("PTAlbedoCoverage on a frame whose alphas are 1: unchanged", gOff, o, gs, 0.012f);
+			keyCover = 0.0f;
+		}
+		// -- the grass's own records: every blade its own colour, 100 % of the rays (never the land, the game's pixel or the traced tufts')
+		for (int r = kRegGrassA; r <= kRegGrassD; r++) g[r] = { true, grassC };
+		if (!run(gOn, aOn, 1, 3.0f, o)) return false;
+		judge("GRASS with its own records (CapturedGrass), colour: all four blades the grass's own colour", gOn, o, g, 0.012f);
+		if (!run(gOn, aOnReach, 1, 3.0f, o)) return false;
+		judge("GRASS with its own records, land tessellation on, colour: the same", gOn, o, g, 0.012f);
+		// -- its normal: facing the camera as recorded; EDGE-ON ((1, 0, 0), nearly at right angles to the view) kept as it is; facing AWAY
+		// (a two-sided card seen from behind) turned toward the viewer, not refused
+		Want gn2[kRegions] = {};
+		gn2[kRegGrassA] = { true, { 0.5f, 0.0f, 0.5f } }; gn2[kRegGrassB] = { true, { 1.0f, 0.5f, 0.5f } }; gn2[kRegGrassC] = { true, { 0.5f, 0.0f, 0.5f } }; gn2[kRegGrassD] = { true, { 0.5f, 0.0f, 0.5f } };
+		if (!run(gOn, aOn, 2, 3.0f, o)) return false;
+		judge("GRASS with its own records, normal: facing (0, -1, 0); edge-on (1, 0, 0) kept; from behind (0, 1, 0) turned to (0, -1, 0)", gOn, o, gn2, 0.01f);
+		// -- its material: matte (the record's roughness 0.9), no metal, on every blade
+		Want gm[kRegions] = {};
+		for (int r = kRegGrassA; r <= kRegGrassD; r++) gm[r] = { true, { 0.9f, 0, 0 } };
+		gm[kRegMeadow] = { true, { 0.95f, 0, 0 } };
+		if (!run(gOn, aOn, 4, 3.0f, o)) return false;
+		judge("GRASS with its own records, roughness / metal: 0.9, no metal; the meadow the land's 0.95", gOn, o, gm, 0.012f);
+		keyNarrow = 0.0f;
 	}
 	releaseWorld(h, ids);
 	return ok;

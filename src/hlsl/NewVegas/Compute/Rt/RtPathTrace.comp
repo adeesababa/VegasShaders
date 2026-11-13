@@ -257,10 +257,69 @@ float gOwnNarrow = 0.0;
 // a wall is behind it, raster against the sky). 1: a camera ray that meets a TINTED hair record at the depth buffer's distance there
 // keeps its traced hit. 0: as before.
 float gHairSky = 0.0, gElseDist = 0.0;
+// UNOFFICIAL 2026-11-13 PTFlashOwnPixels (frame row texel 305.x; docs/next/FLASHLIGHT-AUDIT-2026-11-13.md; a tester's picture: at night the
+// flashlight's pool on the ground was cut off along a rock's outline and the rock stayed unlit). A pixel the game drew without the
+// mod's records (an object drawn by one of the game's own shaders: POM / PBR off, a refused shader, a shader the mod has no template
+// for; anything drawn with depth over another surface's record) is the game's own pixel. Its raster flashlight light came only from the
+// flashlight's game lamp, which steps aside under path tracing (GameLightUnderPT), and the light pass cannot light what has no record:
+// no flashlight at all there, next to path traced ground in the beam. 1: where the camera's ray meets a traced surface AT such a pixel's
+// depth (not a cut-out: grass has its own beam, hair is traced; not glass), the flashlight's direct light on that traced surface (its
+// record's colour, lamp 0's cone, reach, cookie and traced shadow: the one Direct call below with gFlashOnly, nothing else of the
+// hit) is ADDED to the game's pixel. The pixel stays "the game's" for the denoiser and the show pass (no first surface). The C++ sets
+// it only while lamp 0 is the flashlight and its game lamp is not lit. 0: as before.
+float gFlashOwn = 0.0, gFlashDist = 0.0;
+vec3 gFlashAt = vec3(0.0);   // ScreenHit: such a pixel's point along its centre ray (gFlashDist its length; 0 = not one)
+bool gFlashOnly = false;   // Direct: only lamp 0 (no sun, no other lamp, no glow)
+// UNOFFICIAL 2026-11-13 PTFlashRasterShape (frame row texels 306, 298; FlashShape below): lamp 0's falloff and cone as the raster light pass
+// shapes them. 306.x the decode's exponent k (0 = the key off: the lamps' own falloff x the cone, as before), 306.y the shape's exponent
+// when [Shaders.PBR.LampFalloff]'s physical shape is on this frame (0: off), 298.x its 1 / Falloff^2, 298.y its strength. 305.y the lamps' light
+// scale (the pass multiplies its light by it; the tracer's flashlight had none).
+const int kFlashOwnTexel = 305, kFlashRasterTexel = 306, kFlashRasterTexel2 = 298;
 // (2026-11-12 PTGlowTexel, frame row texel 293.x; audit item 8) PTGlowFromFrame tested the MESH's glow flag: a whole lamp fixture, terminal
 // or sign stayed the game's raster pixel, flat and too bright in a dark room, though only its bulb or screen glows. > 0: only where the
 // glow map's texel at the hit is at least this bright (luminance, linear); the rest of the mesh is path traced. 0: the mesh's flag, as before.
 float gGlowTexel = 0.0;
+// (2026-11-12 ptbump, frame row texels 293.y / 294; a tester on an RTX card: "textures are missing their normals/bumpmaps", "a gross sheen
+// over everything ... reflecting the sky")
+//  PTBumpNormals (293.y): the screen's first surface was lit with its SMOOTH vertex normal; its bumps came only from PTDetail's ratio
+//   (the game's own shading within PTDetailRadius pixels, clamped 0.5 - 2, faded where the shading steps by PTDetailEdge): nothing
+//   wider than a few pixels, nothing where the game's picture has no sun on the bumps. 1: the first hit's SHADING normal is the
+//   normal-mapped one: the land's from its record (MaterialBuffer g / b of a class 4 texel, TerrainTemplate.hlsl CAPTURED_PT 2: the
+//   blended layers' bumped normal, world axes, hemi-octahedral about +z), every traced surface's from its own real normal map at the
+//   camera ray's hit (RtHit.glsl rtHitNormalMapped, as the bounces' hits). The smooth normal stays the GEOMETRIC one (gGeoN): the rays'
+//   start offsets, the bounce ray's side test, the radiance cache's cell. 0 (an older DLL, the key off): as before.
+//  PTBumpDetail (294.x): PTDetail's share left on such a pixel (the show pass reads it from the display's alpha: 2 + this). The
+//   denoiser smooths the traced light's finest bump shading away (measured: a path traced sand floor lost its ripples with PTDetail
+//   off), so PTDetail still carries the scale under its radius there; the show pass divides out the fine contrast the traced light
+//   has kept, so no bump counts twice. 0: no PTDetail on those pixels.
+//  PTMatteNoHighlight (294.y): the MaterialBuffer's roughness is 1 - the normal map's alpha for EVERY object, also the ones the game
+//   draws without any highlight (a mesh with no specular flag: the object shaders' plain Lambert variants). Their alpha is often 1 (a
+//   DXT1 map has none): roughness 0.04, a mirror to the path tracer, whose first hit then reflected the sky off rocks and walls the
+//   game draws matte. Such a record is coded (b = -2 - roughness, Includes/CapturedNormals.hlsl); 1: its first hit is matte
+//   (roughness 1). 0: the recorded roughness, as before.
+//  PTRoughFresnel (295.x): every non-metal's lobe rose to full reflection at grazing angles (Schlick, F90 = 1) whatever its roughness.
+//   The game's roughness is 1 - a highlight MASK (or the authored highlight's width), not a measured finish: stone, brick and wood
+//   come out at 0.4 - 0.65, and at that roughness the lobe sends back 5 - 15 % of the sky at low view angles, on everything, which the
+//   game's own picture never has (its non-metals take a highlight from the sun and the lamps only). k > 0: the grazing reflectance of
+//   a non-metal falls with its roughness, F90 = mix(1, max(1 - roughness, F0), k) (the split-sum "rough Fresnel", Lagarde 2014): a
+//   polished floor keeps its reflections, rough stone loses the sheen. The diffuse part takes the light back (1 - F). Skin and hair
+//   are left alone. 0: as before.
+float gBumpOn = 0.0, gBumpDetail = 0.0, gMatteOn = 0.0, gRoughFresnel = 0.0;
+vec3 gGeoN = vec3(0.0, 0.0, 1.0);   // the first hit's smooth normal while gGeoSplit (its shading normal is bumped)
+bool gGeoSplit = false, gFirstBump = false;
+vec3 gScreenBump = vec3(0.0);   // ScreenHit: the land record's bumped normal (scene axes), 0 = none
+// (2026-11-12 / 13 PTAlbedoCoverage, frame row texel 297.x; ptgrass). With the game's MSAA the AlbedoBuffer / MaterialBuffer the trace
+// reads are the MEAN of the pixel's samples (a sample no writer drew is 0 in every channel), while the depth it reads is ONE sample's.
+// Grass is drawn with transparency multisampling: a card covers 1, 2 or 3 of a pixel's 4 samples wherever its texture has a little
+// alpha, far beyond the tuft the eye sees. Captured frame (bench run 20261113-005828-slotC, from above, grass without records): 22.7 %
+// of the picture had an albedo alpha of 0.25 / 0.5 / 0.75; from 0.5 up such a pixel counted as written: a surface at one sample's
+// depth (the card's plane, or the land), with the land's colour at 50-75 % and a class of 2-3, lit there: shown at 0.37 of the
+// brightness of the land beside it. The dark masses round every tuft. (The first form of this key divided the colour and the material
+// by the alpha: right numbers, same dark picture: the light at such a pixel is the fault, not its colour.) 1: a pixel is a screen
+// surface only where ALL its samples were written (alpha 0.99 up); a partly written one is the game's own pixel, its anti-aliased
+// blend of the grass and the land (also every outline against the sky or anything else without records). The C++ sets it only in a
+// frame whose records are multisampled; 0 (an older DLL, the key off, no MSAA: an alpha there is a writer's own code): from 0.5 up.
+float gAlbedoCover = 0.0;
 void LoadMatKeys() {
 	const bool on = (uint(p.accum.w) & 1024u) != 0u;
 	gMatKeys = on ? vec4(FrameTexel(24), FrameTexel(25)) : vec4(0.0);
@@ -271,6 +330,11 @@ void LoadMatKeys() {
 	gOwnNarrow = on && FrameTexel(kGlassSurfaceTexel + 3).x > 0.5 ? 1.0 : 0.0;   // (2026-11-12 PTScreenOwnNarrow)
 	gHairSky = on && FrameTexel(kGlassSurfaceTexel + 3).y > 0.5 ? 1.0 : 0.0;   // (2026-11-12 PTHairOverSky)
 	{ const float g = on ? FrameTexel(kGlassSurfaceTexel + 4).x : 0.0; gGlowTexel = g > 0.0 && g < 1.0e3 ? g : 0.0; }   // (2026-11-12 PTGlowTexel)
+	gBumpOn = on && FrameTexel(kGlassSurfaceTexel + 4).y > 0.5 ? 1.0 : 0.0;   // (2026-11-12 ptbump) PTBumpNormals
+	{ const vec2 k = on ? FrameTexel(kGlassSurfaceTexel + 5) : vec2(0.0); gBumpDetail = k.x > 0.0 ? min(k.x, 1.0) : 0.0; gMatteOn = k.y > 0.5 ? 1.0 : 0.0; }   // PTBumpDetail, PTMatteNoHighlight
+	{ const float k = on ? FrameTexel(kGlassSurfaceTexel + 6).x : 0.0; gRoughFresnel = k > 0.0 ? min(k, 1.0) : 0.0; }   // PTRoughFresnel
+	gAlbedoCover = on && FrameTexel(kGlassSurfaceTexel + 8).x > 0.5 ? 1.0 : 0.0;   // (2026-11-12 PTAlbedoCoverage, texel 297.x)
+	gFlashOwn = on && FrameTexel(kFlashOwnTexel).x > 0.5 && FrameTexel(15).x > 0.5 ? 1.0 : 0.0;   // (2026-11-13 PTFlashOwnPixels: only while lamp 0 is the flashlight)
 }
 vec4 MatKeys() { return gMatKeys; }
 // ---- UNOFFICIAL 2026-11-09 PTBounceRoughen (the frame row's texel 27.x; core\RtPathTrace.cpp): path regularisation. A path that has
@@ -665,7 +729,11 @@ vec3 BrdfPi(Surface s, vec3 n, vec3 v, vec3 l) {
 	vec3 h = normalize(v + l);
 	float nh = max(dot(n, h), 0.0), vh = max(dot(v, h), 0.0);
 	float a = max(s.rough * s.rough, 0.002), a2 = a * a;
-	vec3 F = FresnelF0(s) + (1.0 - FresnelF0(s)) * pow(1.0 - vh, 5.0);
+	// (2026-11-12 ptbump) PTRoughFresnel: a rough non-metal's grazing reflectance (F90) below 1; key 0: F90 = 1, the line as it was.
+	// Not skin and not hair (their rim of light at low angles is their look, and their roughness is their own shaders' value)
+	const vec3 f90 = gRoughFresnel > 0.0 && s.kind != kKindSkin && s.kind != kKindHair ?
+		mix(vec3(1.0), max(vec3(1.0 - s.rough), FresnelF0(s)), gRoughFresnel * (1.0 - clamp(s.metal, 0.0, 1.0))) : vec3(1.0);
+	vec3 F = FresnelF0(s) + (f90 - FresnelF0(s)) * pow(1.0 - vh, 5.0);
 	vec3 spec = F * (GgxD(nh, a2) * SmithG1(nl, a2) * SmithG1(nv, a2) / (4.0 * nl * nv));
 	spec *= 1.0 + FresnelF0(s) * (1.0 / SpecE(nv, s.rough) - 1.0);   // (2026-11-07) the light of multiple scattering
 	if (s.kind == kKindCloth) {   // (2026-11-07 ptaaa-materials) the sheen lobe on top, the diffuse giving up its share (the split: specular)
@@ -913,7 +981,19 @@ float FlashCookie(vec3 toPoint) {
 vec3 FlashShape(int k, float dist, float reach, vec3 toPoint, vec3 light) {
 	if (k != 0 || !LampImage()) return light;
 	const vec2 t = FrameTexel(31);
-	if (t.x > 0.0) light *= smoothstep(0.0, t.x, dist);
+	// (2026-11-13 PTFlashRasterShape) the raster pass's beam: LampAtt(falloff x cone^2 x NearFade) (FlashlightDeferred.hlsl; Includes/
+	// LampFalloff.hlsl LampAtt: att^k, or the physical shape's decode) in place of the lamps' falloff x the cone that `light` came with
+	const vec2 rs = FrameTexel(kFlashRasterTexel);
+	if (rs.x > 0.0) {
+		const float r = reach * ((uint(p.accum.w) & 131072u) != 0u ? 0.5 : 1.0), q = dist * dist / max(r * r, 1.0e-6), F = FrameTexel(kEarlyLookTexel).y;
+		const float w = clamp(1.0 - q, 0.0, 1.0), cone = LampSpot(k, toPoint), own = LampFall(dist / reach) * cone;
+		float att = (F > 0.0 ? w * w / (1.0 + F * q) : w) * cone * cone * (t.x > 0.0 ? smoothstep(0.0, t.x, dist) : 1.0);
+		if (rs.y > 0.0) { const vec2 sh = FrameTexel(kFlashRasterTexel2); const float qa = 1.0 - att; float win = 1.0 - qa * qa; win *= win; att = pow(abs(sh.y * win / (1.0 + qa * sh.x)), rs.y); }
+		else att = pow(att, rs.x);
+		att *= max(FrameTexel(kFlashOwnTexel).y, 0.0);   // (the lamps' light scale the pass multiplies its light by: LIN_SCALE_LIGHT)
+		light = own > 1.0e-8 ? light * (att / own) : vec3(0.0);
+	}
+	else if (t.x > 0.0) light *= smoothstep(0.0, t.x, dist);
 	const float cookie = FrameTexel(15).y;   // (2026-11-11 Cookie)
 	if (cookie > 0.0) light *= mix(1.0, FlashCookie(toPoint), min(cookie, 1.0));
 	if (t.y > 0.0) {
@@ -1515,7 +1595,8 @@ const int kCacheVerts = 4;   // the vertices a path writes (the first ones)
 // The sun, one lamp and (PTGlowLights) one glow light at a hit (next event estimation): the light that leaves it toward v
 vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 	if (s.kind == kKindGlass) { gGlowTotal = 0.0; return vec3(0.0); }   // (2026-11-07 ptaaa-materials) mirror-like lobes: carried by the path
-	vec3 lift = hit + n * (1.0 + 0.002 * t);
+	// (2026-11-12 ptbump) a bumped first hit: n is the shading normal; the rays start off the smooth surface (gGeoN, on n's side)
+	vec3 lift = hit + (gGeoSplit ? (dot(gGeoN, n) < 0.0 ? -gGeoN : gGeoN) : n) * (1.0 + 0.002 * t);
 	vec3 e = vec3(0.0);
 	// (perf-ptcost) the light samples are gathered first as candidates (unshadowed light, its shadow ray's direction and length, the light's
 	// specular share for PTDenoiseSplit), then traced in ONE loop (one Visible call site: the shader inlines every call): 0 the sun, 1 the
@@ -1523,7 +1604,7 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 	vec3 cE[3], cDir[3], cSpec[3];
 	float cDist[3];
 	for (int k = 0; k < 3; k++) { cE[k] = cDir[k] = cSpec[k] = vec3(0.0); cDist[k] = 0.0; }
-	if (p.sunDir.w > 0.5) {
+	if (p.sunDir.w > 0.5 && !gFlashOnly) {   // (2026-11-13 PTFlashOwnPixels: gFlashOnly = lamp 0 alone)
 		vec3 b, tg = Basis(p.sunDir.xyz, b);
 		float r = sqrt(Rand()) * p.sunColor.w, phi = 6.2831853 * Rand();
 		vec3 l = normalize(p.sunDir.xyz + (tg * cos(phi) + b * sin(phi)) * r);
@@ -1537,7 +1618,7 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 	// (2026-11-04) PTLightGrid: only the lamps listed in the hit's grid cell (those whose reach meets it, in the same order: every other
 	// lamp has weight 0 here, and a lamp of weight 0 draws no random number, so the pick is the all-lamp loop's, bit for bit); a hit
 	// outside the grid is out of every lamp's reach. Then the glow lights, all of them, after the lamps as before.
-	const int lamps = LampCount(), glows = GlowLightCount();   // (hangfix: capped)
+	const int lamps = LampCount(), glows = gFlashOnly ? 0 : GlowLightCount();   // (hangfix: capped)
 	int first = 0, listed = 0;
 	const ivec3 dims = ivec3(int(p.grid[0].w + 0.5), int(p.grid[1].w + 0.5), int(p.grid[2].x + 0.5));
 	const ivec3 cell = ivec3(floor((hit - p.grid[0].xyz) * p.grid[1].xyz));
@@ -1554,6 +1635,7 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 		const int e = first + j;
 		const vec2 two = GridTexel(e >> 1);
 		const int k = int(((e & 1) != 0 ? two.y : two.x) + 0.5);
+		if (gFlashOnly && k != 0) continue;
 		vec2 a = imageLoad(lampImage, ivec2(4 * k, 0)).rg, b = imageLoad(lampImage, ivec2(4 * k + 1, 0)).rg;
 		vec2 c = imageLoad(lampImage, ivec2(4 * k + 2, 0)).rg, d = imageLoad(lampImage, ivec2(4 * k + 3, 0)).rg;
 		vec4 pos = vec4(a, b), colour = vec4(c, d);
@@ -1583,6 +1665,7 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 	int gIndex = -1, chosenK = -1;
 	for (int k = 0; k < lights; k++) {
 		vec4 pos, colour;
+		if (gFlashOnly && k != 0) break;
 		if (LampImage()) {
 			vec2 a = imageLoad(lampImage, ivec2(4 * k, 0)).rg, b = imageLoad(lampImage, ivec2(4 * k + 1, 0)).rg;
 			vec2 c = imageLoad(lampImage, ivec2(4 * k + 2, 0)).rg, d = imageLoad(lampImage, ivec2(4 * k + 3, 0)).rg;
@@ -1627,7 +1710,7 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 #ifndef PT_RESTIR_GI
 	int emE = -1; uint emPrim = 0u; vec2 emBary = vec2(0.0); float emPdfArea = 0.0;
 	// (2026-11-11 pt-emissive-cost) PTEmissiveHits n >= 1: only the path's first n hits (gEmTotal stays 0: the bounce ray counts glow in full)
-	if (!restirHere && EmCount() > 0 && (gEmHits < 0.5 || float(gBounce) < gEmHits)) emOk = EmPick(hit, n, emE, emPrim, emBary, emPdfArea);
+	if (!restirHere && !gFlashOnly && EmCount() > 0 && (gEmHits < 0.5 || float(gBounce) < gEmHits)) emOk = EmPick(hit, n, emE, emPrim, emBary, emPdfArea);
 #endif
 	// (perf-ptcost) PTBounceLights 0: at a bounce hit (not the first: the picture's own direct light keeps every sample) ONE of the three
 	// is traced, chosen with chance P_k = 0.75 w_k / sum w + 0.25 / (how many have w > 0) (the floor bounds the noise where a weight
@@ -1781,7 +1864,8 @@ bool ScreenHit(ivec2 pixel, out vec3 hit, out vec3 n, out Surface s) {
 	s = HitSurface(vec3(0.0));
 	gScreenDrawnElse = false;
 	gViewModel = false;
-	gScreenStale = false; gScreenStaleSure = false; gScreenPerson = false; gElseDist = 0.0; gScreenGrass = false;
+	gScreenStale = false; gScreenStaleSure = false; gScreenPerson = false; gElseDist = 0.0; gScreenGrass = false; gFlashDist = 0.0;
+	gScreenBump = vec3(0.0);   // (2026-11-12 ptbump)
 	if (!GBuffer()) return false;
 	float d = imageLoad(gDepth, pixel).r;
 	vec4 a = imageLoad(gAlbedo, pixel);
@@ -1792,11 +1876,19 @@ bool ScreenHit(ivec2 pixel, out vec3 hit, out vec3 n, out Surface s) {
 	const bool ownMark = nv.a > 0.5 && nv.a < 3.5 && fract(nv.a) > 0.125 && fract(nv.a) < 0.625;
 	const bool ownSure = ownMark && fract(nv.a) > 0.375;
 	const bool person = nv.a > 1.5 && nv.a < 3.5;
-	const bool unwritten = (a.a < 0.5 && !(ownSure && person)) || nv.a < -0.5;
+	const bool unwritten = (a.a < (gAlbedoCover > 0.5 ? 0.99 : 0.5) && !(ownSure && person)) || nv.a < -0.5;   // (2026-11-13 PTAlbedoCoverage: MSAA, all the samples)
 	gScreenDrawnElse = d > 0.0 && d < 0.9999 && unwritten;   // (ptaaa-firstperson) + a view-model pixel without a capture
 	if (gScreenDrawnElse && gHairSky > 0.5 && nv.a > -0.5 && nv.a < 3.5) {   // (2026-11-12 PTHairOverSky) the depth's distance along this pixel's ray
 		const vec2 euv = (vec2(pixel) + 0.5) * p.size.zw + p.rect.xy;
 		gElseDist = length((p.forward.xyz + p.right.xyz * (2.0 * euv.x - 1.0) - p.up.xyz * (2.0 * euv.y - 1.0)) * (d * p.forward.w));
+	}
+	// (2026-11-13 PTFlashOwnPixels) a pixel nothing recorded (the albedo's alpha 0; not the land, whose record the light pass lights
+	// whatever its alpha; not a masked pixel: water, grass with its own beam, an uncaptured view model): its distance along the ray
+	if (gScreenDrawnElse && gFlashOwn > 0.5 && nv.a > -0.5 && nv.a < 3.5 && a.a < 1.0e-3 &&
+		!((uint(p.accum.w) & 256u) != 0u && floor(imageLoad(gMaterial, pixel).r + 0.01) == 4.0)) {
+		const vec2 fuv = (vec2(pixel) + 0.5) * p.size.zw + p.rect.xy;
+		gFlashAt = (p.forward.xyz + p.right.xyz * (2.0 * fuv.x - 1.0) - p.up.xyz * (2.0 * fuv.y - 1.0)) * (d * p.forward.w);
+		gFlashDist = length(gFlashAt);
 	}
 	if (!(d > 0.0 && d < 0.9999) || unwritten) return false;
 	vec2 uv = (vec2(pixel) + 0.5) * p.size.zw + p.rect.xy;
@@ -1821,6 +1913,14 @@ bool ScreenHit(ivec2 pixel, out vec3 hit, out vec3 n, out Surface s) {
 		if (cls >= 1.0) {
 			s.metal = clamp((m.r - cls) / 0.49, 0.0, 1.0);
 			s.rough = m.b >= 0.0 ? clamp(m.b, 0.05, 1.0) : cls == 4.0 || cls == 5.0 ? 0.95 : 0.7;
+			// (2026-11-12 ptbump) PTMatteNoHighlight: a record the game draws with no highlight (b = -2 - the shader's roughness, objects
+			// only: class 1-3; the land's b, -8 .. -6, is its bump below): matte with the key, else the roughness as before the code
+			if (cls <= 3.0 && m.b <= -1.99 && m.b >= -3.01) s.rough = gMatteOn > 0.5 ? 1.0 : clamp(-2.0 - m.b, 0.05, 1.0);
+			// PTBumpNormals: the land's bumped normal (g = 3 + e.x, b = -7 + e.y, e hemi-octahedral about +z; written whole: a 1)
+			if (gBumpOn > 0.5 && cls == 4.0 && m.a > 0.995 && m.a < 1.005 && m.g >= 1.99 && m.g <= 4.01 && m.b >= -8.01 && m.b <= -5.99) {
+				const vec2 e = vec2(m.g - 3.0, m.b + 7.0), h = vec2(e.x + e.y, e.x - e.y) * 0.5;
+				gScreenBump = normalize(vec3(h, max(1.0 - abs(h.x) - abs(h.y), 0.0)));
+			}
 			// (2026-11-07 ptaaa-materials) the class's material model: 3 cloth (ClothWind), 5 plants (PlantPass), 6 skin (SkinFill)
 			const vec4 keys = MatKeys();
 			if (cls == 3.0 && MatSheen() > 0.0) s.kind = kKindCloth;
@@ -1871,6 +1971,17 @@ vec3 Indirect(vec3 c) {
 	qPrim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(Q, true)); qBary = rayQueryGetIntersectionBarycentricsEXT(Q, true); \
 	qToScene = rayQueryGetIntersectionObjectToWorldEXT(Q, true); } }
 // (NVR_RT_CUSTOM_HIDDEN: RtHidden.glsl)
+// (2026-11-13 PTFlashOwnPixels) the traced record that may take the flashlight on the game's own pixel: solid, not glass
+#define PT_FLASH_OWN_RECORD(I) ((records[I].flags & RT_RECORD_ALPHA_TESTED) == 0u && !rtIsGlass(I))
+// Where the camera's ray (from the eye, the scene's 0) meets the traced triangle's plane laid through the screen's point `at`: the
+// distance the traced hit must have to be the surface the game drew at this pixel. (The screen's point is the pixel centre's, the ray a
+// random point of the pixel: on ground seen at a low angle the two differ by more than the 3 % the plain distance test allows, and the
+// light would come and go per path.)
+float PtFlashPlaneT(vec3 at, uint instance, uint prim, mat4x3 toScene, vec3 dir) {
+	const vec3 pn = HitNormal(instance, prim, toScene, dir);
+	const float dn = dot(dir, pn);
+	return abs(dn) > 1.0e-3 ? dot(at, pn) / dn : length(at);
+}
 
 vec3 Path(vec3 dir) {
 	vec3 pos = vec3(0.0), radiance = vec3(0.0), throughput = vec3(1.0);
@@ -1912,6 +2023,9 @@ vec3 Path(vec3 dir) {
 			if (!(d0 > 0.0 && d0 < 0.9999)) { radiance = pow(max(imageLoad(gFrame, gPixel).rgb, vec3(0.0)), vec3(2.2)); break; }
 		}
 		bool traced = false;
+		bool ownFlash = false;   // (2026-11-13 PTFlashOwnPixels) this camera ray: the game's own pixel + the flashlight's light on the traced surface there
+		gGeoSplit = false;   // (2026-11-12 ptbump) set again below where this hit's shading normal is bumped
+		vec3 bump = vec3(0.0);
 		gHairSkipT = 1.0e30;   // (hair-through)
 		float qT = 0.0;
 		uint qInstance = 0u, qPrim = 0u;
@@ -1924,6 +2038,16 @@ vec3 Path(vec3 dir) {
 		vec3 sHit, sN;
 		Surface sS;
 		bool screen = bounce == 0 && ScreenHit(gPixel, sHit, sN, sS);
+		// (2026-11-13 ptgrass) PTDebugView 11, diagnostic: what the screen's buffers say this pixel is, no tracing. Red: the AlbedoBuffer's
+		// alpha (1 written; with the game's MSAA the written share of the samples). Green: 0.5 a screen surface, 1 recorded grass, 0 none
+		// (the game's own pixel or a traced hit). Blue: the prep pass's code: 1 the mask (water, grass without records), 0.75 a sure mark,
+		// 0.5 a maybe mark, 0.25 a plain pixel with depth, 0 no depth (the sky).
+		if (bounce == 0 && view == 11) {
+			if (!GBuffer()) return vec3(0.0);
+			const float d11 = imageLoad(gDepth, gPixel).r; const float n11 = imageLoad(gNormals, gPixel).a;
+			return vec3(clamp(imageLoad(gAlbedo, gPixel).a, 0.0, 1.0), screen ? (gScreenGrass ? 1.0 : 0.5) : 0.0,
+				n11 < -0.5 ? 1.0 : gScreenStaleSure ? 0.75 : gScreenStale ? 0.5 : d11 > 0.0 && d11 < 0.9999 ? 0.25 : 0.0);
+		}
 		const bool viewModel = screen && gViewModel;
 		// (2026-11-07 ptaaa-firstperson) a bounce ray that leaves from near the eye (off the view model, or a surface within arm's reach)
 		// passes over the hidden first-person body (RtHidden.glsl): the world without people and cut-outs (opaque), then people, the
@@ -2051,10 +2175,13 @@ vec3 Path(vec3 dir) {
 		const bool staleOwn = stale && traced && !hairFront && !hairThrough && abs(qT - length(sHit)) <= same && (gOwnNarrow > 0.5 ? ownTake : (staleSure || ownable));
 		if (staleSure && !staleOwn && !hairFront && !hairThrough && ScreenFrame() && view != 2 && view != 3 && view != 4 && view < 5) {
 			radiance = pow(max(imageLoad(gFrame, gPixel).rgb, vec3(0.0)), vec3(2.2));
-			break;
+			// (2026-11-13 PTFlashOwnPixels) something the game drew with depth over another surface's record, and the traced scene holds it
+			if (!(gFlashOwn > 0.5 && view == 0 && traced && PT_FLASH_OWN_RECORD(qInstance) && abs(qT - PtFlashPlaneT(sHit, qInstance, qPrim, qToScene, dir)) <= same)) break;
+			ownFlash = true; gContact = false;
 		}
-		if (screen && !hairFront && !hairThrough && (!traced || abs(qT - length(sHit)) > same || (bounce == 0 && gScreenGrass))) {
+		if (screen && !ownFlash && !hairFront && !hairThrough && (!traced || abs(qT - length(sHit)) > same || (bounce == 0 && gScreenGrass))) {
 			hit = sHit; n = sN; surf = sS; t = length(sHit);
+			bump = gScreenBump;   // (2026-11-12 ptbump) the land's recorded bump (0: none, or PTBumpNormals off)
 		}
 		else {
 			if (!traced) {
@@ -2080,7 +2207,9 @@ vec3 Path(vec3 dir) {
 			if (bounce == 0 && !screen && (t > 8192.0 || gScreenDrawnElse) && !elseHair && ScreenFrame() && view != 2 && view != 3 && view != 4 && view < 5 &&
 				!(gGlassSolid && rtIsGlass(qInstance) && GlassMode() > 0.5)) {
 				radiance = pow(max(imageLoad(gFrame, gPixel).rgb, vec3(0.0)), vec3(2.2));
-				break;
+				// (2026-11-13 PTFlashOwnPixels) nothing recorded here, and the traced scene holds the surface the game drew
+				if (!(gFlashDist > 0.0 && view == 0 && PT_FLASH_OWN_RECORD(qInstance) && abs(t - PtFlashPlaneT(gFlashAt, qInstance, qPrim, qToScene, dir)) <= max(0.03 * gFlashDist, 8.0))) break;
+				ownFlash = true; gContact = false;
 			}
 			uint instance = qInstance, prim = qPrim;
 			vec2 bary = qBary;
@@ -2097,7 +2226,7 @@ vec3 Path(vec3 dir) {
 #endif
 			const vec3 hitAlbedo = clamp(AlbedoAtlas() ? rtHitAlbedo(instance, prim, bary) : records[instance].albedo.rgb, 0.0, 1.0);
 			surf = HitSurface(hitAlbedo, instance);
-			if (screen && !hairFront && !hairThrough && !staleOwn && surf.kind != kKindGlass) { n = sN; surf = sS; }   // the same surface: the screen's colour, normal and material, the traced point (ptaaa: a pane stays glass)
+			if (screen && !ownFlash && !hairFront && !hairThrough && !staleOwn && surf.kind != kKindGlass) { n = sN; surf = sS; }   // the same surface: the screen's colour, normal and material, the traced point (ptaaa: a pane stays glass)
 			// (2026-11-11 PTGlassSurface) a pane with a surface share: with that chance this path meets the pane's OWN surface, its texture's
 			// colour as a thin two-sided matte sheet (kKindPane: roughness 1, metal 0; the thin translucent model, T = R), lit from the ray's
 			// side like any surface (sun, lamps, ReSTIR DI, glow; n already faces the ray) AND from behind (DirectSides' far-side sample: a lamp
@@ -2117,10 +2246,17 @@ vec3 Path(vec3 dir) {
 			// is on (PTDetail already carries the game's normal-mapped shading there: bending it too would count the bumps twice)
 			// (2026-11-11 PTEarlyLook slice 2: an early frame's traced first hit takes the screen's rule; it is shown with the game's colour and
 			// PTDetail's bumps, or not at all)
-			if (NormalAtlas() || bounce > 0 || (!screen && !(gEarlyLook > 0.5))) {
+			// (2026-11-12 ptbump) PTBumpNormals: the screen's first surface too, as its SHADING normal only (bump, split below): the land's
+			// recorded bump where the screen's record holds one, else the traced record's own normal map (the same call: the shader inlines
+			// every call). Not glass (a pane's mirror directions) and not hair (its cards' maps are strand detail).
+			const bool bendAsBefore = NormalAtlas() || bounce > 0 || (!screen && !(gEarlyLook > 0.5));
+			const bool bendFirst = !bendAsBefore && gBumpOn > 0.5 && bounce == 0 && screen && surf.kind != kKindGlass && surf.kind != kKindPane && surf.kind != kKindHair;
+			if ((bendAsBefore || bendFirst) && !ownFlash) {
 				rtHitNormalAtlasOn = NormalAtlas();
-				vec3 bent = rtHitNormalMapped(instance, prim, bary, n, mat3(toScene));
-				if (dot(bent, v) > 0.0) n = bent;   // (a map that turns it away from the eye: kept as it was)
+				const bool recorded = bendFirst && !hairFront && !hairThrough && !staleOwn && gScreenBump != vec3(0.0);
+				vec3 bent = recorded ? gScreenBump : rtHitNormalMapped(instance, prim, bary, n, mat3(toScene));
+				if (bendFirst) bump = bent;
+				else if (dot(bent, v) > 0.0) n = bent;   // (a map that turns it away from the eye: kept as it was)
 			}
 			// (2026-11-03 b) PTGlowLights: a bounce ray's glow inside a glow light's sphere could also have come from that light's sample
 			// at the previous hit (Direct, GlowSample): MIS weight pdf_bounce / (pdf_bounce + pdf_light) (the camera's own rays: full)
@@ -2132,7 +2268,7 @@ vec3 Path(vec3 dir) {
 			if (bounce == 0 && view == 0 && !screen && gEarlyLook > 0.5 && GlowFromFrame() && (records[instance].flags & RT_HIT_GLOW_FLAG) != 0u) gFirstGlowMark = true;
 			// (2026-11-12 PTGlowTexel) the hit's glow texel, read ONCE for the test here and the glow below (one inlined copy of rtHitGlow)
 			const bool glowFrame = bounce == 0 && view == 0 && screen && GlowFromFrame() && ScreenFrame() && (records[instance].flags & RT_HIT_GLOW_FLAG) != 0u;
-			const bool glowWanted = (view == 0 || (view >= 5 && view != 8 && bounce > 0)) && GlowAtlas() && p.skyHorizon.w > 0.0;
+			const bool glowWanted = (view == 0 || (view >= 5 && view != 8 && bounce > 0)) && GlowAtlas() && p.skyHorizon.w > 0.0 && !ownFlash;   // (PTFlashOwnPixels: the game's pixel holds its glow)
 			const bool glowTest = glowFrame && gGlowTexel > 0.0 && GlowAtlas();
 			const vec3 glowAt = glowWanted || glowTest ? rtHitGlow(instance, prim, bary) : vec3(0.0);
 			if (glowFrame && !(glowTest && dot(max(glowAt, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722)) < gGlowTexel)) {
@@ -2165,10 +2301,21 @@ vec3 Path(vec3 dir) {
 				radiance += bounce > 0 ? Indirect(throughput * glow * (p.skyHorizon.w * mis)) : throughput * glow * (p.skyHorizon.w * mis);
 			}
 		}
+		// (2026-11-12 ptbump) PTBumpNormals: the first hit's bumped normal becomes its shading normal (the cosines, the lobes, the
+		// directions drawn); the smooth one stays as the geometric normal (gGeoN: Direct's ray starts, the side test and the next ray's
+		// start below, the radiance cache's cell). A bump that faces away from the eye is turned back to just in sight (its sideways
+		// lean kept); one on the far side of the smooth surface (a record averaged at an edge) is left out.
+		if (bounce == 0) gFirstBump = false;
+		if (bounce == 0 && bump != vec3(0.0) && dot(bump, n) > 0.0 && !any(isnan(bump))) {
+			const float facing = dot(bump, v);
+			if (facing < 0.05) bump = normalize(bump + v * (0.05 - facing));
+			// (a traced record without a normal map gives the smooth normal back: no bump known, PTDetail stays in full there)
+			if (bump != n) { gGeoN = n; n = bump; gGeoSplit = true; gFirstBump = true; }
+		}
 		// (2026-11-09 PTBounceRoughen) a surface met after a bounce: at least the roughest bounce so far x the key
 		if (bounce > 0 && gBounceRoughen > 0.0) surf.rough = max(surf.rough, pathRough * gBounceRoughen);
-		if (bounce == 0) { gFirstAlbedo = surf.albedo; gFirstSurface = 1.0; }
-		if (bounce == 0) { gFirstRough = surf.rough; gFirstMetal = surf.metal; gFirstNV = dot(n, v); gSplitTake = Split() && view == 0; }   // (ptaaa-denoiser)
+		if (bounce == 0 && !ownFlash) { gFirstAlbedo = surf.albedo; gFirstSurface = 1.0; }   // (PTFlashOwnPixels: the game's pixel, no first surface)
+		if (bounce == 0) { gFirstRough = surf.rough; gFirstMetal = surf.metal; gFirstNV = dot(n, v); gSplitTake = Split() && view == 0 && !ownFlash; }   // (ptaaa-denoiser)
 		// (2026-11-11 PTGlassSurface) a pane with a surface share reports the SAME first surface whichever branch this path took (the
 		// denoiser must not see it flip between a pane and its glass frame to frame): the pane's texture colour as the albedo (demodulation is
 		// exact either way: the show pass multiplies the same value back), roughness = the share (the mix of the glass's 0 and the surface's
@@ -2204,17 +2351,20 @@ vec3 Path(vec3 dir) {
 		bool emRestir = false;
 		if (!arriving && !reflection) {
 #ifndef PT_RESTIR_GI
-			gRestirFirst = bounce == 0 && (view == 0 || view == 3) && RestirDI();   // (2026-11-07) PTRestirDI at the first hit
+			gRestirFirst = bounce == 0 && (view == 0 || view == 3) && RestirDI() && !ownFlash;   // (2026-11-07) PTRestirDI at the first hit
 			emRestir = gRestirFirst;
 			// (ptaaa-emissive) the emissive light sample is MIS-weighted only where a bounce ray leaves this hit (or the cache stands for it)
 			gEmMis = (bounce < bounces && view != 3 && view != 8) || cached;
 #endif
 			gBounce = bounce;   // (perf-ptcost: PTBounceLights)
+			gFlashOnly = ownFlash;   // (2026-11-13 PTFlashOwnPixels)
 			const vec3 lit = DirectSides(hit, n, t, v, surf);   // (2026-11-07 ptaaa-materials: Direct + the light from behind, one call site)
+			gFlashOnly = false;
 #ifndef PT_RESTIR_GI
 			gRestirFirst = false;
 #endif
 			radiance += bounce > 0 ? Indirect(throughput * lit) : throughput * lit;
+			if (ownFlash) break;   // (the game's pixel + the flashlight: nothing else of this hit, no bounce)
 			// (2026-11-06, section 44) PTLastBounce (flag 65536): the path ends here (PTRealtime: 1 bounce), so the light of further bounces is
 			// missing (~3 % of the picture indoors and out once textured meshes kept their colour, section 43). Estimated as if this hit's
 			// surroundings were lit as it is: its albedo x its own direct light x 0.75 (replays against 4-bounce means: brightness 0.994 /
@@ -2235,7 +2385,7 @@ vec3 Path(vec3 dir) {
 		if (bounce == bounces && bounce > 0 && (uint(p.accum.w) & 32768u) != 0u && view == 0 && p.skyZenith.w > 0.5 && !cached)
 			radiance += Indirect(throughput * surf.albedo * Sky(CosineDirection(n, vec2(Rand(), Rand()))));
 #ifndef PT_RESTIR_GI
-		if (cache && bounce < bounces && !cacheEnd && cvCount < kCacheVerts) { cvHit[cvCount] = hit; cvN[cvCount] = n; cvT[cvCount] = throughput; cvR[cvCount] = radiance; cvCount++; }
+		if (cache && bounce < bounces && !cacheEnd && cvCount < kCacheVerts) { cvHit[cvCount] = hit; cvN[cvCount] = gGeoSplit ? gGeoN : n; cvT[cvCount] = throughput; cvR[cvCount] = radiance; cvCount++; }
 #endif
 		if (bounce == 0) { gSplitTake = false; gSplitRad0 = radiance; }   // (ptaaa-denoiser) the first hit's own light ends here
 		if (bounce == bounces || cacheEnd || view == 3 || view == 8) break;
@@ -2291,6 +2441,9 @@ vec3 Path(vec3 dir) {
 		}
 #endif
 		else if (!NextDirection(n, v, surf, l, w, pdf)) break;
+		// (2026-11-12 ptbump) a direction drawn round the bumped normal that leaves on the other side of the smooth surface than its lobe
+		// (a reflection under it, a transmission above it): the path ends here (no ray through the surface: no light leak)
+		if (gGeoSplit && (dot(l, n) < 0.0) != (dot(l, gGeoN) < 0.0)) break;
 		// (2026-11-06, section 35) PTBounceHalf (flag 16384): the bounce traced for half the pixels a frame, whole 8 x 8 tiles in a checkerboard
 		// that swaps every frame (whole waves skip: no divergence), the traced pixels' indirect light x 2 (unbiased; the denoiser's history
 		// fills the rest). Replays: -34 % of the pass, the mean unchanged, +10 % noise a frame.
@@ -2318,7 +2471,7 @@ vec3 Path(vec3 dir) {
 			if (Rand() >= keep) break;
 			throughput /= keep;
 		}
-		pos = hit + n * (1.0 + 0.002 * t);
+		pos = hit + (gGeoSplit ? (dot(l, gGeoN) < 0.0 ? -gGeoN : gGeoN) : n) * (1.0 + 0.002 * t);   // (ptbump: off the smooth surface)
 		dir = l;
 	}
 #ifndef PT_RESTIR_GI
@@ -2371,6 +2524,7 @@ void main() {
 	float roughSum = 0.0, metalSum = 0.0, specHitT = 0.0;
 	bool specMirror = false;   // (2026-11-09 pt-mirrors) PTDenoiseMirrorSurface: the first path's reflected thing stands in for the surface
 	float earlyZ = 0.0;   // (2026-11-11 PTEarlyLook slice 2) the first path's first hit: view z / farZ, 0 a miss, -1 a glow the game draws
+	bool bumped = false;   // (2026-11-12 ptbump) the first path's first hit was lit with its bumped normal (PTBumpNormals)
 	for (int s = 0; s < paths; s++) {
 		const vec2 uv = CameraUV(pixel, vec2(Rand(), Rand()));   // (2026-11-10 early kick: texel 23.x; the random numbers drawn either way)
 		const vec3 dir = normalize(p.forward.xyz + p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0));
@@ -2386,6 +2540,7 @@ void main() {
 		gFirstViewZ = 0.0; gFirstGlowMark = false;   // (2026-11-11 PTEarlyLook)
 		vec3 c = Path(dir);
 		if (s == 0) earlyZ = gFirstGlowMark ? -1.0 : (isnan(gFirstViewZ) || isinf(gFirstViewZ) ? 0.0 : gFirstViewZ);
+		if (s == 0) bumped = gFirstBump;   // (2026-11-12 ptbump)
 		const bool bad = any(isnan(c)) || any(isinf(c));
 		if (bad) c = vec3(0.0);
 		// (ptaaa-denoiser) the specular part: the first hit's direct light through its GGX lobe + what came through the first bounce x that
@@ -2425,7 +2580,9 @@ void main() {
 	}
 	vec3 sample_ = sum / float(paths);
 	// the display's alpha: the RT host's count mode first (perf-ptcost), then PTEarlyLook's depth (2026-11-11), else 1 as before
-	const float displayA = gCountRays ? 1.0 + float(gRayCount) : gEarlyLook > 0.5 ? earlyZ : 1.0;
+	// (2026-11-12 ptbump) ... or 2 + PTBumpDetail where the first hit's light already holds its bumps: RtPathTraceShow.frag keeps that
+	// share of PTDetail there, less the fine contrast the traced light has itself (2 <= a <= 3; a = 1: PTDetail as before)
+	const float displayA = gCountRays ? 1.0 + float(gRayCount) : gEarlyLook > 0.5 ? earlyZ : bumped ? 2.0 + gBumpDetail : 1.0;
 	if ((uint(p.accum.w) & 512u) != 0u) {   // (2026-11-03) demodulated for the denoiser
 		// (2026-11-04 c FIX) the colour stored is the one divided by (with its 0.02 floor): RtPathTraceShow.frag multiplies it back, and with
 		// the raw colour every surface darker than 0.02 in a channel came out darker by colour / 0.02 (rtdenoise-int: PTDenoise 0.87-0.90x

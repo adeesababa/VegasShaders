@@ -562,6 +562,12 @@ void ShadowsExteriorEffect::UpdateSettings() {
 	interiors.PlayerInsideLamp = ShadowSettingI(interiorSection, "PlayerInsideLamp") != 0;
 	interiors.RedrawActorsOnly = ShadowSettingI(interiorSection, "RedrawActorsOnly") != 0;
 	interiors.PlayerLampMargin = (std::max)(ShadowSettingF(interiorSection, "PlayerLampMargin"), 1.0f);
+	{	// UNOFFICIAL 2026-11-12 CubeReleaseSeconds (ShadowsExterior.h): missing key = 30; 0 (or less) = never release, as before. At least
+		// 1 s when on: the sweep sees a slow frame as 0.25 s, so a shorter time could release a cube map used the frame before.
+		SettingManager::Configuration::ConfigNode releaseNode;
+		const float seconds = TheSettingManager->Config.FillNode(&releaseNode, interiorSection, "CubeReleaseSeconds") ? releaseNode.FloatValue : 30.0f;
+		CubeReleaseSeconds = seconds > 0.0f ? (std::min)((std::max)(seconds, 1.0f), 3600.0f) : 0.0f;
+	}
 
 	{	// UNOFFICIAL: [Shaders.ShadowsInteriors.Forward], read once per settings change
 		InteriorsStruct::ForwardStruct& forward = interiors.Forward;
@@ -992,6 +998,7 @@ void ShadowsExteriorEffect::RegisterTextures() {
  */
 bool ShadowsExteriorEffect::EnsureCubeMap(int slot) {
 	if (slot < 0 || slot >= ShadowCubeMapsMax || !CubeMapSizeCreated) return false;
+	CubeUsed[slot] = CubeClock;	// UNOFFICIAL 2026-11-12 CubeReleaseSeconds: the slot has a lamp this frame (drawn, or kept and published)
 	if (Textures.ShadowCubeMapTexture[slot]) return true;
 	if (FAILED(TheRenderManager->device->CreateCubeTexture(CubeSizeFor(slot), 1, D3DUSAGE_RENDERTARGET, D3DFMT_R32F, D3DPOOL_DEFAULT,
 		&Textures.ShadowCubeMapTexture[slot], NULL)) || !Textures.ShadowCubeMapTexture[slot]) {
@@ -1002,7 +1009,15 @@ bool ShadowsExteriorEffect::EnsureCubeMap(int slot) {
 	}
 	for (int j = 0; j < 6; j++) Textures.ShadowCubeMapTexture[slot]->GetCubeMapSurface((D3DCUBEMAP_FACES)j, 0, &Textures.ShadowCubeMapSurface[slot][j]);
 	CubeGeneration++;
-	Logger::Log("UNOFFICIAL point shadows: cube map for slot %d created (%u x %u)", slot, CubeSizeFor(slot), CubeSizeFor(slot));
+	CubeMapsMade++;
+	// UNOFFICIAL 2026-11-12 CubeReleaseSeconds: a released cube map is made again, so this line can come any number of times now. The
+	// first 64 are written; after that the "lamp shadow cube maps" count line (ShadowManager.cpp) has the numbers.
+	static unsigned lines = 0;
+	if (lines < 64) {
+		lines++;
+		Logger::Log("UNOFFICIAL point shadows: cube map for slot %d created (%u x %u)%s", slot, CubeSizeFor(slot), CubeSizeFor(slot),
+			lines == 64 ? " (said 64 times; later ones are only counted, see the 'lamp shadow cube maps' lines)" : "");
+	}
 	return true;
 }
 
@@ -1010,6 +1025,7 @@ bool ShadowsExteriorEffect::EnsureCubeMap(int slot) {
 // has people in reach. Same size and format as the slot's cube map, so a face copies over with StretchRect.
 bool ShadowsExteriorEffect::EnsureStaticCubeMap(int slot) {
 	if (slot < 0 || slot >= ShadowCubeMapsMax || !CubeMapSizeCreated) return false;
+	CubeStaticUsed[slot] = CubeClock;	// UNOFFICIAL 2026-11-12 CubeReleaseSeconds: wanted this frame (people near the lamp, or the pool's spare)
 	if (Textures.ShadowCubeMapStaticTexture[slot]) return true;
 	if (FAILED(TheRenderManager->device->CreateCubeTexture(CubeSizeFor(slot), 1, D3DUSAGE_RENDERTARGET, D3DFMT_R32F, D3DPOOL_DEFAULT,
 		&Textures.ShadowCubeMapStaticTexture[slot], NULL)) || !Textures.ShadowCubeMapStaticTexture[slot]) {
@@ -1020,7 +1036,96 @@ bool ShadowsExteriorEffect::EnsureStaticCubeMap(int slot) {
 	}
 	for (int j = 0; j < 6; j++) Textures.ShadowCubeMapStaticTexture[slot]->GetCubeMapSurface((D3DCUBEMAP_FACES)j, 0, &Textures.ShadowCubeMapStaticSurface[slot][j]);
 	CubeGeneration++;
-	Logger::Log("UNOFFICIAL RedrawActorsOnly: static cube map for slot %d created (%u x %u)", slot, CubeSizeFor(slot), CubeSizeFor(slot));
+	CubeMapsMade++;
+	static unsigned lines = 0;	// UNOFFICIAL 2026-11-12 CubeReleaseSeconds: the first 64 (as EnsureCubeMap)
+	if (lines < 64) {
+		lines++;
+		Logger::Log("UNOFFICIAL RedrawActorsOnly: static cube map for slot %d created (%u x %u)%s", slot, CubeSizeFor(slot), CubeSizeFor(slot),
+			lines == 64 ? " (said 64 times; later ones are only counted, see the 'lamp shadow cube maps' lines)" : "");
+	}
+	return true;
+}
+
+// UNOFFICIAL 2026-11-12 CubeReleaseSeconds: every sampler record (the replaced game shaders' three records each, and the effects) that
+// holds this texture forgets it, by pointer: SetCT resolves the sampler again from its name's slot. The game shaders keep the pointer
+// they bound first for good (the crash class of the ortho map: a shader binding a released texture); the effects read their slot again
+// at each bind, but the copy they keep in between goes too. Only the screen-space lamp pass can ever hold a cube map past the 12 made
+// at start (ShaderManager::RenderPointShadowBatches puts them in the first 12 names' slots while it draws); the walk does not rely on it.
+static unsigned ForgetTextureInSamplers(const IDirect3DBaseTexture9* texture) {
+	unsigned forgotten = 0;
+	auto forget = [&](ShaderProgram* program) {
+		if (!program) return;
+		for (UInt32 i = 0; i < program->TextureShaderValuesCount; i++) {
+			TextureRecord* record = program->TextureShaderValues[i].Texture;
+			if (record && record->Texture == texture) { record->Texture = nullptr; forgotten++; }
+		}
+	};
+	for (const auto& named : TheShaderManager->EffectsNames) forget(named.second ? *named.second : nullptr);
+	for (const auto& named : TheShaderManager->ShaderNames) {
+		ShaderCollection* collection = named.second ? *named.second : nullptr;
+		if (!collection) continue;
+		for (auto& vertex : collection->VertexShaderList)
+			for (int kind = 0; vertex && kind < 3; kind++) forget(vertex->ShaderProg[kind]);	// Default / Exterior / Interior
+		for (auto& pixel : collection->PixelShaderList)
+			for (int kind = 0; pixel && kind < 3; kind++) forget(pixel->ShaderProg[kind]);
+	}
+	return forgotten;
+}
+
+// UNOFFICIAL 2026-11-12 CubeReleaseSeconds (ShadowsExterior.h). Order: nothing may hold the texture when it is released.
+//  1. a face that is a render target now: not released (false);
+//  2. the 16 pixel and 4 vertex texture stages: where the device holds it (the effects and the atlas conversion bind there directly)
+//     or the game's own record of the stage does (NiDX9RenderState, which the forward lamp shadows bind through and compare against:
+//     a stale entry there would make the next bind of a new cube map at the same address a no-op), both are emptied;
+//  3. the sampler records (above);
+//  4. the six face surfaces, the texture, the slot's pointers, and CubeGeneration (the readers that keep a pointer to compare:
+//     ShadowManager's face records).
+// ShadowManager's own records of the slot (its slot state, the published lamp table, the atlas tile) are the caller's to clear.
+bool ShadowsExteriorEffect::ReleaseCubeMap(int slot, bool staticTwin) {
+	if (slot < 0 || slot >= ShadowCubeMapsMax) return false;
+	if (!staticTwin && slot < ShadowCubeMapsScreen) return false;	// made at start, registered as TESR_ShadowCubeMapBuffer<slot>: kept
+	IDirect3DCubeTexture9*& texture = staticTwin ? Textures.ShadowCubeMapStaticTexture[slot] : Textures.ShadowCubeMapTexture[slot];
+	IDirect3DSurface9** faces = staticTwin ? Textures.ShadowCubeMapStaticSurface[slot] : Textures.ShadowCubeMapSurface[slot];
+	if (!texture) return false;
+	IDirect3DDevice9* device = TheRenderManager->device;
+	NiDX9RenderState* state = TheRenderManager->renderState;
+
+	for (DWORD target = 0; target < 4; target++) {
+		IDirect3DSurface9* bound = nullptr;
+		if (FAILED(device->GetRenderTarget(target, &bound)) || !bound) continue;
+		bool ours = false;
+		for (int face = 0; face < 6; face++) ours |= bound == faces[face];
+		bound->Release();
+		if (ours) return false;
+	}
+
+	for (DWORD stage = 0; stage < 16; stage++) {
+		IDirect3DBaseTexture9* bound = nullptr;
+		const bool onDevice = FAILED(device->GetTexture(stage, &bound)) || bound == texture;	// (a stage that cannot be read counts as holding it)
+		if (bound) bound->Release();	// (GetTexture's reference; ours keep the cube map alive)
+		const bool noted = state->GetTexture(stage) == texture || state->unk10A0[stage] == (UInt32)texture;
+		if (!onDevice && !noted) continue;
+		// Both to empty, as EffectRecord::ClearPassTextures: the game's record must say what the device holds, or the game's next bind
+		// of its own texture on this stage would be skipped as already there.
+		device->SetTexture(stage, nullptr);
+		state->NoteDeviceTexture(stage, nullptr);
+		if (state->GetTexture(stage) == texture) state->SetTexture(stage, nullptr);	// (should the game's getter read another record than the note)
+	}
+	for (DWORD stage = D3DVERTEXTEXTURESAMPLER0; stage <= D3DVERTEXTEXTURESAMPLER3; stage++) {
+		IDirect3DBaseTexture9* bound = nullptr;
+		if (SUCCEEDED(device->GetTexture(stage, &bound)) && bound) {
+			if (bound == texture) device->SetTexture(stage, nullptr);
+			bound->Release();
+		}
+	}
+
+	ForgetTextureInSamplers(texture);
+
+	for (int face = 0; face < 6; face++)
+		if (faces[face]) { faces[face]->Release(); faces[face] = nullptr; }
+	texture->Release();
+	texture = nullptr;
+	CubeGeneration++;
 	return true;
 }
 
@@ -1139,6 +1244,47 @@ bool ShadowsExteriorEffect::EnsureCharacterMap() {
 	return true;
 }
 
+// UNOFFICIAL 2026-11-08 CharacterShadowMapNpcs: count maps of size x size (R32F, as the player's) and one depth surface they share;
+// remade when either changes. Bound by hand per draw (NpcCharacterMaps.h), so no sampler name is registered for them.
+bool ShadowsExteriorEffect::EnsureCharacterNpcMaps(int count, UINT size) {
+	count = std::clamp(count, 0, CharacterNpcMax);
+	if (count == CharacterNpcCountCreated && size == CharacterNpcSizeCreated && (count == 0 || CharacterNpcDepthSurface)) return count > 0;
+	auto release = [this]() {
+		for (int i = 0; i < CharacterNpcMax; i++) {
+			if (CharacterNpcSurface[i]) { CharacterNpcSurface[i]->Release(); CharacterNpcSurface[i] = nullptr; }
+			if (CharacterNpcTexture[i]) { CharacterNpcTexture[i]->Release(); CharacterNpcTexture[i] = nullptr; }
+		}
+		if (CharacterNpcDepthSurface) { CharacterNpcDepthSurface->Release(); CharacterNpcDepthSurface = nullptr; }
+		CharacterNpcCountCreated = 0;
+		CharacterNpcSizeCreated = 0;
+		CharacterNpcLive = 0;
+	};
+	release();
+	if (count == 0) return false;
+	IDirect3DDevice9* device = TheRenderManager->device;
+	for (int i = 0; i < count; i++) {
+		if (FAILED(device->CreateTexture(size, size, 1, D3DUSAGE_RENDERTARGET, D3DFMT_R32F, D3DPOOL_DEFAULT, &CharacterNpcTexture[i], NULL)) || !CharacterNpcTexture[i] ||
+			FAILED(CharacterNpcTexture[i]->GetSurfaceLevel(0, &CharacterNpcSurface[i]))) {
+			Logger::Log("UNOFFICIAL CharacterShadowMapNpcs: could not make NPC map %d (%u x %u); off until it can be.", i, size, size);
+			release();
+			return false;
+		}
+	}
+	if (FAILED(device->CreateDepthStencilSurface(size, size, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, true, &CharacterNpcDepthSurface, NULL)) || !CharacterNpcDepthSurface) {
+		CharacterNpcDepthSurface = nullptr;
+		Logger::Log("UNOFFICIAL CharacterShadowMapNpcs: could not make the %u x %u depth surface; off until it can be.", size, size);
+		release();
+		return false;
+	}
+	CharacterNpcCountCreated = count;
+	CharacterNpcSizeCreated = size;
+	CharacterNpcMap.ShadowMapViewPort = { 0, 0, size, size, 0.0f, 1.0f };
+	CharacterNpcMap.ShadowMapResolution = (float)size;
+	CharacterNpcMap.ShadowMapInverseResolution = 1.0f / (float)size;
+	Logger::Log("UNOFFICIAL CharacterShadowMapNpcs: %d NPC maps of %u x %u", count, size, size);
+	return true;
+}
+
 // UNOFFICIAL 2026-10-23 CharacterShadowMap: the fit (docs/next/CHARACTER-SHADOW-MAP-DESIGN.md, "Map fit"). A sphere round the player --
 // Fit 0: the head and upper body, the segment from the Spine2 bone to the head bone plus the margin (hat brims, hair, shoulders);
 // Fit 1: the actor node's world bound plus the margin -- seen from the sun as an ortho box 2R across and 2R deep (eye R toward the
@@ -1180,6 +1326,52 @@ static Character* CharacterMapNpc(float maxDistance) {
 	return best;
 }
 
+// UNOFFICIAL 2026-11-08 CharacterShadowMapNpcs: the people in the high and middle-high process lists (as CharacterMapNpc), not
+// disabled or culled, with a skeleton, whose head is within maxDistance of the camera, nearest first; skip: a node already in the
+// player's map (CharacterShadowMapTarget's NPC in first person). Behind and beside the camera too: their shadows still show nearby.
+static int CharacterNpcsRaw(Character** out, float* distances, int max, float maxDistance, NiNode* skip) {
+	const NiPoint3 eye = WorldSceneGraph->camera->m_worldTransform.pos;
+	int n = 0;
+	__try {
+		UInt8* lists = (UInt8*)0x11E0E80;	// ProcessLists
+		Actor** data = *(Actor***)(lists + 0x08);
+		for (int level = 0; data && level < 2; level++) {
+			const UInt32 begin = *(UInt32*)(lists + 0x14 + level * 4), end = *(UInt32*)(lists + 0x24 + level * 4);
+			if (end < begin || end - begin > 4096) continue;
+			for (UInt32 i = begin; i < end; i++) {
+				Actor* actor = data[i];
+				if (!actor || (TESObjectREFR*)actor == (TESObjectREFR*)Player || !actor->baseForm || actor->baseForm->formType != TESForm::FormType::kFormType_NPC) continue;
+				if ((actor->flags & 0x800) != 0) continue;	// disabled
+				Character* npc = (Character*)actor;
+				NiNode* node = npc->GetNode();
+				if (!node || node == skip || (node->m_flags & NiAVObject::APP_CULLED) || !npc->ActorSkinInfo || !npc->ActorSkinInfo->HeadNode || !npc->ActorSkinInfo->Spine2Node) continue;
+				const NiPoint3& h = npc->ActorSkinInfo->HeadNode->m_worldTransform.pos;
+				const float dx = h.x - eye.x, dy = h.y - eye.y, dz = h.z - eye.z;
+				const float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+				if (!(distance < maxDistance)) continue;
+				// insert in order, keeping the nearest max
+				int at = n < max ? n : max;
+				while (at > 0 && distances[at - 1] > distance) at--;
+				if (at >= max) continue;
+				for (int k = (n < max ? n : max - 1); k > at; k--) { out[k] = out[k - 1]; distances[k] = distances[k - 1]; }
+				out[at] = npc;
+				distances[at] = distance;
+				if (n < max) n++;
+			}
+		}
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		static bool logged = false;
+		if (!logged) { logged = true; Logger::Log("[ERROR] CharacterShadowMapNpcs: reading the actors failed (once)"); }
+	}
+	return n;
+}
+
+int ShadowsExteriorEffect::PickCharacterNpcs(Character** out, int max, float maxDistance, NiNode* skip) {
+	float distances[CharacterNpcMax];
+	return CharacterNpcsRaw(out, distances, (std::min)(max, (int)CharacterNpcMax), maxDistance, skip);
+}
+
 bool ShadowsExteriorEffect::GetCharacterViewProj(const D3DXVECTOR3& sunDir, D3DXMATRIX& viewProj) {
 	CharacterTargetNode = nullptr;
 	if (!Player) return false;
@@ -1192,6 +1384,15 @@ bool ShadowsExteriorEffect::GetCharacterViewProj(const D3DXVECTOR3& sunDir, D3DX
 	NiNode* node = target->GetNode();
 	if (!node || (node->m_flags & NiAVObject::APP_CULLED)) return false;
 	CharacterTargetNode = node;
+	const float mapSize = CharacterMap.ShadowMapResolution > 0.0f ? CharacterMap.ShadowMapResolution : (float)Settings.ShadowMaps.CharacterMapResolution;
+	if (!FitCharacterBox(target, node, sunDir, mapSize, CharacterMap, viewProj, Constants.CharacterCenter, Constants.CharacterData)) return false;
+	Constants.CharacterCameraToLight = viewProj;
+	return true;
+}
+
+// UNOFFICIAL 2026-11-08: GetCharacterViewProj's fit, for any person (CharacterShadowMapNpcs fits the NPC maps with it too).
+bool ShadowsExteriorEffect::FitCharacterBox(Character* target, NiNode* node, const D3DXVECTOR3& sunDir, float mapSize, ShadowMapSettings& map,
+	D3DXMATRIX& viewProj, D3DXVECTOR4& centerOut, D3DXVECTOR4& dataOut) {
 	const NiPoint3 cameraPosition = WorldSceneGraph->camera->m_worldTransform.pos;
 	D3DXVECTOR3 centre;
 	float radius;
@@ -1226,7 +1427,6 @@ bool ShadowsExteriorEffect::GetCharacterViewProj(const D3DXVECTOR3& sunDir, D3DX
 	viewProj = view * proj;
 
 	// the world origin on a texel corner (GetCascadeViewProj's rounding): the picture moves by whole texels as the character moves
-	const float mapSize = CharacterMap.ShadowMapResolution > 0.0f ? CharacterMap.ShadowMapResolution : (float)Settings.ShadowMaps.CharacterMapResolution;
 	D3DXVECTOR4 origin(-cameraPosition.x, -cameraPosition.y, -cameraPosition.z, 1.0f);
 	D3DXVec4Transform(&origin, &origin, &viewProj);
 	const float ox = origin.x * mapSize * 0.5f, oy = origin.y * mapSize * 0.5f;
@@ -1235,7 +1435,6 @@ bool ShadowsExteriorEffect::GetCharacterViewProj(const D3DXVECTOR3& sunDir, D3DX
 	viewProj = view * proj;
 
 	// the map's settings for the draw (as AmbientLight::GridSunViewProj): actors only, alpha test on (hair cards, hat meshes), nothing too small
-	ShadowMapSettings& map = CharacterMap;
 	map.Forms = {};
 	map.Forms.Actors = true;
 	map.Forms.AlphaEnabled = true;
@@ -1252,11 +1451,10 @@ bool ShadowsExteriorEffect::GetCharacterViewProj(const D3DXVECTOR3& sunDir, D3DX
 	map.ShadowMapFrustumPlanes.SetActivePlaneState(62);
 
 	// the lookups' constants (w: set by the caller once the map holds the draw)
-	Constants.CharacterCameraToLight = viewProj;
-	Constants.CharacterCenter = D3DXVECTOR4(centre.x, centre.y, centre.z, radius);
-	Constants.CharacterData.x = 1.0f / mapSize;
-	Constants.CharacterData.y = (std::min)(Settings.ShadowMaps.CharacterMapBlend / radius, 0.9f);
-	Constants.CharacterData.z = Settings.ShadowMaps.CharacterMapBias / (2.0f * radius);	// world units -> the map's depth (0..1 over 2R)
+	centerOut = D3DXVECTOR4(centre.x, centre.y, centre.z, radius);
+	dataOut.x = 1.0f / mapSize;
+	dataOut.y = (std::min)(Settings.ShadowMaps.CharacterMapBlend / radius, 0.9f);
+	dataOut.z = Settings.ShadowMaps.CharacterMapBias / (2.0f * radius);	// world units -> the map's depth (0..1 over 2R)
 	return true;
 }
 

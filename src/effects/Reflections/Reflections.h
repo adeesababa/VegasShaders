@@ -7,6 +7,9 @@
 class ReflectionsEffect : public EffectRecord
 {
 public:
+	// UNOFFICIAL 2026-11-12 (memleak) idle targets (core/TextureManager.h, EffectRecord::TargetParkable): the four screen buffers. The water and env-map game shaders declare TESR_ReflectionsBuffer and read it only behind TESR_RTWaterData.x / TESR_ReflReplace.x (0 while off); their cached pointer is cleared at the swap. Not the cube maps, the RT images or the material buffer (made by hand)
+	bool	TargetParkable(const char* SamplerName) override { return !strcmp(SamplerName, "TESR_ReflectionsTrace") || !strcmp(SamplerName, "TESR_ReflectionsBuffer") ||
+		!strcmp(SamplerName, "TESR_ReflectionsTemp") || !strcmp(SamplerName, "TESR_ReflectionsHistory"); }
 	ReflectionsEffect() : EffectRecord("Reflections") {};
 
 	struct SettingsStruct {

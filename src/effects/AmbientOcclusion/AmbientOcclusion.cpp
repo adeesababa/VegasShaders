@@ -789,6 +789,9 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 	const D3DXMATRIX& view = TheRenderManager->viewMatrix;
 	const D3DXMATRIX& proj = TheRenderManager->projMatrix;
 	RtAmbient::TraceConstants c = {};
+	// UNOFFICIAL 2026-11-13 (R21, from the tester fork's RT GI review) BUG FIX: '= {}' leaves the D3DX members as they were on the stack (their
+	// default constructor is empty): the three constant blocks are zeroed for real.
+	memset(&c, 0, sizeof(c));
 	c.viewToWorld._11 = view._11; c.viewToWorld._12 = view._21; c.viewToWorld._13 = view._31;
 	c.viewToWorld._21 = view._12; c.viewToWorld._22 = view._22; c.viewToWorld._23 = view._32;
 	c.viewToWorld._31 = view._13; c.viewToWorld._32 = view._23; c.viewToWorld._33 = view._33;
@@ -1029,12 +1032,22 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 	const bool offscreenView = (rt.DebugView == 7 && (giPass || merged)) || (gi && !rt.GIScreenLight) || giTestFlag > 0.0f;
 	const int cacheRays = exterior ? rt.CacheRaysExterior : rt.CacheRays, cacheSpread = exterior ? rt.CacheSpreadExterior : rt.CacheSpread;
 	RtAmbient::CacheConstants cc = {}, cc2 = {};
+	memset(&cc, 0, sizeof(cc)); memset(&cc2, 0, sizeof(cc2));	// (2026-11-13 R21)
 	// the second level needs passes: the fine update, the coarse update, the AO / merged pass and the GI pass (of 8 a frame, the RT sun's among them)
 	const bool cascade2 = cacheOn && rt.CacheCascades >= 2;
 	// UNOFFICIAL 2026-11-12 (sungi p3 review) the layout flag follows the SETTING only; a frame short of pass slots just skips the coarse level's
 	// update (its cells keep their light). Before, the flag itself followed PassesLeft(), and every flip started every cell over (GI pumping).
 	const bool coarseUpdate = cascade2 && RtCore::PassesLeft() >= 4;
 	const int cacheFlags = cacheOn ? (rt.CacheVisibility ? 1 : 0) | (cascade2 ? 2 : 0) : 0;
+	// UNOFFICIAL 2026-11-13 (R21, from the tester fork's RT GI review) BUG FIX: the GI passes read lamp slot 7 as the radiance cache's grid,
+	// strength and flags WHATEVER it holds. With the cache off and no flag set the block below was skipped and the slot kept an eighth lamp or
+	// stack garbage (a positive w = "cache on", a w of 16+ = the off-screen flag: the on-screen bounce dropped). The slot is the cache's in
+	// every GI frame now: cleared here, and at most seven lamps.
+	if (gi && !(cacheOn || offscreenView)) {
+		c.gi.z = (std::min)(c.gi.z, (float)(RtAmbient::GILampsMax - 1));
+		c.lampPos[RtAmbient::GILampsMax - 1] = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
+		c.lampColor[RtAmbient::GILampsMax - 1] = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
+	}
 	if (cacheOn || offscreenView) {
 		const D3DXVECTOR4& camera = TheRenderManager->CameraPosition;
 		const double size = rt.CacheCellSize;
@@ -1049,6 +1062,7 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 		if (offscreenView) c.lampColor[RtAmbient::GILampsMax - 1].w += 16.0f + giTestFlag;	// (the cache pass's own cacheB keeps the plain strength)
 	}
 	RtAmbient::GIConstants g = {};
+	memset(&g, 0, sizeof(g));	// (2026-11-13 R21)
 	if (reuse && (giPass || merged)) {
 		const D3DXVECTOR4& camera = TheRenderManager->CameraPosition;
 		float light[GILightKeys] = {};

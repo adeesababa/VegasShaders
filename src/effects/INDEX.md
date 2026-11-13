@@ -25,7 +25,7 @@ One folder per effect: its C++, `README.md` (what it does, inputs, settings, pas
 | [DustMotes](DustMotes/) | false | yes | 1 | 2 | DustMotes.cpp, DustMotes.h | Sparse, tiny specks of dust drifting in the air, visible only where light falls on them: round lamps, and (optionally) in the sun's shafts. A speck between you  |
 | [Exposure](Exposure/) | true | yes | 3 | 4 | Exposure.cpp, Exposure.h | Exposure is Vegas Shaders' automatic brightness correction. It measures how bright the frame is (through the AvgLuma result) and darkens or brightens the whole  |
 | [FXAA](FXAA/) | - | - | 3 | 0 | FXAA.cpp, FXAA.h |  |
-| [Flashlight](Flashlight/) | true | yes | 2 | 3 | Flashlight.cpp, Flashlight.h |  |
+| [Flashlight](Flashlight/) | true | yes | 3 | 3 | Flashlight.cpp, Flashlight.h |  |
 | [GodRays](GodRays/) | true | yes | 1 | 3 | GodRays.cpp, GodRays.h | When the sun is up in an exterior and bright sky (or the sun's own disc and glare) sits near or beside the view, soft shafts of light fan out from the sun's scr |
 | [GpuParticles](GpuParticles/) | - | - | 6 | 1 | GpuParticles.cpp, GpuParticles.h |  |
 | [Grass](Grass/) | true | - | 0 | 8 | GpuGrass.cpp, GpuGrass.h, Grass.cpp, Grass.h |  |

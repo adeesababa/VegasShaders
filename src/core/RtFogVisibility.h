@@ -17,7 +17,23 @@ namespace RtFogVisibility {
 	// the cell's own texel), 2 = traced on a grid of another MaxDistance (read by position); y the RT range, z the fade to the cascades
 	// before it, w the MaxDistance it was traced with
 	D3DXVECTOR4	Constant(float GridDistance);
+	// UNOFFICIAL 2026-11-13 (rtvol2) [Shaders.VolumetricLight.RT] Expanded (off by default): while the air is traced, the look of a current
+	// game's traced / froxel volumetric light instead of the shadow maps' lookup alone: the lit path out to ExpandedDistance (every cell
+	// traced, so hills and buildings far past the shadow maps shade the air), its own density thinning with height above the eye
+	// (ExpandedDensity, ExpandedHeight), a tight forward glow round the sun (ExpandedSunGlow, ExpandedGlowSharpness) and the volumetric
+	// clouds' shadow in the air (ExpandedClouds, in the trace). Old behaviour: Expanded false (or DebugView 1).
+	struct Look { float distance, density, heightInv, glow, sharpness; };
+	float		ExpandedGridDistance();	// the grid's reach the trace should use (0: not asked for); VolumetricLightEffect::GridDistance
+	bool		ExpandedLook(Look& Out);	// true: the last trace (this frame or the one before) was the expanded one: use its look
 	std::string	StatusText();			// the REPORT block's line
+	// UNOFFICIAL 2026-11-13 (a tester: "rt vol light = no worky"): what the traced shafts do RIGHT NOW, in one plain line, for the Ray
+	// tracing page's status block ("Light shafts") and the session log. Returns 0 = off or nothing to do here (dim), 1 = running (green),
+	// 2 = on, but something stops it or leaves nothing to see (amber). Code (may be null): a number per reason (the log's change test).
+	// Indoors the line also says what the indoor neighbour does (the fog's lamp haze and its traced shadows, RtFogLamps below).
+	int			MenuState(std::string& Text, int* Code = nullptr);
+	// Once a second (SessionLog::OnFrame), only while the RT core runs: the line above as "RT LIGHT SHAFTS: ..." when its reason changes
+	// (at most 12 lines a session).
+	void		LogIfChanged();
 }
 
 // UNOFFICIAL 2026-11-12 LampHazeShadows ([Shaders.VolumetricFog.Interiors] LampHazeShadows, off by default; LampHazeShadowCell,

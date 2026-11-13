@@ -138,7 +138,10 @@ float4 main(PS_IN IN, out float depth : DEPTH) : COLOR0 {
 
     const float3 N = ShadowDecodeNormal(stored.rg);
     const float4 m = tex2Dlod(FL_Material, uv4);
-    const float roughness = m.b >= 0.0f ? m.b : 0.7f;
+    // (2026-11-12 ptbump) b in -3 .. -2: a record coded "the game draws no highlight on this mesh" for the path tracer (Includes/
+    // CapturedNormals.hlsl CapturedNoHighlight): the roughness this pass always lit it with is -2 - b. The land's b (-8 .. -6 with its
+    // bump recorded, else -1): no roughness, as before.
+    const float roughness = m.b >= 0.0f ? m.b : (m.b < -1.99f && m.b > -3.01f) ? -2.0f - m.b : 0.7f;
     const float metal = saturate((m.r - floor(m.r)) / 0.49f);
     SetDiffuseEnergyKeep(N, -ray, roughness);
     const float3 albedo = tex2Dlod(FL_Albedo, uv4).rgb;

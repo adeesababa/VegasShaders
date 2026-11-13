@@ -113,6 +113,13 @@ namespace VolumetricSmoke {
         state.Cleared(surface);
     }
 
+    // UNOFFICIAL 2026-11-12 (memleak), with [Main.Main.Performance] TargetReleaseSeconds above 0: the buffers (a full-screen and a
+    // half-screen half-float target and three small ones: 23 MB at 1080p, 92 MB at 4K) were made at start-up for every player, whether
+    // GunFX ever makes smoke or not (it is off by default). Now they are made the first frame GunFX hands over smoke to draw (Fetch), and
+    // kept from then on. BuffersLazy: not made at start-up; BuffersTried: MakeBuffers ran (made, or failed: not tried again).
+    inline bool BuffersLazy = false, BuffersTried = false;
+    void MakeBuffers();   // VolumetricSmoke.cpp
+
     // Segments and haze for this frame (fetched once; ShouldRender and Render both ask). Returns how much there is to draw.
     inline int Fetch() {
         if (FetchedFrame == FrameNumber) return Count + CountBig + HazeCount;
@@ -167,7 +174,8 @@ namespace VolumetricSmoke {
             }
         }
         Count = CountBig = HazeCount = BulletCount = 0;
-        if (!get || !FullSurface) return 0;
+        const bool unmade = BuffersLazy && !BuffersTried;   // (2026-11-12 memleak) the buffers wait for the first smoke
+        if (!get || (!FullSurface && !unmade)) return 0;
         static float records[FetchMax * 16];
         float params[8] = {};
         int total = get(records, FetchMax, params);
@@ -177,9 +185,15 @@ namespace VolumetricSmoke {
         // Menu switches (Main > GunFX) for the two most expensive parts: off, they are not fetched, so their passes are skipped.
         const bool hazeOn = TheSettingManager->GetSettingI("Main.GunFX.Main", "SmokeHaze") != 0;
         const bool tunnelsOn = TheSettingManager->GetSettingI("Main.GunFX.Main", "BulletTunnels") != 0;
-        int hazeTotal = hazeOn && getHaze && HazeSurface && EnvSurface ? getHaze(haze, HazeMax) : 0;
+        int hazeTotal = hazeOn && getHaze && ((HazeSurface && EnvSurface) || unmade) ? getHaze(haze, HazeMax) : 0;
         if (hazeTotal < 0 || hazeTotal > HazeMax) hazeTotal = 0;
         if (!total && !hazeTotal) return 0;
+        if (unmade) {   // (2026-11-12 memleak) the first smoke of the session: its buffers now
+            MakeBuffers();
+            if (!FullSurface) return 0;
+            if (!HazeSurface || !EnvSurface) hazeTotal = 0;
+            if (!total && !hazeTotal) return 0;
+        }
         // GunFX's points are absolute world positions; NVR's world space is centred on the camera (objects are drawn at
         // their position minus CameraPosition, and the eye sits at the inverse view's origin). Convert every end into it.
         const D3DXVECTOR4& camera = TheRenderManager->CameraPosition;

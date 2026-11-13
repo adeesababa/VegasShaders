@@ -46,6 +46,8 @@ public:
 		bool	GameLight;		// the Pip-Boy light as the beam's real game lamp for what the light pass cannot see (core/FlashlightLamp.h)
 		int		DebugView;		// 1 the light alone, 2 the shadow, 3 the normal
 		bool	TestForceOn;	// test only: on as if the Pip-Boy light were (and the game's Pip-Boy light switched on)
+		bool	HairAndEyes;	// UNOFFICIAL 2026-11-12: hair and eyes take the beam in their own shaders and the light pass skips them (core/FlashlightDeferred.h BeamBegin)
+		bool	HairUnderPT;	// UNOFFICIAL 2026-11-13: with HairAndEyes, the game's blended hair (drawn after the main list) takes the beam under path tracing too (BeamBegin)
 	};
 	DeferredSettingsStruct	Deferred = {};
 	bool	WantsShadowMap() const { return Deferred.Shadows; }
@@ -70,6 +72,8 @@ public:
 
 	void	UpdateConstants();
 	void	UpdateSettings();
+	void	RegisterConstants();	// UNOFFICIAL 2026-11-12 TESR_FlashBeam (HairAndEyes)
+	void	RegisterTextures();		// UNOFFICIAL 2026-11-12 TESR_FlashBeamCookie
 	bool	ShouldRender() { return false; }	// nothing drawn here (see above)
 	void	PublishLightConstants(bool abActive);
 };

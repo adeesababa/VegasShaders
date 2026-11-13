@@ -59,6 +59,7 @@ namespace {
 
 const char* InstallCheck::LevelName(Level level) { return level == Level::Problem ? "PROBLEM" : level == Level::Warning ? "warning" : "info"; }
 const std::vector<InstallCheck::Result>& InstallCheck::Results() { return gResults; }
+void InstallCheck::Note(Level level, const char* group, const std::string& title, const std::string& fix) { Add(level, group, title, fix); }	// UNOFFICIAL 2026-11-13
 
 int InstallCheck::Count(Level level) {
 	int n = 0;
@@ -226,6 +227,15 @@ std::string InstallCheck::BugReport() {
 		TheSettingManager && TheSettingManager->Config.MaxQualityActive ? "; Max Quality is ON" : "");
 	r += line;
 	for (const std::string& d : diff) r += "  " + d + "\r\n";
+	{	// UNOFFICIAL 2026-11-12: the Developer options and Internal settings among them, named apart (SessionLog.h)
+		const std::vector<SessionLog::ChangedSetting> test = SessionLog::TestSettingsChanged();
+		sprintf_s(line, "\r\nTest and internal settings changed: %u%s\r\n", (unsigned)test.size(),
+			test.empty() ? "" : " (View > Reset test and internal settings puts them back: try that first)");
+		r += line;
+		for (size_t i = 0; i < test.size() && i < 60; i++)
+			r += "  " + test[i].Section + "." + test[i].Key + "=" + test[i].Mine + " (" + test[i].Default + ")" + (test[i].Level > 1 ? " [internal]" : "") + "\r\n";
+		if (test.size() > 60) r += "  and " + std::to_string(test.size() - 60) + " more\r\n";
+	}
 	r += "\r\nWhat happened (where, what you see, what you expected):\r\n\r\n";
 	return Logger::Scrub(r);	// <GAME> for the game folder, no user / computer names (LogScrub.h)
 }

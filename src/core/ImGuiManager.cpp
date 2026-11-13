@@ -18,6 +18,8 @@
 #include "RtLampShadows.h"
 #include "RtPathTrace.h"
 #include "RtAmbient.h"
+#include "RtFogVisibility.h"	// UNOFFICIAL 2026-11-13: the Ray tracing page's "Light shafts" status line
+#include "PtApplies.h"	// UNOFFICIAL 2026-11-12: what each effect does while the path traced picture replaces the scene (the notes)
 #include "../effects/Reflections/Reflections.h"
 #include "../effects/AmbientOcclusion/AmbientOcclusion.h"
 #include <sstream>
@@ -62,6 +64,11 @@ namespace {
 		bool testSettings = false;		// UNOFFICIAL 2026-10-19: the auto-test's 'menu' shots show the test settings (TestShowMenu)
 		bool devOptions = false;		// UNOFFICIAL 2026-10-25: [Main.Menu.Developer] DeveloperOptions, read every drawn frame
 		bool advanced = false;			// 2026-11-05: [Main.Menu.Developer] AdvancedSettings, read every drawn frame
+		bool showInternal = false;		// UNOFFICIAL 2026-11-12: [Main.Menu.Developer] ShowInternal (typed into the settings file), read every drawn frame
+		bool ptNotes = true;			// UNOFFICIAL 2026-11-12: [Main.Menu.Developer] PathTracingNotes (View > Path tracing notes), read every drawn frame
+		bool devWarnAsk = false;		// UNOFFICIAL 2026-11-12: View > Developer options was switched on: open its warning next to the main window
+		bool devWarned = false;			// that warning was answered with "Show them" this session (it is shown once)
+		bool testResetAsk = false;		// UNOFFICIAL 2026-11-12: View > Reset test and internal settings was picked: open its box
 		bool diskConfirm = false;		// File > Reload from disk was picked: open its confirmation next to the main window
 		bool installCheckOpen = false;	// 2026-11-03: Help > Install check
 		double reportCopiedAt = -1.0;	// 2026-11-03: when Copy bug report was last pressed (ImGui time), for the "Copied" line
@@ -588,6 +595,7 @@ static bool ShouldHideKey(const char* key) {
 		"DayLUT", "NightLUT", "InteriorLUT",
 		"NewSince", "NewInclude", "NewExclude", "NewDiagnostics",
 		"DevOnly", "SidebarWidth",
+		"Internal", "ShowInternal",	// UNOFFICIAL 2026-11-12: the Internal list and the file-only key that shows its settings
 	};
 	return kRowless.count(key) != 0;
 }
@@ -879,12 +887,20 @@ static const char* InactiveReason(const char* section, const char* key) {
 static bool NewIsDiagnostic(const std::string& key, const std::string& description, const std::vector<std::string>& extra, const std::string& section);
 
 static bool IsDevOnlySetting(const std::string& section, const std::string& key);
+static bool IsInternalSetting(const std::string& section, const std::string& key);	// UNOFFICIAL 2026-11-12 (defined with IsDevOnlySetting)
 
-// Shown only with Developer options (2026-10-25: also the [Main.Menu.Developer] DevOnly list).
+// UNOFFICIAL 2026-11-12: an Internal setting ([Main.Menu.Developer] Internal) while the settings file does not ask for them
+// (ShowInternal): never a row, on its page, in the search or in the simple views, and not counted as a hidden developer setting.
+static bool InternalHidden(const std::string& section, const std::string& key) {
+	return !gMenu.showInternal && IsInternalSetting(section, key);
+}
+
+// Shown only with Developer options (2026-10-25: also the [Main.Menu.Developer] DevOnly list; 2026-11-12: and, with ShowInternal
+// typed into the settings file, the Internal list).
 static bool IsTestSetting(const SettingManager::Configuration::ConfigNode& node) {
 	static const std::vector<std::string> none;
 	return IsDeadSetting(node.Section, node.Key) || NewIsDiagnostic(node.Key, node.Description, none, node.Section) ||
-		IsDevOnlySetting(node.Section, node.Key);
+		IsDevOnlySetting(node.Section, node.Key) || IsInternalSetting(node.Section, node.Key);
 }
 
 // UNOFFICIAL 2026-10-25 menu tidy: whole-number settings that are plain 0/1 switches are drawn as a checkbox (it writes 0 or 1, the
@@ -1437,11 +1453,30 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.Reflections.RT", "WeaponHands", "Hands and arms reflect too", nullptr, "Off: only the gun reflects. On: your hands, gloves and arms reflect like the gun (the whole first-person model)." },
 	{ "Shaders.Reflections.RT", "Water", "Ray-traced water reflections", nullptr, "Water reflects the world with rays instead of the old reflection map." },
 	// Light shafts and fog (UNOFFICIAL 2026-11-07 ptaaa-fog)
-	{ "Shaders.VolumetricLight.RT", "Enabled", "Ray-traced light shafts and fog", nullptr, "Sunbeams through windows, trees and buildings, and the fog's sunlight, "
-		"follow the traced shadows instead of the shadow maps. Works while another ray-traced effect is on." },
+	// (2026-11-13: said "Sunbeams through windows": it is outdoors only, and it adds no shafts of its own. A tester: "no worky".)
+	{ "Shaders.VolumetricLight.RT", "Enabled", "Ray-traced light shafts and fog", nullptr, "Outdoors only. The sunbeams past trees, fences and buildings, and the "
+		"fog's sunlight, take their shadows from the traced scene instead of the shadow maps: a small change (shaft edges, people, far buildings). "
+		"It adds no shafts of its own: how visible they are is Volumetric light's Strength and Density. Works only while another ray-traced effect "
+		"is on. The Status block above says what it does right now." },
 	{ "Shaders.VolumetricLight.RT", nullptr, "Shaft quality",
 		"Fast: RaysPerCell=1 | Balanced: RaysPerCell=2 | High: RaysPerCell=4",
 		"Rays per piece of air each frame: more gives cleaner shaft edges sooner after the view moves, at more cost." },
+	// UNOFFICIAL 2026-11-13 (rtvol2) the expanded look
+	{ "Shaders.VolumetricLight.RT", "Expanded", "Modern light shafts", nullptr, "Makes the traced shafts look like a current game's: the lit air "
+		"reaches much farther and all of it is traced, so hills, buildings, trees and people cast long shafts of shade into the dusty air; the "
+		"dust hugs the ground, the glow gathers round the sun, and cloud shadows drift through the air. Off: the traced shadow only replaces the "
+		"shadow maps' (a small change)." },
+	{ "Shaders.VolumetricLight.RT", "ExpandedDistance", "How far the shafts reach", nullptr, "How far from you the lit air goes, in game units "
+		"(8000 is about 115 metres). Farther shows the long shadows of hills and far buildings; it costs a little more." },
+	{ "Shaders.VolumetricLight.RT", "ExpandedDensity", "Dust in the air", nullptr, "How thick the air is near the ground. Higher gives stronger "
+		"shafts and more haze; too high washes the picture out." },
+	{ "Shaders.VolumetricLight.RT", "ExpandedHeight", "Dust layer height", nullptr, "How quickly the dust thins above your head. Lower keeps the "
+		"haze close to the ground and the sky clear; 0 makes the air the same everywhere." },
+	{ "Shaders.VolumetricLight.RT", "ExpandedSunGlow", "Glow round the sun", nullptr, "How much of the light gathers in a tight glow round the "
+		"sun, where the shafts meet. 0: the glow of Volumetric light's Anisotropy alone." },
+	{ "Shaders.VolumetricLight.RT", "ExpandedGlowSharpness", "Glow size", nullptr, "Higher makes the glow round the sun smaller and brighter." },
+	{ "Shaders.VolumetricLight.RT", "ExpandedClouds", "Cloud shadows in the air", nullptr, "The volumetric clouds' shadows also darken the lit "
+		"air, so rays of light fall between the clouds. Needs Volumetric clouds with their shadows on before ray tracing starts." },
 	// Scene and path tracing
 	{ "Main.Main.RayTracing", "Actors", "People in the traced scene", nullptr, "People and creatures cast traced shadows and show up in traced reflections. Costs some frame rate in crowds." },
 	{ "Main.Main.RayTracing", "AlphaTested", "See-through meshes (fences, leaves, grates)", nullptr, "Fences, leaves and grates cast traced shadows with their holes, not as solid blocks." },
@@ -1459,9 +1494,10 @@ static const SimpleRow kSimpleRows[] = {
 		"Balanced: PTRealtime=true PTRealtimeLevel=1 PTStandDownRT=true | Performance: PTRealtime=true PTRealtimeLevel=2 PTStandDownRT=true",
 		"Three ready-made path tracing set-ups. Frame rates are from an RTX-class test card at 1280x720 in three test scenes; yours will differ.\n\n"
 		"Quality: light bounces three times, glowing signs and windows light what is around them, the best lamp sampling. About 20-26 fps.\n\n"
-		"Balanced: two bounces, and most light after the first bounce comes from a coarser stored estimate. Faster; light that has bounced "
+		"Balanced: two bounces, most light after the first bounce comes from a coarser stored estimate, and glowing surfaces are no longer "
+		"sampled as lights (their glow still arrives through the bounces). Faster; light that has bounced "
 		"twice or more is a little blurrier.\n\n"
-		"Performance: one bounce (the rest is estimated), glowing surfaces are no longer sampled as lights (more grain next to neon, corners a "
+		"Performance: one bounce (the rest is estimated; more grain next to neon, corners a "
 		"little darker) and lamps are sampled the simple way (more grain in rooms with many lamps). About 40-77 fps; no loss was seen in the "
 		"day, night, fire and neon test pictures.\n\n"
 		"All three also pause ray-traced lamp shadows and reflections while path tracing runs, because it draws its own (a few fps more). "
@@ -1738,6 +1774,11 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.BloodFlow.Fluid", nullptr, "Fluid blood detail",
 		"Low: MaxParticles=8192 | Medium: MaxParticles=16384 | High: MaxParticles=65536",
 		"How much liquid blood can exist at once. More looks fuller and costs more frame rate and memory." },
+	// Blood (Surface), UNOFFICIAL 2026-11-12
+	{ "Shaders.BloodFlow.Surface", "Enabled", "Blood lies on the ground (simulated)", nullptr, "Blood is simulated as a thin liquid on the ground it lies on: it runs into cracks and round stones, pools in hollows, and takes the light that is there. Replaces the drawn pools and streams." },
+	{ "Shaders.BloodFlow.Surface", "PoolAmount", "Amount of blood (bodies)", nullptr, "How much blood a body loses." },
+	{ "Shaders.BloodFlow.Surface", "SplatAmount", "Amount of blood (splats)", nullptr, "How much blood a fresh splat lays down." },
+	{ "Shaders.BloodFlow.Surface", "Viscosity", "Blood thickness", nullptr, "Higher gives thicker blood that creeps. Lower gives thin blood that runs fast and far." },
 	// Blood on weapon and hands (Main)
 	{ "Shaders.HandBlood.Main", "PerHit", "Blood on weapon and hands", nullptr, "Fresh blood nearby splashes onto your weapon and gloves. Higher gets you bloodier faster." },
 	{ "Shaders.HandBlood.Main", "Reach", "Distance blood reaches you", nullptr, "How close fresh blood must be to get on you. Small means point blank only." },
@@ -2803,6 +2844,33 @@ static bool IsDevOnlySetting(const std::string& section, const std::string& key)
 	return NewListMatches(list, section, key);
 }
 
+// UNOFFICIAL 2026-11-12 menu levels: [Main.Menu.Developer] Internal (defaults file only, the DevOnly format): settings the menu never
+// shows, not even with Developer options: the on/off switches of bug fixes, test and Old* comparison keys, debug views and
+// self-checks, capture / compile / cache plumbing. With Developer options on, people flipped them at random and the results came
+// back as bug reports. They keep their saved values and work from the settings file. [Main.Menu.Developer] ShowInternal = true,
+// typed into the user's own file (never a row), shows them again under Developer options. An empty key asks about a whole section.
+static bool IsInternalSetting(const std::string& section, const std::string& key) {
+	static std::vector<std::string> list;
+	static UInt32 generation = 0xFFFFFFFFu;
+	if (generation != TheSettingManager->Config.DefaultsGeneration) {	// the defaults were read again ("Disk")
+		generation = TheSettingManager->Config.DefaultsGeneration;
+		list.clear();
+		NewSplitList(MenuMeta("Developer", "Internal"), list);
+	}
+	return NewListMatches(list, section, key);
+}
+
+// UNOFFICIAL 2026-11-12: the level the menu gives a setting, for the session log and the reset below (description: the default's
+// first comment, as ConfigNode::Description). 0 = a player's setting, 1 = Developer options (IsTestSetting's rules), 2 = Internal.
+int ImGuiManager::SettingLevel(const char* section, const char* key, const char* description) {
+	if (!TheSettingManager || !section || !key) return 0;
+	if (IsInternalSetting(section, key)) return 2;
+	if (SimpleLabel(section, key)) return 0;	// a row of a simple view: every player sees it, whatever the test rules make of its comment (PTRealtime)
+	static const std::vector<std::string> none;
+	if (IsDeadSetting(section, key) || NewIsDiagnostic(key, description ? description : "", none, section) || IsDevOnlySetting(section, key)) return 1;
+	return 0;
+}
+
 // The latest YYYY-MM-DD (20xx, month 1-12, day 1-31, not part of a longer number) in the text, or "" if none.
 static std::string NewLatestDate(const std::string& s) {
 	std::string best;
@@ -2859,6 +2927,7 @@ static void NewWalk(const tomlValue& table, const std::string& path, NewWalkCont
 		const bool status = NewEndsWith(path, ".Status");
 		if (status && !(path.compare(0, 8, "Shaders.") == 0 && name == "Enabled")) continue;	// Status sections are hidden in the menu; only a shader's own switch has a place
 		if (ShouldHideKey(name.c_str())) continue;
+		if (IsInternalSetting(path, name)) continue;	// UNOFFICIAL 2026-11-12: never in this tab (with ShowInternal: on its own page and in the search)
 
 		std::string description;
 		for (const std::string& c : value.comments()) { description += c; description += ' '; }
@@ -3070,6 +3139,7 @@ static std::vector<NewEntry>  s_searchResults;
 static std::vector<NewGroup>  s_searchGroups;
 static std::string s_searchQuery;	// the lower-case text the results were built for
 static bool        s_searchTests   = false;	// DevOptionsShown() the results were built with
+static bool        s_searchInternal = false;	// UNOFFICIAL 2026-11-12: gMenu.showInternal the results were built with
 static size_t      s_searchTotal   = 0;	// matches before the cap
 static UInt32      s_searchRevision = 0xFFFFFFFFu;
 static int         s_searchFrames   = 0;
@@ -3112,6 +3182,7 @@ static void SearchIndexSection(const std::string& path, const std::string& name,
 static void SearchRebuild(const std::string& query) {
 	s_searchQuery = query;
 	s_searchTests = DevOptionsShown();
+	s_searchInternal = gMenu.showInternal;
 	s_searchResults.clear();
 	s_searchGroups.clear();
 	s_searchTotal = 0;
@@ -3129,6 +3200,7 @@ static void SearchRebuild(const std::string& query) {
 		bool all = true;
 		for (const std::string& w : words) if (k.Haystack.find(w) == std::string::npos) { all = false; break; }
 		if (!all) continue;
+		if (InternalHidden(k.Section, k.Key)) continue;	// UNOFFICIAL 2026-11-12: not found by the search either
 		NewEntry e;
 		e.Section = k.Section;
 		e.Key = k.Key;
@@ -3157,7 +3229,7 @@ static void SearchEnsure() {
 		for (const std::string& root : roots)
 			if (root != "Weathers") SearchIndexSection(root, root, false);
 	}
-	if (query != s_searchQuery || s_searchTests != DevOptionsShown()) SearchRebuild(query);
+	if (query != s_searchQuery || s_searchTests != DevOptionsShown() || s_searchInternal != gMenu.showInternal) SearchRebuild(query);
 	else if (s_searchRevision != TheSettingManager->SettingsRevision || ++s_searchFrames >= 30) {
 		s_searchFrames = 0;
 		s_searchRevision = TheSettingManager->SettingsRevision;
@@ -3567,6 +3639,14 @@ static const MenuGroup kMenuGroups[] = {
 	{ "Shaders.BloodFlow.Fluid", "Test tools", "OldThrow, OldColour, DebugView, TestThrow, TestPour, StatsEvery",
 		FogType::None, false, nullptr, nullptr },
 
+	// Shaders.BloodFlow.Surface (UNOFFICIAL 2026-11-12)
+	{ "Shaders.BloodFlow.Surface", "How the blood flows", "SplatAmount, PoolAmount, BleedTime, FlowTime, Viscosity, Roughness",
+		FogType::None, true, "How much blood there is, how long it keeps moving and how thick it is.", nullptr },
+	{ "Shaders.BloodFlow.Surface", "Limits and light", "Lifetime, MaxPatches, UseAlbedo",
+		FogType::None, false, "How long blood stays, how many pools are kept, and where its light comes from.", nullptr },
+	{ "Shaders.BloodFlow.Surface", "Test tools", "DebugView, TestPour",
+		FogType::None, false, nullptr, nullptr },
+
 	// Shaders.AmbientOcclusion.RT
 	{ "Shaders.AmbientOcclusion.RT", "Sky visibility", "Sky, SkyRays, SkyDistance",
 		FogType::None, false, "How much of the sky each spot sees, from rays instead of a top-down map.", nullptr },
@@ -3830,6 +3910,73 @@ static void RenderShaderHeaderSwitch(const std::string& shaderName) {
 	ImGui::EndDisabled();
 }
 
+// ---- Path tracing notes (UNOFFICIAL 2026-11-12, core/PtApplies.h) ----------------------------------------------------------
+// A tester: with path tracing on "a whole swath of shaders and settings do not appear to work". While the path traced picture
+// replaces the scene, the menu says what each effect does meanwhile, from one table: a line at the top of the effect's pages
+// (DrawPtNote), a short tag beside its name in the effects list (DrawPtTag) and the whole table on the Ray tracing page
+// (DrawPtOverview). View > Path tracing notes ([Main.Menu.Developer] PathTracingNotes) hides them; path tracing off: nothing shows.
+static bool PtNotesOn() { return gMenu.ptNotes && RtPathTrace::Replacing(); }
+
+// name: an effect's entry ("Bloom") or a page's section ("Shaders.Bloom.Main")
+static void DrawPtNote(const std::string& name) {
+	if (!PtNotesOn()) return;
+	const PtApplies::Row* row = PtApplies::Find(name);
+	if (!row) return;
+	const PtApplies::Now now = PtApplies::Resolve(*row);
+	ImGui::PushTextWrapPos(0.0f);
+	if (now.St == PtApplies::Applies) ImGui::TextDisabled("Path tracing is on. %s", now.Line);
+	else ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Path tracing is on. %s", now.Line);
+	ImGui::PopTextWrapPos();
+	ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.5f));
+}
+
+static void DrawPtTag(const std::string& effect) {
+	if (!PtNotesOn()) return;
+	const PtApplies::Row* row = PtApplies::Find(effect);
+	if (!row) return;
+	const PtApplies::Now now = PtApplies::Resolve(*row);
+	if (now.St == PtApplies::Applies) return;	// works as always: no tag
+	ImGui::SameLine();
+	ImGui::TextDisabled("%s", PtApplies::kTags[now.St]);
+	if (ImGui::IsItemHovered()) WrappedTooltip(now.Line);
+}
+
+// The Ray tracing page's block: every row of the table by state. Shown while path tracing is switched on or replaces the scene.
+static void DrawPtOverview() {
+	if (!gMenu.ptNotes || !(RtPathTrace::Replacing() || TheSettingManager->GetSettingI("Main.Main.RayTracing", "PTRealtime") != 0)) return;
+	if (!MenuWidgets::SubHeader("What still applies with path tracing###ptapplies", false)) return;
+	ImGui::PushTextWrapPos(0.0f);
+	ImGui::TextDisabled("What each effect does while the path traced picture replaces the scene. Its own page says the same at the top.");
+	static const PtApplies::State kOrder[] = { PtApplies::Replaced, PtApplies::Off, PtApplies::Missing, PtApplies::Twice, PtApplies::Partly,
+		PtApplies::Feeds, PtApplies::Applies };
+	for (const PtApplies::State state : kOrder) {
+		bool headed = false;
+		auto line = [&](const std::string& text) {
+			if (!headed) {
+				headed = true;
+				ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.5f));
+				ImGui::PushStyleColor(ImGuiCol_Text, MenuSkin::Heading(0.25f));
+				ImGui::TextUnformatted(PtApplies::kHeads[state]);
+				ImGui::PopStyleColor();
+			}
+			ImGui::Bullet();
+			ImGui::SameLine();
+			ImGui::TextUnformatted(text.c_str());
+		};
+		for (const PtApplies::Row& r : PtApplies::kRows) {
+			const PtApplies::Now now = PtApplies::Resolve(r);
+			if (now.St == state) line((r.Label ? std::string(r.Label) : ShownText(MenuEntryLabel(r.Name))) + ": " + now.Line);
+		}
+		if (state == PtApplies::Applies) {
+			std::string names;
+			PtApplies::EachName(PtApplies::kOnTop, [&](const std::string& n) { names += (names.empty() ? "" : ", ") + ShownText(MenuEntryLabel(n)); });
+			line("Everything drawn on the finished picture: " + names + ".");
+		}
+	}
+	ImGui::PopTextWrapPos();
+	ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y));
+}
+
 // A page's title area: the shader's (or the section's) name, large, the shader's switch at the right, and the section's full
 // path as a dim line under it.
 static void RenderPageHeader(const std::string& section) {
@@ -3845,6 +3992,7 @@ static void RenderPageHeader(const std::string& section) {
 	ImGui::TextDisabled("%s", path.c_str());
 	ImGui::Separator();
 	ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.5f));
+	DrawPtNote(section);	// UNOFFICIAL 2026-11-12: what this effect does while path tracing replaces the scene (nothing otherwise)
 }
 
 // ---- The LUT page --------------------------------------------------------------------------------------------------------
@@ -3945,7 +4093,7 @@ static void PageOrder(SettingManager::Configuration::SettingList& settings) {
 // What the page needs to know about one of its settings. Worked out once per frame (see RenderSettingsList).
 struct PageEntry {
 	const MenuGroup* group;	// the menu group it is drawn under, or nullptr for the ungrouped part
-	bool             hidden;	// never drawn as a row (ShouldHideKey)
+	bool             hidden;	// never drawn as a row (ShouldHideKey; 2026-11-12: an Internal setting, InternalHidden)
 	bool             test;	// a test/developer setting (IsTestSetting)
 };
 
@@ -3968,6 +4116,7 @@ static void RenderSimpleList(SettingManager::Configuration::SettingList& setting
 		}
 		for (size_t i = 0; i < settings.size(); i++) {
 			if (strcmp(settings[i].Key, r.Key)) continue;
+			if (InternalHidden(settings[i].Section, settings[i].Key)) continue;	// UNOFFICIAL 2026-11-12: not in a simple view either
 			// A colour (its R key listed): the page's colour wheel for R, G and B, under the plain name
 			const std::string key(r.Key), prefix = key.substr(0, key.size() - 1);
 			SettingManager::Configuration::ConfigNode *g = nullptr, *b = nullptr;
@@ -3999,7 +4148,7 @@ static void RenderSettingsList(SettingManager::Configuration::SettingList& setti
 	std::vector<PageEntry> facts;
 	facts.reserve(settings.size());
 	for (const auto& s : settings)
-		facts.push_back({ FindMenuGroup(gMenu.page, s.Key), ShouldHideKey(s.Key), IsTestSetting(s) });
+		facts.push_back({ FindMenuGroup(gMenu.page, s.Key), ShouldHideKey(s.Key) || InternalHidden(s.Section, s.Key), IsTestSetting(s) });	// (2026-11-12: Internal)
 
 	// Where each key is in the list, to find the R/G/B siblings of a colour triple
 	std::unordered_map<std::string, size_t> position;
@@ -4145,8 +4294,9 @@ static const RtSection kRtSections[] = {
 		"Traced occlusion in place of the screen estimate, and with GI one bounce of light (more with RadianceCache)." },
 	{ "Shaders.Reflections.RT", "Reflections", "Rays for what the screen-space reflections miss: things off screen or hidden. Needs Reflections on." },
 	// UNOFFICIAL 2026-11-07 (ptaaa-fog)
-	{ "Shaders.VolumetricLight.RT", "Light shafts and fog", "The sun's shadow in the air (the light shafts and the fog's sunlight) traced with the same scene as the other "
-		"ray-traced effects. It uses ray tracing only while another ray-traced effect is on." },
+	{ "Shaders.VolumetricLight.RT", "Light shafts and fog", "Outdoors only: the sun's shadow in the air (the light shafts and the fog's sunlight) traced with the same scene as "
+		"the other ray-traced effects. It uses ray tracing only while another ray-traced effect is on, and changes only where the shafts' shadows fall: "
+		"their strength is Volumetric light's. Indoors the shafts are Volumetric fog's lamp haze (LampHazeEnabled, LampHazeShadows)." },
 	{ "Main.Main.RayTracing", "Scene and path tracing", "What goes into the traced scene (people, plants, see-through meshes, far distance), and the path tracer." },
 };
 
@@ -4188,6 +4338,12 @@ static RtStatusLine RtLampLine() {
 	if (!RtOn(s, "Live")) return { RtState::Off, "Live is off: the cube maps again (A/B)", detail };
 	if (!RtCore::Running()) return { RtState::Blocked, "on, but the ray tracing core is not running (first line)", detail };
 	if (TheShaderManager->GameState.isExterior && !RtOn(s, "Exteriors")) return { RtState::Off, "outdoors: traced indoors only (Exteriors off; needs a restart)", detail };
+	// UNOFFICIAL 2026-11-13 (a tester on an RTX card: "RT lamp shadows = no worky"): with path tracing on these are not traced at all
+	// (RtLampShadows::Wants, PTStandDownRT, which every path tracing preset sets), and this line still said "running".
+	if (RtPathTrace::StandDownRT())
+		return { RtState::Blocked, "not traced while path tracing is on: the path tracer has its own lamp shadows (PTStandDownRT). Switch path tracing off to see these", detail };
+	if (RtPathTrace::Replacing())
+		return { RtState::Blocked, "traced, but path tracing is on: they show only on what stays the game's own picture (PTStandDownRT is off)", detail };
 	return { RtState::Running, "running", detail };
 }
 
@@ -4207,7 +4363,13 @@ static RtStatusLine RtAOLine() {
 	if (!aoRuns && !alUses)
 		return { RtState::Blocked, std::string("on, but nothing uses it here: Ambient occlusion is off ") + (exterior ? "outdoors (Exteriors" : "indoors (Interiors") +
 			" Enabled) and Ambient light " + (RtComputeGIInWay() ? "has ComputeGI on" : "is off"), detail };
+	// UNOFFICIAL 2026-11-13: Ambient occlusion and Ambient light step aside while the path traced picture replaces the scene
+	if (RtPathTrace::Replacing())
+		return { RtState::Blocked, "not shown while path tracing is on: the path tracer shades corners itself. Switch path tracing off to see it", detail };
 	if (RtComputeGIInWay()) return { RtState::Blocked, "running, but Ambient light ignores it while its ComputeGI is on (only Ambient occlusion uses it)", detail };
+	// UNOFFICIAL 2026-11-13: Ambient light's D3D9 passes (NvrDxvkAmbientLight off, the default) take the traced occlusion only with OcclusionOnD3D9
+	if (alUses && !TheSettingManager->SettingsMain.Main.NvrDxvkAmbientLight && !RtOn(s, "OcclusionOnD3D9"))
+		return { RtState::Blocked, "traced, but Ambient light keeps its own screen occlusion (OcclusionOnD3D9 is off): only the bounce light uses the rays", detail };
 	return { RtState::Running, "running", detail };
 }
 
@@ -4219,6 +4381,8 @@ static RtStatusLine RtGILine() {
 	if (!RtCore::Running()) return { RtState::Blocked, "on, but the ray tracing core is not running (first line)", detail };
 	if (!TheSettingManager->GetMenuShaderEnabled("AmbientLight")) return { RtState::Blocked, "on, but Ambient light is off: the bounce light is added there", detail };
 	if (RtComputeGIInWay()) return { RtState::Blocked, "on, but Ambient light's ComputeGI is on: it replaces the RT bounce light", detail };
+	if (RtPathTrace::Replacing())	// UNOFFICIAL 2026-11-13
+		return { RtState::Blocked, "not shown while path tracing is on: the path tracer has its own bounce light. Switch path tracing off to see it", detail };
 	const ShaderConstants& sc = TheShaderManager->ShaderConst;
 	const bool weakSun = TheShaderManager->GameState.isExterior && (sc.SunDir.z <= 0.0f || sc.SunAmount.x < 0.3f);
 	if (weakSun && TheSettingManager->GetSettingF(s, "GIAmbient") <= 0.0f)
@@ -4234,6 +4398,12 @@ static RtStatusLine RtReflectionsLine() {
 	if (!TheSettingManager->GetMenuShaderEnabled("Reflections"))
 		return { RtState::Blocked, "on, but Reflections is off: the rays only fill in what its screen-space reflections miss", detail };
 	if (!RtCore::Running()) return { RtState::Blocked, "on, but the ray tracing core is not running (first line)", detail };
+	// UNOFFICIAL 2026-11-13: with path tracing on the Reflections effect is not drawn (PTReflectionsOff) and its rays are not traced
+	// (PTStandDownRT); every path tracing preset sets both, and this line still said "running"
+	if (RtPathTrace::Replacing() && RtOn("Main.Main.RayTracing", "PTReflectionsOff"))
+		return { RtState::Blocked, "not drawn while path tracing is on: the path tracer has its own reflections (PTReflectionsOff). Switch path tracing off to see these", detail };
+	if (RtPathTrace::StandDownRT())
+		return { RtState::Blocked, "not traced while path tracing is on (PTStandDownRT): Reflections shows its screen-space answer only", detail };
 	const float wet = TheSettingManager->GetSettingF("Shaders.Reflections.Main", "WetRoughness");
 	const float maxRough = TheSettingManager->GetSettingF(s, "MaxRoughness");
 	char t[200];
@@ -4245,6 +4415,14 @@ static RtStatusLine RtReflectionsLine() {
 		return { RtState::Blocked, TheSettingManager->GetSettingF(s, "Weapon") > 0.0f ? "running for the weapon only: nothing else on screen reflects here (dry, GroundSheen 0)" :
 			"on, but nothing on screen reflects here (dry, GroundSheen and InteriorFloors 0): nothing to trace", detail };
 	return { RtState::Running, "running", detail };
+}
+
+// UNOFFICIAL 2026-11-13 (a tester: "rt vol light = no worky"): the traced light shafts had no line here, and they are the RT effect
+// with the most silent ways to do nothing (indoors, no other RT effect on, the sun's shadows faded, the shafts too faint to see).
+static RtStatusLine RtShaftsLine() {
+	std::string text;
+	const int state = RtFogVisibility::MenuState(text);
+	return { state == 1 ? RtState::Running : state == 2 ? RtState::Blocked : RtState::Off, text, RtFogVisibility::StatusText() + "\n" + RtFogLamps::StatusText() };
 }
 
 static RtStatusLine RtPathTraceLine() {
@@ -4314,7 +4492,8 @@ static void DrawRtMasterSwitch() {
 
 // One picker for the RT debug views: picking one sets that DebugView and clears the other three, so only one shows.
 struct RtDebugView { const char* Label; const char* Section; int Value; };
-static const char* const kRtDebugSections[] = { "Shaders.ShadowsExteriors.RT", "Shaders.ShadowsInteriors.RT", "Shaders.AmbientOcclusion.RT", "Shaders.Reflections.RT" };
+static const char* const kRtDebugSections[] = { "Shaders.ShadowsExteriors.RT", "Shaders.ShadowsInteriors.RT", "Shaders.AmbientOcclusion.RT", "Shaders.Reflections.RT",
+	"Shaders.VolumetricLight.RT" };	// (2026-11-13: + the light shafts' A/B)
 static const RtDebugView kRtDebugViews[] = {
 	{ "Off (the normal picture)", nullptr, 0 },
 	{ "Sun shadows: the traced shadow alone", "Shaders.ShadowsExteriors.RT", 1 },
@@ -4326,6 +4505,7 @@ static const RtDebugView kRtDebugViews[] = {
 	{ "Reflections: where each reflection comes from", "Shaders.Reflections.RT", 1 },
 	{ "Reflections: ray hit distance", "Shaders.Reflections.RT", 2 },
 	{ "Reflections: ray tracing alone (screen trace off)", "Shaders.Reflections.RT", 3 },
+	{ "Light shafts: the shadow maps again (traced, not used: an A/B)", "Shaders.VolumetricLight.RT", 1 },	// UNOFFICIAL 2026-11-13
 };
 
 static int RtCurrentDebugView() {	// the picker's entry, -1 when the DebugViews set match none (set by hand)
@@ -4367,10 +4547,12 @@ static void RenderRayTracingPage() {
 		DrawRtStatusLine("Occlusion", RtAOLine());
 		DrawRtStatusLine("Bounce light", RtGILine());
 		DrawRtStatusLine("Reflections", RtReflectionsLine());
+		DrawRtStatusLine("Light shafts", RtShaftsLine());	// UNOFFICIAL 2026-11-13
 		DrawRtStatusLine("Path tracing", RtPathTraceLine());
 		ImGui::TextDisabled("Hover a line for the full state.");
 		ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.5f));
 	}
+	DrawPtOverview();	// UNOFFICIAL 2026-11-12: "What still applies with path tracing" (only while path tracing is on)
 
 	DrawRtMasterSwitch();
 	DrawRtDebugPicker();
@@ -4387,6 +4569,7 @@ static void RenderRayTracingPage() {
 		ImGui::PushTextWrapPos(0.0f);
 		ImGui::TextDisabled("%s", section.Note);
 		ImGui::PopTextWrapPos();
+		DrawPtNote(section.Section);	// UNOFFICIAL 2026-11-12 (nothing while path tracing is off)
 		gMenu.page = section.Section;
 		PageOrder(rows);
 		RenderSettingsList(rows);
@@ -4674,6 +4857,7 @@ static const DebugViewKey kDebugViews[] = {
 	{ "Shaders.HandBlood.Main", "DebugView", "Hand blood" },
 	{ "Shaders.BloodFlow.Main", "DebugView", "Blood flow" },
 	{ "Shaders.BloodFlow.Fluid", "DebugView", "Blood fluid" },
+	{ "Shaders.BloodFlow.Surface", "DebugView", "Blood surface" },
 	{ "Shaders.Skin.Debug", "DebugView", "Skin" },
 	{ "Shaders.SnowAccumulation.Main", "CapturedNormalsDebugView", "Snow normals" },
 	{ "Shaders.Terrain.Blending", "DebugView", "Terrain blending" },
@@ -4905,6 +5089,7 @@ static bool DrawShaderEntryRow(const std::string& path, const std::string& name)
 		ImGui::SameLine();
 		ImGui::TextDisabled("(forced)");
 	}
+	DrawPtTag(name);	// UNOFFICIAL 2026-11-12: "PT: replaced" and the like while path tracing replaces the scene (nothing otherwise)
 	if (TheSettingManager->SettingsMain.Develop.DebugMode) {
 		if (const EffectRecord* effect = TheShaderManager->GetEffectByName(shader)) {
 			const float ms = TheSettingManager->SettingsMain.Main.RenderEffects ? ImMax(effect->renderTime + effect->constantUpdateTime, 0.0f) : 0.0f;
@@ -4960,6 +5145,7 @@ static bool HiddenFromSidebar(const std::string& path, const std::string& name) 
 	// not: FrameRateManager::PerformSync is never called and the Stuttering pair is read by nothing)
 	if (path == "Main.CameraMode" || path == "Main.FlyCam" || path == "Main.Transitions" || path == "Main.FrameRate") return true;
 	if (path == "Main.Main.Precipitations") return true;	// (user: "remove the precipitations menu from main"; the setting stays)
+	if (InternalHidden(path, std::string())) return true;	// UNOFFICIAL 2026-11-12: a "Section.*" Internal entry (the page would be empty)
 	return !DevOptionsShown() && IsDevOnlySetting(path, std::string());	// UNOFFICIAL 2026-10-25: a "Section.*" DevOnly entry
 }
 
@@ -5696,6 +5882,86 @@ static void DrawDiskReloadPopup() {
 	ImGui::EndPopup();
 }
 
+static void SetDeveloperOptions(bool on) {
+	TheSettingManager->SetSetting("Main.Menu.Developer", "DeveloperOptions", on);
+	TheSettingManager->LoadSettings();
+	gMenu.devOptions = on;
+}
+
+// UNOFFICIAL 2026-11-12: View > Developer options, switched on: a plain warning first, once a session (people switched it on,
+// flipped test switches at random and reported the result as bugs). Cancel leaves it off. Advanced has no such box.
+static void DrawDevWarningPopup() {
+	if (gMenu.devWarnAsk) {	// asked from the menu bar: opened here, in the main window's ID scope, where it is drawn
+		ImGui::OpenPopup("Developer options###devwarn");
+		gMenu.devWarnAsk = false;
+	}
+	if (!ImGui::BeginPopupModal("Developer options###devwarn", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+	ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
+	ImGui::TextUnformatted("These are test switches. Changing them can break the picture; reports made with them changed will first be "
+		"asked to reset them.");
+	ImGui::PopTextWrapPos();
+	ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.5f));
+	if (ImGui::Button("Show them")) {
+		gMenu.devWarned = true;
+		SetDeveloperOptions(true);
+		ImGui::CloseCurrentPopup();
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+	ImGui::EndPopup();
+}
+
+// UNOFFICIAL 2026-11-12: View > Reset test and internal settings to defaults. Only the Developer options settings and the Internal
+// ones (ImGuiManager::SettingLevel; the list the session log's "test / internal settings changed" line names) go back to their
+// defaults, after one question; the box then says how many. Like any change it is kept by File > Save.
+static void DrawTestResetPopup() {
+	static std::vector<SessionLog::ChangedSetting> pending;	// what differs, read when the box opens
+	static int done = -1, left = 0;	// how many were reset and how many still differ (the box then says so); -1 while it asks
+	if (gMenu.testResetAsk) {
+		pending = SessionLog::TestSettingsChanged();
+		done = -1;
+		if (!pending.empty()) SessionLog::LogTestSettingsDiff("MENU test / internal settings changed");	// the box names eight; the log all
+		ImGui::OpenPopup("Reset test and internal settings###testreset");
+		gMenu.testResetAsk = false;
+	}
+	if (!ImGui::BeginPopupModal("Reset test and internal settings###testreset", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+	ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+	if (done >= 0) {
+		ImGui::Text("%d setting%s reset to the default. File > Save keeps it; some take effect after a game restart.", done, done == 1 ? " was" : "s were");
+		if (left > 0) ImGui::Text("%d could not be reset (Max Quality holds them, or their type did not match): see the log.", left);
+	}
+	else if (pending.empty())
+		ImGui::TextUnformatted("Every test and internal setting is at its default already: nothing to reset.");
+	else {
+		ImGui::Text("%u test and internal setting%s not at the default. Reset %s? Every other setting stays as it is.", (UInt32)pending.size(),
+			pending.size() == 1 ? " is" : "s are", pending.size() == 1 ? "it" : "them");
+		const size_t named = 8;
+		for (size_t i = 0; i < pending.size() && i < named; i++)
+			ImGui::TextDisabled("%s.%s = %s (default %s)", pending[i].Section.c_str(), pending[i].Key.c_str(), pending[i].Mine.c_str(), pending[i].Default.c_str());
+		if (pending.size() > named) ImGui::TextDisabled("and %u more (the log names them)", (UInt32)(pending.size() - named));
+	}
+	ImGui::PopTextWrapPos();
+	ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.5f));
+	if (done < 0 && !pending.empty()) {
+		if (ImGui::Button("Reset them")) {
+			for (const SessionLog::ChangedSetting& c : pending)
+				TheSettingManager->SetSettingS(c.Section.c_str(), c.Key.c_str(), c.DefaultValue.c_str());
+			TheSettingManager->LoadSettings();
+			SyncShaderSwitches();
+			gMenu.resetWheels = true;
+			left = (int)SessionLog::TestSettingsChanged().size();
+			done = (int)pending.size() - left;
+			Logger::Log("MENU reset test and internal settings: %d put back to their defaults, %d still differ", done, left);
+			if (left > 0) SessionLog::LogTestSettingsDiff("MENU test / internal settings still changed");
+			pending.clear();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+	}
+	else if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
+	ImGui::EndPopup();
+}
+
 // ---- Menu bar ------------------------------------------------------------------------------------------------------------
 
 static const ImVec4 kWarnAmber(1.0f, 0.75f, 0.2f, 1.0f);
@@ -5741,16 +6007,32 @@ static void DrawViewMenu() {
 	// UNOFFICIAL 2026-10-25 menu tidy: one switch (off by default) for what a player does not need: test and fault-finding
 	// switches, the fixes and same-picture speed-ups that are on by default, A/B paths, measuring hooks ([Main.Menu.Developer]
 	// DevOnly), the step size and -/+ buttons and Retro-Encab. Hidden only: hidden settings keep their saved values.
+	// UNOFFICIAL 2026-11-12: the fixes, speed-ups, test keys and debug views moved on to [Main.Menu.Developer] Internal, which this
+	// switch does not show (IsInternalSetting); it now shows experimental features and the options a tester may be asked to flip.
 	if (ImGui::MenuItem("Developer options", nullptr, gMenu.devOptions)) {
 		const bool on = !gMenu.devOptions;
-		TheSettingManager->SetSetting("Main.Menu.Developer", "DeveloperOptions", on);
-		TheSettingManager->LoadSettings();
-		gMenu.devOptions = on;
+		if (on && !gMenu.devWarned) gMenu.devWarnAsk = true;	// UNOFFICIAL 2026-11-12: its warning first, once a session (DrawDevWarningPopup)
+		else SetDeveloperOptions(on);
 	}
 	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("Also show what players should not need to touch: test and fault-finding switches, the bug fixes and\n"
-			"speed-ups that are on by default, A/B test paths, measuring tools, options that change almost nothing,\n"
-			"and the step size and - / + buttons. Hidden settings keep working with their saved values.");
+		ImGui::SetTooltip("Also show test switches a player should not need to touch: experimental features that are off by\n"
+			"default, options to try while a fault is looked into, tuning that changes almost nothing, and the step\n"
+			"size and - / + buttons. Hidden settings keep working with their saved values.");
+	// UNOFFICIAL 2026-11-12: always here, Developer options on or off: it also resets the Internal settings, which are never shown
+	if (ImGui::MenuItem("Reset test and internal settings to defaults...")) gMenu.testResetAsk = true;
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Puts every Developer options setting, and every internal setting the menu never shows, back to its\n"
+			"default. Your other settings stay. It asks first and says how many it reset.");
+	// UNOFFICIAL 2026-11-12 (core/PtApplies.h): the notes that say what each effect does while path tracing replaces the scene
+	if (ImGui::MenuItem("Path tracing notes", nullptr, gMenu.ptNotes)) {
+		gMenu.ptNotes = !gMenu.ptNotes;
+		TheSettingManager->SetSetting("Main.Menu.Developer", "PathTracingNotes", gMenu.ptNotes);
+		TheSettingManager->LoadSettings();
+	}
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("While path tracing replaces the scene, say what each effect still does: a line at the top of its\n"
+			"page, a tag beside its name in the effects list, and the whole list on the Ray tracing page.\n"
+			"Nothing shows while path tracing is off.");
 	if (DevOptionsShown() && ImGui::BeginMenu("Step size")) {	// what +/- and the -/+ buttons add
 		static const float kSteps[] = { 0.001f, 0.01f, 0.1f, 1.0f };
 		static const char* const kStepNames[] = { "0.001", "0.01", "0.1", "1.0" };
@@ -6057,6 +6339,8 @@ static void DrawMenuFrame() {
 
 	gMenu.devOptions = TheSettingManager->GetSettingI("Main.Menu.Developer", "DeveloperOptions") != 0;	// UNOFFICIAL 2026-10-25
 	gMenu.advanced = TheSettingManager->GetSettingI("Main.Menu.Developer", "AdvancedSettings") != 0;	// 2026-11-05
+	gMenu.showInternal = TheSettingManager->GetSettingI("Main.Menu.Developer", "ShowInternal") != 0;	// UNOFFICIAL 2026-11-12 (the file's key)
+	gMenu.ptNotes = TheSettingManager->GetSettingI("Main.Menu.Developer", "PathTracingNotes") != 0;	// UNOFFICIAL 2026-11-12 (View > Path tracing notes)
 	MenuTools::FrameUpdate();
 	if (MenuTools::ScreenshotMode) return;
 	PixelInspector::DrawUI();	// UNOFFICIAL 2026-10-26: [Main.Develop.PixelInspector] / shader counters window (only while one is on)
@@ -6075,6 +6359,8 @@ static void DrawMenuFrame() {
 		DrawStatusBar();
 		DrawDiskReloadPopup();
 		DrawConflictPopup();	// 2026-11-05
+		DrawDevWarningPopup();	// UNOFFICIAL 2026-11-12
+		DrawTestResetPopup();	// UNOFFICIAL 2026-11-12
 	}
 	ImGui::End();
 	if (!keepOpen) {

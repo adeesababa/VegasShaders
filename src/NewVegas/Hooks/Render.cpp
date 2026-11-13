@@ -43,6 +43,7 @@
 #include "../../core/DeferredLamps.h"	// UNOFFICIAL 2026-10-31 DeferredLamps: the lamps of the deferred pixels in one pass
 #include "../../core/FlashlightDeferred.h"	// UNOFFICIAL 2026-11-04 the flashlight as a real spot light on the G-buffer
 #include "../../core/FlashlightLamp.h"	// UNOFFICIAL 2026-11-04 and as a real game lamp for what the G-buffer does not hold
+#include "../../core/GameShaderPairs.h"	// UNOFFICIAL 2026-11-13 GameShaderPairCheck / GameShaderPairRepair: a pixel shader drawn with a vertex shader that does not feed it
 #include "../../core/EnvLightFade.h"	// UNOFFICIAL 2026-11-04 the env-map light fade per pixel
 #include "../../core/ObjectMotion.h"	// UNOFFICIAL 2026-10-29 ObjectMotion: what moved, noted as the main list draws it
 #include "../../core/FoldHighlights.h"	// UNOFFICIAL 2026-10-21 FoldHighlights: several-pass objects draw their highlights with their lamps' light
@@ -57,6 +58,7 @@ void HdrOutputNoteDesktop() { HdrOutput::NoteDesktop(); }	// UNOFFICIAL 2026-10-
 #include "../../core/ReflMaterial.h"	// UNOFFICIAL 2026-10-20 MaterialAware reflections
 #include "../../core/RtHairTint.h"	// UNOFFICIAL 2026-11-07 perf-mirrorfix: the hair's tint for the RT scene
 #include "../../core/AlphaHash.h"	// UNOFFICIAL 2026-11-03 SmoothCutouts
+#include "../../core/NpcCharacterMaps.h"	// UNOFFICIAL 2026-11-08 CharacterShadowMapNpcs: an NPC's draws get its own character map
 #include "../../core/CharacterObjectReach.h"	// UNOFFICIAL 2026-10-23 CharacterObjectReach: head/face/headgear object draws flagged (c204)
 #include "../../core/DustDraw.h"	// 2026-11-04 dust on top surfaces: static world draws flagged (b14)
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-26: DXVK PROFILE lines (F10 profiling on NVR DXVK 1.5)
@@ -443,6 +445,9 @@ namespace ShaderSplit {
 		if (Depth < 8) { SavedContext[Depth] = CurrentContext; SavedKey[Depth] = CurrentKey; RecSaved[Depth] = RecKey; }
 		Depth++;
 		CurrentContext = context;
+		// UNOFFICIAL 2026-11-12 HairAndEyes (core/FlashlightDeferred.h): the flashlight's beam for the hair and eye shaders belongs to one
+		// world pass, from its main list's start: a new world pass starts without it, a pass nested in it never sees it
+		if (context == World) FlashlightDeferred::BeamNewScene(); else FlashlightDeferred::BeamShow(false);
 		// (ExtraCamera has no timeline keys: KeyOf would run past them. Its GPU time is the "Scope scene" timer's.)
 		CurrentKey = Timeline.InFrame() && context < ContextCount ? KeyOf(context, 0, false) : GpuTimeline::NoKey;
 		Timeline.Mark(CurrentKey);
@@ -453,6 +458,7 @@ namespace ShaderSplit {
 		if (!Depth) return;
 		Depth--;
 		CurrentContext = Depth < 8 ? SavedContext[Depth] : (unsigned char)Outside;
+		FlashlightDeferred::BeamShow(CurrentContext == World);	// UNOFFICIAL 2026-11-12 HairAndEyes: back in the world's pass, or out of it
 		CurrentKey = Depth < 8 ? SavedKey[Depth] : GpuTimeline::NoKey;
 		Timeline.Mark(CurrentKey);
 		RecMark(Depth < 8 ? RecSaved[Depth] : GpuTimeline::NoKey);
@@ -1706,6 +1712,19 @@ namespace BarrelHeat {
 	}
 }
 
+// UNOFFICIAL 2026-11-12 lookup caps: the per-texture lookups below (MaterialRulesDraw, RmaosDraw) were only ever added to, one entry for
+// every texture address the session met. At the cap the lookup is emptied (as PlantWind's is): a texture still in use is looked up again
+// at its next draw. If it fills again within 600 frames the place really uses that many textures: the cap doubles, so that it is not
+// emptied every frame. True: emptied (the caller's iterators into it are dead).
+template <typename Lookup> static bool CapTextureLookup(Lookup& lookup, size_t& cap, unsigned& clearedFrame) {
+	if (lookup.size() < cap) return false;
+	const unsigned frame = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
+	if (clearedFrame != ~0u && frame - clearedFrame < 600 && cap < 65536) cap *= 2;
+	clearedFrame = frame;
+	lookup.clear();
+	return true;
+}
+
 // UNOFFICIAL material rules ([Shaders.PBR.MaterialRules], core/MaterialRules.h, Object.hlsl): before each object, the class of
 // its diffuse texture (from VegasShaders.materials.txt next to the DLL, read once) goes to pixel c197-c199. Resolved
 // once per texture and kept by the texture's address (with its path, as a freed texture's address can be reused). Only the
@@ -1716,6 +1735,8 @@ namespace MaterialRulesDraw {
 	static bool Loaded = false;
 	struct Entry { std::string Path; int Rule; unsigned Frame = ~0u; };	// Frame: UNOFFICIAL 2026-11-04, the frame its path was last compared in
 	static std::unordered_map<const NiSourceTexture*, Entry> ByTexture;
+	static size_t ByTextureCap = 4096;	// UNOFFICIAL 2026-11-12: ByTexture is bounded (CapTextureLookup above)
+	static unsigned ByTextureCleared = ~0u;
 	static float Current[12] = {};
 	static bool Active = false;		// Current holds a rule's values (sent; resent after each bind)
 
@@ -1749,6 +1770,7 @@ namespace MaterialRulesDraw {
 		if (known != ByTexture.end() && known->second.Frame == frame) return known->second.Rule;
 		if (known != ByTexture.end() && known->second.Path == diffuse->ddsPath1) { known->second.Frame = frame; return known->second.Rule; }
 		const int rule = Table.Match(MaterialRules::Normalize(diffuse->ddsPath1));
+		CapTextureLookup(ByTexture, ByTextureCap, ByTextureCleared);	// UNOFFICIAL 2026-11-12: was insert-only (known is not used past here)
 		ByTexture[diffuse] = { std::string(diffuse->ddsPath1), rule, frame };
 		if (log && rule) Logger::Log("[MaterialRules] %s -> %s", diffuse->ddsPath1, Table.Get(rule).Name.c_str());
 		return rule;
@@ -1825,17 +1847,42 @@ const char* RtMaterialClassOf(NiGeometry* geometry) {
 // is bound on texture stage 2, and pixel c220 tells the object shader whether it has one. Loose files only (not BSAs). Each
 // diffuse path is looked up once; the files are read on a worker thread and made into textures a few per frame, so a new
 // area's maps arrive over a few frames instead of stalling one (until then those objects draw as they did). The textures are
-// kept (GPU memory only, D3DPOOL_DEFAULT, so nothing of them sits in the game's 4 GB) for the rest of the session.
+// D3DPOOL_DEFAULT (no system-memory copy).
+// UNOFFICIAL 2026-11-12 BudgetMB / KeepSeconds (memory growth): the textures were kept for the rest of the session, on the idea that
+// nothing of them sits in the game's 4 GB. They do take its address space (a log: 2983 -> 3209 MB in nine minutes outdoors, the D3D9
+// texture memory left 470 -> 0 MB; an install can hold 5 GB of these maps), and the game freezes in its own out-of-memory routine
+// above 3.2 GB. Now a working set: over BudgetMB, the maps not drawn for KeepSeconds are released, the longest unseen first (Trim).
+// A released map loads again through the same queue when a draw needs it. BudgetMB 0 = no limit, as before.
 namespace RmaosDraw {
+	// (Queued: a read of its file is on its way, from the draw that asked to the frame its texture is made or fails. Bytes, LastDrawMs,
+	// LastSeenMs: UNOFFICIAL 2026-11-12, the texture's size over all mip levels, when a draw last used it (BudgetClockMs) and when a
+	// draw last asked for this path at all (FrameNowMs))
 	struct Map { std::string File; IDirect3DTexture9* Texture = nullptr; bool Missing = false; bool Queued = false; double ArrivedMs = 0.0;
-		float ReflRough = -1.0f; unsigned ReflGeneration = 0; };	// UNOFFICIAL 2026-10-21 RoughnessOverrides (core/ReflMaterial.h), cached per map
+		float ReflRough = -1.0f; unsigned ReflGeneration = 0;	// UNOFFICIAL 2026-10-21 RoughnessOverrides (core/ReflMaterial.h), cached per map
+		unsigned long long Bytes = 0; double LastDrawMs = 0.0, LastSeenMs = 0.0; };
 	static std::unordered_map<std::string, Map> ByPath;			// normalised diffuse path -> its map
 	struct Entry { std::string Path; Map* Found; };
 	static std::unordered_map<const NiSourceTexture*, Entry> ByTexture;
+	static size_t ByTextureCap = 4096;	// UNOFFICIAL 2026-11-12: ByTexture is bounded (CapTextureLookup above; Forget)
+	static unsigned ByTextureCleared = ~0u;
 	struct Job { Map* Target; std::string File; std::vector<char> Bytes; };
 	static std::mutex Lock;
 	static std::condition_variable Wake;
 	static std::deque<Job> ToRead, Read;
+	// UNOFFICIAL 2026-11-12: the worker read whole files into the heap as fast as the disk gave them while the render thread makes two
+	// textures a frame, so after arriving somewhere new Read held a few hundred MB of file bytes for seconds. Now it waits while Read
+	// holds this many (Upload wakes it after each one it takes).
+	static const size_t kReadAhead = 4;
+	// UNOFFICIAL 2026-11-12 BudgetMB / KeepSeconds: the loaded maps, their bytes, and the state of the releasing (Trim)
+	static std::vector<Map*> Held;				// every map with a texture (ByPath's nodes do not move)
+	static unsigned long long HeldBytes = 0;
+	static double BudgetClockMs = 0.0;			// runs only after frames in which a map was drawn: a pause, a menu or a loading screen ages nothing
+	static unsigned BudgetDraws = 0;			// draws with a map since Upload
+	static int BudgetMB = 512;					// [Shaders.PBR.Rmaos] BudgetMB (0 = no limit), read once a second
+	static float KeepSeconds = 30.0f;			// [Shaders.PBR.Rmaos] KeepSeconds
+	static bool Trimming = false, ToldBudget = false, ToldAllInUse = false;
+	static double SettingsAtMs = -1.0e30, ScanAtMs = 0.0, CountAtMs = 0.0;
+	static unsigned long long Released = 0, ReleasedTold = 0, ReleasedBytes = 0;
 	static bool WorkerStarted = false, Checked = false, Compiled = false;
 	static float Current[4] = { -1.0f, 0.0f, 0.0f, 0.0f };	// c220 as last sent this frame
 	static bool ThisDraw = false;	// UNOFFICIAL 2026-10-20: the object being drawn has its map on (MaterialAware reflections, core/ReflMaterial.h)
@@ -1861,7 +1908,7 @@ namespace RmaosDraw {
 			Job job;
 			{
 				std::unique_lock<std::mutex> hold(Lock);
-				Wake.wait(hold, [] { return !ToRead.empty(); });
+				Wake.wait(hold, [] { return !ToRead.empty() && Read.size() < kReadAhead; });	// UNOFFICIAL 2026-11-12: no reading ahead of the uploads (kReadAhead)
 				job = std::move(ToRead.front());
 				ToRead.pop_front();
 			}
@@ -1902,6 +1949,151 @@ namespace RmaosDraw {
 		return &map;
 	}
 
+	// UNOFFICIAL 2026-11-12: ByTexture at its cap is emptied; then nothing points into ByPath but Held (maps with a texture) and a read
+	// on its way (Queued), so the other paths that no draw asked for in ten minutes go too, once ByPath holds 16384. A path that comes
+	// back is looked up on disk again. Called before Find, never with a Map* in hand.
+	static void Forget() {
+		if (!CapTextureLookup(ByTexture, ByTextureCap, ByTextureCleared) || ByPath.size() < 16384) return;
+		for (auto entry = ByPath.begin(); entry != ByPath.end();) {
+			const Map& map = entry->second;
+			if (!map.Texture && !map.Queued && FrameNowMs - map.LastSeenMs > 600000.0) entry = ByPath.erase(entry); else ++entry;
+		}
+	}
+
+	// UNOFFICIAL 2026-11-12 BudgetMB: a texture's size in bytes over all its mip levels, from its level descriptions.
+	static unsigned long long BytesOf(IDirect3DTexture9* texture) {
+		unsigned long long bytes = 0;
+		const DWORD levels = texture->GetLevelCount();
+		for (DWORD level = 0; level < levels; level++) {
+			D3DSURFACE_DESC d = {};
+			if (FAILED(texture->GetLevelDesc(level, &d))) continue;
+			const unsigned long long blocks = (unsigned long long)((d.Width + 3) / 4) * ((d.Height + 3) / 4);
+			const unsigned long long pixels = (unsigned long long)d.Width * d.Height;
+			switch ((DWORD)d.Format) {
+			case D3DFMT_DXT1: case MAKEFOURCC('A', 'T', 'I', '1'): bytes += blocks * 8; break;
+			case D3DFMT_DXT2: case D3DFMT_DXT3: case D3DFMT_DXT4: case D3DFMT_DXT5: case MAKEFOURCC('A', 'T', 'I', '2'): bytes += blocks * 16; break;
+			case D3DFMT_A8: case D3DFMT_L8: case D3DFMT_P8: case D3DFMT_A4L4: case D3DFMT_R3G3B2: bytes += pixels; break;
+			case D3DFMT_R5G6B5: case D3DFMT_X1R5G5B5: case D3DFMT_A1R5G5B5: case D3DFMT_A4R4G4B4: case D3DFMT_X4R4G4B4: case D3DFMT_A8L8:
+			case D3DFMT_A8R3G3B2: case D3DFMT_A8P8: case D3DFMT_L16: case D3DFMT_V8U8: case D3DFMT_R16F: bytes += pixels * 2; break;
+			case D3DFMT_R8G8B8: bytes += pixels * 3; break;
+			case D3DFMT_A16B16G16R16: case D3DFMT_A16B16G16R16F: case D3DFMT_Q16W16V16U16: case D3DFMT_G32R32F: bytes += pixels * 8; break;
+			case D3DFMT_A32B32G32R32F: bytes += pixels * 16; break;
+			default: bytes += pixels * 4; break;	// the 32-bit formats
+			}
+		}
+		return bytes;
+	}
+
+	// UNOFFICIAL 2026-11-12 BudgetMB: what the device has on its 16 pixel texture stages, read once before a frame's releases. Addresses
+	// to compare only: the reference GetTexture takes is given back at once (a map's own reference keeps it alive until Drop).
+	struct Stages {
+		IDirect3DBaseTexture9* Bound[16] = {};
+		bool Known[16] = {};
+		Stages() {
+			for (DWORD stage = 0; stage < 16; stage++) {
+				Known[stage] = SUCCEEDED(TheRenderManager->device->GetTexture(stage, &Bound[stage]));
+				if (Bound[stage]) Bound[stage]->Release();
+				if (!Known[stage]) Bound[stage] = nullptr;
+			}
+		}
+	};
+
+	// UNOFFICIAL 2026-11-12 BudgetMB: the one place a map's texture is given up (Trim, ReloadTest); the caller takes the map out of Held.
+	// Nothing may keep the texture's address past this (this code base has crashed that way: shaders kept a texture the plugin had
+	// released, and SetTexture touched freed memory). Where the address lives, and what is done about each:
+	// (1) Map::Texture: cleared here. No draw is in flight: this runs from Upload, before the frame's scene, on the render thread, and
+	//     ForObject reads Map::Texture afresh at every draw. A read of the file on its way cannot exist: a map has one read at a time
+	//     (Queued), and it ended when this texture was made.
+	// (2) The device's stage 2, where Send binds it, or any stage a save / restore of the stages put it back on: taken off.
+	// (3) The game's note of each stage's texture (NiDX9RenderState, NoteDeviceTexture): with a dead address in it the game would skip
+	//     its own bind of a new texture that got the same address. Cleared, with the device's stage, so the two stay in step.
+	// Not held anywhere else: the object shaders' sampler is NVR_RmaosMap, not a TESR_ one, so no ShaderRecord caches the pointer
+	// (ShaderManager::ClearShaderSamplers has nothing to clear); ReflMaterial takes a yes / no and a roughness, not the texture; state
+	// blocks and the effects' GetTexture saves hold their own reference. A stage that could not be read counts as holding it if it is 2.
+	static void Drop(Map& map, Stages& stages) {
+		IDirect3DTexture9* texture = map.Texture;
+		if (!texture) return;
+		NiDX9RenderState* state = TheRenderManager->renderState;
+		for (DWORD stage = 0; stage < 16; stage++) {
+			const bool onDevice = stages.Known[stage] ? stages.Bound[stage] == texture : stage == 2;
+			if (!onDevice && state->unk10A0[stage] != (UInt32)texture) continue;
+			TheRenderManager->device->SetTexture(stage, nullptr);
+			state->NoteDeviceTexture(stage, nullptr);
+			stages.Bound[stage] = nullptr;
+			stages.Known[stage] = true;
+		}
+		texture->Release();
+		map.Texture = nullptr;
+		map.Queued = false;
+		HeldBytes -= (std::min)(HeldBytes, map.Bytes);
+		ReleasedBytes += map.Bytes;
+		map.Bytes = 0;
+		Loaded--;
+		Released++;
+	}
+
+	// UNOFFICIAL 2026-11-12 BudgetMB / KeepSeconds ([Shaders.PBR.Rmaos], live, read once a second; a build whose defaults lack the keys:
+	// 512 and 30). Once a frame from Upload. Over the budget, the maps no draw used for KeepSeconds are released, the longest unseen
+	// first, at most kPerFrame a frame, until 85 % of the budget is left in use (so it does not release one map for every map that
+	// arrives). KeepSeconds are counted on BudgetClockMs, which stands still while no map is drawn: coming back from a pause or a
+	// loading screen does not find the whole view released. When every loaded map was drawn within KeepSeconds the place really
+	// needs more than the budget: nothing is released (it would only load again next frame) and the log says so once.
+	static void Trim() {
+		static const size_t kPerFrame = 8;
+		const double lastFrameMs = FrameNowMs;
+		FrameNowMs = CpuTimer::NowMs();
+		if (BudgetDraws && lastFrameMs > 0.0) BudgetClockMs += std::clamp(FrameNowMs - lastFrameMs, 0.0, 250.0);
+		BudgetDraws = 0;
+		if (FrameNowMs - SettingsAtMs >= 1000.0) {
+			SettingsAtMs = FrameNowMs;
+			SettingManager::Configuration::ConfigNode node;
+			const int budget = TheSettingManager->Config.FillNode(&node, "Shaders.PBR.Rmaos", "BudgetMB") ? std::clamp(node.IntValue, 0, 4096) : 512;
+			KeepSeconds = TheSettingManager->Config.FillNode(&node, "Shaders.PBR.Rmaos", "KeepSeconds") ? std::clamp(node.FloatValue, 1.0f, 3600.0f) : 30.0f;
+			if (budget != BudgetMB) { BudgetMB = budget; Trimming = false; ToldBudget = false; ToldAllInUse = false; }	// a new budget: its lines again
+		}
+		const double mb = 1.0 / (1024.0 * 1024.0);
+		if (Released != ReleasedTold && FrameNowMs >= CountAtMs) {	// a count now and then, not a line per release
+			Logger::Log("UNOFFICIAL Rmaos budget: %llu maps released so far (%llu since the last line, %.0f MB in all); now %u loaded, %.0f of %d MB",
+				Released, Released - ReleasedTold, ReleasedBytes * mb, (unsigned)Held.size(), HeldBytes * mb, BudgetMB);
+			ReleasedTold = Released;
+			CountAtMs = FrameNowMs + 60000.0;
+		}
+		if (BudgetMB <= 0) { Trimming = false; return; }
+		const unsigned long long budget = (unsigned long long)BudgetMB << 20, target = budget / 100 * 85;
+		if (!Trimming) {
+			if (HeldBytes <= budget) return;
+			Trimming = true;
+			ScanAtMs = 0.0;
+			if (!ToldBudget) {
+				ToldBudget = true;
+				CountAtMs = FrameNowMs + 10000.0;
+				Logger::Log("UNOFFICIAL Rmaos budget: %u maps loaded, %.0f MB, over the budget of %d MB: maps not drawn for %.0f s are released from now on, "
+					"the longest unseen first (they load again when drawn; [Shaders.PBR.Rmaos] BudgetMB, KeepSeconds)", (unsigned)Held.size(), HeldBytes * mb, BudgetMB, KeepSeconds);
+			}
+		}
+		if (HeldBytes <= target) { Trimming = false; return; }
+		if (FrameNowMs < ScanAtMs) return;
+		static std::vector<Map*> unseen;
+		unseen.clear();
+		const double before = BudgetClockMs - 1000.0 * KeepSeconds;
+		for (Map* map : Held) if (map->LastDrawMs <= before) unseen.push_back(map);
+		if (unseen.empty()) {
+			ScanAtMs = FrameNowMs + 1000.0;	// nothing old enough: looked at again in a second, not every frame
+			if (HeldBytes > budget && !ToldAllInUse) {
+				ToldAllInUse = true;
+				Logger::Log("UNOFFICIAL Rmaos budget: %u maps loaded, %.0f MB, over the budget of %d MB, but every one was drawn in the last %.0f s: "
+					"this place needs more than the budget, nothing is released (said once)", (unsigned)Held.size(), HeldBytes * mb, BudgetMB, KeepSeconds);
+			}
+			return;
+		}
+		const size_t count = (std::min)(unseen.size(), kPerFrame);
+		std::partial_sort(unseen.begin(), unseen.begin() + count, unseen.end(), [](const Map* a, const Map* b) { return a->LastDrawMs < b->LastDrawMs; });
+		Stages stages;
+		for (size_t i = 0; i < count && HeldBytes > target; i++) Drop(*unseen[i], stages);
+		Held.erase(std::remove_if(Held.begin(), Held.end(), [](const Map* map) { return !map->Texture; }), Held.end());
+		if (HeldBytes <= target) Trimming = false;
+	}
+
 	// Once a frame: the files the worker has read, made into textures (at most two a frame), and c220 resent with the first object
 	// (the effects drawn between frames use the high constant registers too).
 #if NVR_TEST_TOOLS
@@ -1924,6 +2116,7 @@ namespace RmaosDraw {
 #if NVR_TEST_TOOLS
 		ReloadTest();
 #endif
+		Trim();	// UNOFFICIAL 2026-11-12 BudgetMB: before this frame's uploads and draws
 		const float budget = TheSettingManager->GetSettingF("Shaders.PBR.Rmaos", "UploadBudget");
 		FadeSeconds = (std::max)(TheSettingManager->GetSettingF("Shaders.PBR.Rmaos", "FadeIn"), 0.0f);
 		const double start = CpuTimer::NowMs();
@@ -1937,12 +2130,24 @@ namespace RmaosDraw {
 				job = std::move(Read.front());
 				Read.pop_front();
 			}
+			Wake.notify_one();	// UNOFFICIAL 2026-11-12: room in Read again, the worker reads the next file (kReadAhead)
 			IDirect3DTexture9* texture = nullptr;
 			if (!job.Bytes.empty())
 				D3DXCreateTextureFromFileInMemoryEx(TheRenderManager->device, job.Bytes.data(), (UINT)job.Bytes.size(), D3DX_DEFAULT_NONPOW2,
 					D3DX_DEFAULT_NONPOW2, D3DX_DEFAULT, 0, D3DFMT_UNKNOWN, D3DPOOL_DEFAULT, D3DX_DEFAULT, D3DX_DEFAULT, 0, NULL, NULL, &texture);
-			if (texture) { job.Target->Texture = texture; job.Target->ArrivedMs = CpuTimer::NowMs(); Loaded++; }
-			else { job.Target->Missing = true; Logger::Log("[Rmaos] could not load %s", job.File.c_str()); }
+			// UNOFFICIAL 2026-11-12 BudgetMB: the map's read is over (Queued off: a map released later may be asked for again), and a
+			// texture is counted: its bytes, in Held, and as drawn now, so it has KeepSeconds to be seen before it can be released.
+			// (A map that already has a texture cannot come here, one read at a time; if it ever did, the new one is not kept.)
+			Map& target = *job.Target;
+			target.Queued = false;
+			if (texture && target.Texture) texture->Release();
+			else if (texture) {
+				target.Texture = texture; target.ArrivedMs = CpuTimer::NowMs(); Loaded++;
+				target.Bytes = BytesOf(texture); target.LastDrawMs = BudgetClockMs;
+				HeldBytes += target.Bytes;
+				Held.push_back(&target);
+			}
+			else { target.Missing = true; Logger::Log("[Rmaos] could not load %s", job.File.c_str()); }
 			uploaded++;
 		}
 #if NVR_TEST_TOOLS
@@ -1971,16 +2176,14 @@ namespace RmaosDraw {
 		if (!want) return;
 		TheRenderManager->device->SetTexture(2, nullptr);
 		TheRenderManager->renderState->NoteDeviceTexture(2, nullptr);
-		int dropped = 0;
-		for (auto& entry : ByPath) {
-			Map& map = entry.second;
-			if (!map.Texture) continue;
-			map.Texture->Release();
-			map.Texture = nullptr;
-			map.Queued = false;
-			dropped++;
-		}
-		Loaded -= dropped;
+		// UNOFFICIAL 2026-11-12 BudgetMB: through Drop, as the budget's releases (the bytes, Held and the stages kept right); its
+		// counts are put back, these are not the budget's releases
+		const unsigned long long released = Released, releasedBytes = ReleasedBytes;
+		Stages stages;
+		for (Map* map : Held) Drop(*map, stages);
+		const int dropped = (int)Held.size();
+		Held.clear();
+		Released = released; ReleasedBytes = releasedBytes;
 		Logger::Log("RMAOS STREAM: ReloadTest %d: %d maps dropped (they load again as they are drawn)", want, dropped);
 	}
 #endif
@@ -2025,12 +2228,16 @@ namespace RmaosDraw {
 				auto known = ByTexture.find(diffuse);
 				if (known != ByTexture.end() && known->second.Path == diffuse->ddsPath1) map = known->second.Found;
 				else {
+					Forget();	// UNOFFICIAL 2026-11-12: ByTexture was insert-only; bounded now (known is not used past here)
 					map = Find(MaterialRules::Normalize(diffuse->ddsPath1), pbr && pbr->RmaosSettings.LogMatches);
 					ByTexture[diffuse] = { std::string(diffuse->ddsPath1), map };
 				}
 			}
 		}
-		if (map && !map->Missing && !map->Texture && !map->Queued) {
+		if (map) map->LastSeenMs = FrameNowMs;	// UNOFFICIAL 2026-11-12 (Forget)
+		// UNOFFICIAL 2026-11-12: only with the live switch on. The maps used to start loading with On off too (only their use below
+		// read it), filling memory for nothing. Switched on later, they load at the next draw, as at a first sight.
+		if (map && !map->Missing && !map->Texture && !map->Queued && pbr && pbr->RmaosSettings.On) {
 			map->Queued = true;
 			std::lock_guard<std::mutex> hold(Lock);
 			if (!WorkerStarted) { WorkerStarted = true; std::thread(Worker).detach(); }
@@ -2038,6 +2245,7 @@ namespace RmaosDraw {
 			Wake.notify_one();
 		}
 		const bool on = map && map->Texture && pbr && pbr->RmaosSettings.On;
+		if (on) { map->LastDrawMs = BudgetClockMs; BudgetDraws++; }	// UNOFFICIAL 2026-11-12 BudgetMB: in use (Trim releases the longest unseen)
 		float share = 1.0f;	// UNOFFICIAL FadeIn: the map's share while it comes in
 		if (on && FadeSeconds > 0.0f) share = std::clamp((float)((FrameNowMs - map->ArrivedMs) / (1000.0 * FadeSeconds)), 0.001f, 1.0f);
 		values[0] = on ? share : 0.0f;
@@ -2280,6 +2488,17 @@ namespace GrassFirst {
 	static void(__cdecl* RenderPassImmediately)(void*, UInt32, UInt32, UInt32, UInt32) = (void(__cdecl*)(void*, UInt32, UInt32, UInt32, UInt32))kRenderPassImmediately;
 
 	static inline bool IsGrass(UInt32 id) { return id >= kGrassFirstId && id <= kGrassLastId; }
+
+	// UNOFFICIAL 2026-11-12 PTGrassOwnPixel (core/CapturedNormals.h GrassPass): round one world grass pass's draw (not the game's grass shadow
+	// passes, 0x284-0x287): its draws that write no record go once more into the path tracer's mask of the game's own pixels. One flag
+	// test otherwise.
+	struct OwnPixelScope {
+		bool on;
+		explicit OwnPixelScope(UInt32 passId) : on(CapturedNormals::GrassOwnOk && IsGrass(passId) && passId <= 0x283 && ShaderSplit::CurrentContext == ShaderSplit::World) {
+			if (on) { CapturedNormals::GrassPassFrame = TheFrameRateManager->FrameNumber; CapturedNormals::GrassPass = true; }
+		}
+		~OwnPixelScope() { if (on) CapturedNormals::GrassPass = false; }
+	};
 
 	// UNOFFICIAL 2026-10-30 RT grass ([Main.Main.RayTracing] Grass; RtCore::NoteGrass): a world grass pass just drawn: TallGrassShader's
 	// instance table still holds its tufts, ScaleMask (c2), the card texture (stage 0) and the alpha reference are its own. Nothing is
@@ -2686,8 +2905,10 @@ namespace GrassFirst {
 		ActiveAccumulator = nullptr;
 		// UNOFFICIAL 2026-10-28 CapturedNormals (core/CapturedNormals.h): the normal target bound around the game's own call only (the early
 		// grass part above it draws grass and the grass shadows, which write none).
-		struct CaptureSpan { bool on; CaptureSpan() : on(ShaderSplit::CurrentContext == ShaderSplit::World) { if (on) CapturedNormals::BeginSpan(TheRenderManager->device); }
-			~CaptureSpan() { if (on) CapturedNormals::EndSpan(TheRenderManager->device); } };
+		// (UNOFFICIAL 2026-11-12 HairAndEyes: the flashlight's beam for the hair and eye shaders starts with this span, and its marks
+		// end with it; the beam stays for the rest of the world's pass: core/FlashlightDeferred.h BeamBegin)
+		struct CaptureSpan { bool on; CaptureSpan() : on(ShaderSplit::CurrentContext == ShaderSplit::World) { if (on) { CapturedNormals::BeginSpan(TheRenderManager->device); FlashlightDeferred::BeamBegin(); } }
+			~CaptureSpan() { if (on) { FlashlightDeferred::BeamSpanEnd(); CapturedNormals::EndSpan(TheRenderManager->device); } } };
 		if (first == 1 && last == 0x25B && group < 0) DepthFirst(accumulator, arg3, group);	// UNOFFICIAL 2026-10-26 LampsDepthFirst
 		if (first == 1 && last == 0x25B && group < 0 && Allowed(accumulator)) {
 			PassIdNode* lists[2] = {};
@@ -2767,7 +2988,7 @@ namespace GrassFirst {
 				// 0x00B994F0 itself calls BSRenderState::SetAlphaToCoverageEnable(pass wants it, 0) for every pass when the game's
 				// TMS flag (0x011F9421) is set (Ghidra dump of the exe, psycho-master graphics_fnv_atmosphere_alpha_coverage_state_followup).
 				ReflMaterial::NeutralScope neutral(r.pass, r.pass ? ((const PointShadowForward::RenderPassView*)r.pass)->geometry : nullptr, ShaderSplit::CurrentContext == ShaderSplit::World, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson, TheRenderManager->device);	// (perf-mirrorfix: the grass replay's own alpha)
-				RenderPassImmediately(r.pass, r.passId, r.a3, r.a4, r.a5);
+				{ OwnPixelScope ownPixel(r.passId); RenderPassImmediately(r.pass, r.passId, r.a3, r.a4, r.a5); }	// (2026-11-12 PTGrassOwnPixel)
 				NoteRtGrass(r.pass, r.passId);	// UNOFFICIAL 2026-10-30 RT grass (a pass drawn early is noted once: RtCore skips the repeat)
 				if (gpuGrass) {
 					const bool took = arm && GpuGrass::Took();
@@ -2839,7 +3060,7 @@ namespace GrassFirst {
 		// UNOFFICIAL 2026-11-07 perf-mirrorfix: every world / first-person pass writes its own alpha (core/ReflMaterial.h; grass comes only through here)
 		ReflMaterial::NeutralScope neutral(pass, pass ? ((const PointShadowForward::RenderPassView*)pass)->geometry : nullptr, ShaderSplit::CurrentContext == ShaderSplit::World, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson, TheRenderManager->device);
 		if (!Recording || !IsGrass(passId)) {
-			RenderPassImmediately(pass, passId, a3, a4, a5);
+			{ OwnPixelScope ownPixel(passId); RenderPassImmediately(pass, passId, a3, a4, a5); }	// (2026-11-12 PTGrassOwnPixel: the game's own grass call, GrassFirst off)
 			if (IsGrass(passId)) NoteRtGrass(pass, passId);	// UNOFFICIAL 2026-10-30 RT grass (GrassFirst off: the game's own grass call)
 			return;
 		}
@@ -3040,6 +3261,21 @@ namespace GameEyes {
 		TheRenderManager->device->SetPixelShader(record->ShaderHandle);
 		EyePS = ps;
 		Eye = true;
+		CapturedNormals::EyeDrawNow = true;	// UNOFFICIAL 2026-11-12 HairAndEyes (the log's counts; After clears it)
+		{	// ... and what the first eye draws with the flashlight's beam on really got (4 lines a session)
+			static int told = 0;
+			if (told < 4 && CapturedNormals::BeamHeld) {
+				UInt32 reg = 0; float sent[4] = {};
+				for (UInt32 i = 0; i < record->FloatShaderValuesCount; i++)
+					if (record->FloatShaderValues[i].Name && !strcmp(record->FloatShaderValues[i].Name, "TESR_FlashBeam")) reg = record->FloatShaderValues[i].RegisterIndex;
+				if (reg) {	// (the eye's added lamp passes have no beam: only the pass with the ambient takes it)
+					told++;
+					TheRenderManager->device->GetPixelShaderConstantF(reg, sent, 1);
+					Logger::Log("UNOFFICIAL eye variant: HairAndEyes: an eye draw with %s: the beam's reach as the shader has it %.0f (register c%u; 0 = off), main list %s, marks %s",
+						ps->Name ? ps->Name : "?", sent[3], (unsigned)reg, CapturedNormals::InSpan ? "open" : "NOT open", CapturedNormals::BeamNow ? "on" : "off");
+				}
+			}
+		}
 		return true;
 	}
 
@@ -3094,6 +3330,7 @@ namespace GameEyes {
 
 	static void After() {
 		if (ProbePass) ProbeLog();
+		CapturedNormals::EyeDrawNow = false;
 		IDirect3DDevice9* device = TheRenderManager->device;
 		if (Eye) {
 			// NVR's own handle back, and its record's constants (the eye record's table set them last)
@@ -3123,6 +3360,15 @@ namespace GameEyes {
 
 // (ShaderManager::ReloadShaders, the warm slot's reloadshaders) the eye records are made again from the .hlsl on their next use
 void GameEyesForgetRecords() { GameEyes::EyeRecords.clear(); }
+
+// UNOFFICIAL 2026-11-12 HairAndEyes (core/FlashlightDeferred.h BeamBegin), for the log's counts only: a hair shader bound in the world's
+// pass while the flashlight's beam is in it: in the main list (before the light pass: its draws mark their pixels) or after it (the
+// game's sorted blended list, where its own blended hair, brows and beards are drawn: after the light pass).
+static void HairBeamBind(NiD3DPixelShaderEx* ps) {
+	if (!CapturedNormals::BeamHeld || ShaderSplit::CurrentContext != ShaderSplit::World) return;
+	if (!ps || !ps->ShaderHandle || !CapturedNormals::BeamMarkers.count((IDirect3DPixelShader9*)ps->ShaderHandle)) return;
+	if (CapturedNormals::InSpan) CapturedNormals::BeamHairInList++; else CapturedNormals::BeamHairAfter++;
+}
 
 void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 	BarrelHeat::Clear();
@@ -3164,6 +3410,7 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 	if (PixelShader) {
 		if (ShaderOwnership::MaySetUp(PixelShader, "pixel")) PixelShader->SetupShader(ForcePixelConstants ? nullptr : PixelShader2);
 		ForcePixelConstants = false;
+		NpcCharacterMaps::ForDraw(TheRenderManager->device, (const NiAVObject*)(ClothWind::PassGeometry ? ClothWind::PassGeometry : Geometry), ShaderSplit::CurrentContext == ShaderSplit::World, true);	// UNOFFICIAL 2026-11-08 CharacterShadowMapNpcs
 	} else
 		Logger::Log("Error getting pixel shader for pass %s", Pointers::Functions::GetPassDescription(PassIndex));
 	// UNOFFICIAL 2026-10-22 MarkShaders (test only, [Shaders.PBR.Main] MarkShadersTo > 0): the vertex + pixel shader pairs the game draws with,
@@ -3319,7 +3566,15 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 		//DWNode::AddNode(Name, Geometry->m_parent, Geometry);
 	}
 	FlashlightLamp::OnBind(PixelShader ? PixelShader->ShaderHandle : nullptr);	// UNOFFICIAL 2026-11-04 its c28-c30 only for a shader that reads them
+	// UNOFFICIAL 2026-11-13 [Main.Main.Misc] GameShaderPairCheck / GameShaderPairRepair (core/GameShaderPairs.h): a pair with a half that is
+	// not this mod's, whose pixel shader reads coordinates its vertex shader does not write (loose shader files of two other mods), is named
+	// once in the log; with the repair on it is bound as a pair that fits, for the length of the game's bind.
+	GameShaderPairs::BeforeBind(VertexShader, PixelShader);
 	SetShaders(This, PassIndex);
+	GameShaderPairs::AfterBind(VertexShader, PixelShader);
+	FlashlightLamp::NoteBind(PixelShader ? PixelShader->Name : "", PixelShader && PixelShader->ShaderHandle == (IDirect3DPixelShader9*)PixelShader->ShaderHandleBackup,
+		VertexShader ? VertexShader->Name : "", VertexShader && VertexShader->ShaderHandle == (IDirect3DVertexShader9*)VertexShader->ShaderHandleBackup, GameShaderPairs::BoundNote);	// UNOFFICIAL 2026-11-13 (the FLASHLAMP look: the pair this pass draws with)
+	HairBeamBind(PixelShader);	// UNOFFICIAL 2026-11-12 HairAndEyes: the log's counts
 	GameEyes::OnBind(PixelShader, VertexShader);	// UNOFFICIAL GameShaderEyes: inside an eye's draw, the game's shaders on the device (see above)
 	MaterialRulesDraw::AfterBind();	// UNOFFICIAL material rules: this object's class again over the bind's "no rule"
 	ReflectionProbe::AfterBind();  // UNOFFICIAL ReflectionClipFix: the clip plane re-issued once the pass's shaders are bound
@@ -3818,7 +4073,15 @@ static void MaterialForPass(void* Pass) {
 		}
 	}
 	const float radius = geometry->m_kWorldBound ? std::clamp(geometry->m_kWorldBound->Radius, 0.0f, 1.0e6f) : 0.0f;
-	PbrPop::SpecFade::SendMaterial(TheRenderManager->device, materialClass + 8.0f * floorf(radius));	// c211.w (c217 is the RT lamp shadows')
+	// UNOFFICIAL 2026-11-12 (ptbump; core/CapturedNormals.h NoHighlightFlag, Includes/CapturedNormals.hlsl CapturedNoHighlight): while the
+	// path tracer runs with PTMatteNoHighlight, and the shaders were compiled to read it (CAPTURED_PT: the DXVK fork), a mesh WITHOUT the
+	// specular shader flag (the game draws no highlight on it, near or far, in one pass or several) sends the same value negative: its
+	// record's roughness is then coded "no highlight". Otherwise positive, as always. Not a mesh with an environment map (the plain,
+	// the eye's or a window's: its shine is the game's env pass, which writes no record; it keeps its recorded gloss).
+	constexpr UInt32 kEnvMapped = (1u << BSSP_ENVIRONMENT_MAPPING) | (1u << BSSP_EYE_ENVIRONMENT_MAPPING) | (1u << BSSP_WINDOW_ENVIRONMENT_MAPPING);
+	const bool noHighlight = CapturedNormals::NoHighlightFlag && CapturedNormals::PtCodesCompiled && property && property->IsLightingProperty() &&
+		!(property->ulFlags[0] & (BSShaderProperty::Specular | kEnvMapped));
+	PbrPop::SpecFade::SendMaterial(TheRenderManager->device, (noHighlight ? -1.0f : 1.0f) * (materialClass + 8.0f * floorf(radius)));	// c211.w (c217 is the RT lamp shadows')
 }
 
 static void ForwardShadowsForPass(void* Pass) {
@@ -3827,6 +4090,9 @@ static void ForwardShadowsForPass(void* Pass) {
 	EnvLightFade::ForPass(Pass);	// UNOFFICIAL 2026-11-04 (after it: the game reads that lamp's dimmer for the fade too)
 	if (ShaderSplit::CurrentContext == ShaderSplit::FirstPerson) ShadowManager::ViewModelLogDraw(((const PointShadowForward::RenderPassView*)Pass)->geometry);	// UNOFFICIAL 2026-11-04 CharacterShadowMapLog
 	if (ShaderSplit::CurrentContext == ShaderSplit::World) MaterialForPass(Pass);	// UNOFFICIAL 2026-10-29 MaterialBuffer
+	// UNOFFICIAL 2026-11-12 (ptbump) the first-person model's records (PTViewModel's span) took whatever the last world draw had sent: with the
+	// no-highlight code in that value a gun could come out matte by chance. While the code is in use, its own class, radius and flag.
+	else if (ShaderSplit::CurrentContext == ShaderSplit::FirstPerson && CapturedNormals::VmSpan && CapturedNormals::NoHighlightFlag && CapturedNormals::PtCodesCompiled) MaterialForPass(Pass);
 	if (ForwardCloudShadows::Compiled)	// UNOFFICIAL 2026-11-04 ForwardCloudShadows: this draw's strength (0 for plants with PlantShadows off)
 		ForwardCloudShadows::ForPass(TheRenderManager->device, !ForwardCloudShadows::PlantShadows && PlantPass(((const PointShadowForward::RenderPassView*)Pass)->geometry));
 	LampCountStats::Count((const PointShadowForward::RenderPassView*)Pass);
@@ -3992,6 +4258,7 @@ void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32
 		PbrPop::SpecFade::ForDraw(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, fold, foldVertexColor);
 	}
 	CharacterObjectReach::ForDraw(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-10-23
+	NpcCharacterMaps::ForDraw(TheRenderManager->device, (const NiAVObject*)((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World, false);	// UNOFFICIAL 2026-11-08
 	DustDraw::ForDraw(TheRenderManager->device, ShaderSplit::CurrentContext == ShaderSplit::World);	// 2026-11-04: a static mesh in the world scene takes dust
 	BarrelHeat::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL GunFX barrel glow, per object
 	ForwardShadowsForPass(Pass);
@@ -4084,6 +4351,7 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 		PbrPop::SpecFade::ForDraw(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, fold, foldVertexColor);
 	}
 	CharacterObjectReach::ForDraw(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-10-23
+	NpcCharacterMaps::ForDraw(TheRenderManager->device, (const NiAVObject*)((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World, false);	// UNOFFICIAL 2026-11-08
 	DustDraw::ForDraw(TheRenderManager->device, false);	// 2026-11-04: skinned (people, creatures, armour, arms): no dust
 	BarrelHeat::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL GunFX barrel glow, per object
 	ForwardShadowsForPass(Pass);

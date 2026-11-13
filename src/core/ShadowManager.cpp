@@ -10,6 +10,7 @@
 #include "ShadowAtlas.h"	// UNOFFICIAL 2026-10-30 ShadowAtlas (INTERIOR-SHADOWS-MODERN step 1)
 #include "CapsuleShadows.h"	// UNOFFICIAL 2026-10-31 CapsuleShadows (steps 2-3): DropActors
 #include "PipboyFit.h"	// UNOFFICIAL 2026-11-04 ViewModelShadows: its object cleared before the viewmodel map
+#include "NpcCharacterMaps.h"	// UNOFFICIAL 2026-11-08 CharacterShadowMapNpcs
 
 // UNOFFICIAL SkinnedShadowFaceTest ([Main.Main.Performance], default on, 2026-10-07). An animated (skinned) mesh's own
 // world bound is stale, so skinned casters used to be drawn into all six faces of every lamp cube map near them; with a
@@ -294,6 +295,7 @@ static void AdoptStaticCubeMap(ShadowsExteriorEffect* shadows, PointShadowSlotSt
 		if (k == slot || !staticSlots[k].valid || staticSlots[k].light != light) continue;
 		std::swap(shadows->Textures.ShadowCubeMapStaticTexture[slot], shadows->Textures.ShadowCubeMapStaticTexture[k]);
 		for (int f = 0; f < 6; f++) std::swap(shadows->Textures.ShadowCubeMapStaticSurface[slot][f], shadows->Textures.ShadowCubeMapStaticSurface[k][f]);
+		std::swap(shadows->CubeStaticUsed[slot], shadows->CubeStaticUsed[k]);	// UNOFFICIAL 2026-11-12 CubeReleaseSeconds: when each was last wanted goes with it
 		std::swap(staticSlots[slot], staticSlots[k]);
 		return;
 	}
@@ -317,6 +319,104 @@ static unsigned statFacesSkipped = 0, statFacesCopied = 0, statFacesDrawn = 0, s
 
 static void ForgetLiveFaces(int slot) {
 	for (int f = 0; f < 6; f++) LiveFaces[slot][f].pure = false;
+}
+
+/*
+* UNOFFICIAL 2026-11-12 CubeReleaseSeconds ([Shaders.ShadowsInteriors.Main], seconds, live, 0 = never; ShadowsExterior.h). The lamp
+* cube maps were made on first use and kept for the whole session: after one busy interior up to 48 of them (LightPoints 24 and each
+* slot's static twin, 6 MB each at 512), outdoors too, where at most 12 are read. Once a second (of drawn frames) the cube maps past
+* the 12 made at start, and every static twin, that no frame has wanted for CubeReleaseSeconds are released; EnsureCubeMap /
+* EnsureStaticCubeMap make one again when a lamp needs it.
+* Called at the top of RenderShadowMaps, right after PointShadowForward::Begin has emptied the published lamp table: until this frame's
+* Publish (which reads the slots' pointers as they are after this) no draw can look a cube map up, so none can bind a released one.
+*/
+// What each slot's cube map and its static twin were last drawn for (the cube loop in RenderShadowMaps; at file scope for the sweep).
+static PointShadowSlotState CubeSlots[ShadowCubeMapsMax];
+static PointShadowSlotState CubeStaticSlots[ShadowCubeMapsMax];
+
+// One cube map. Every record of its pointer on this side is cleared first; ShadowsExteriorEffect::ReleaseCubeMap then takes it off the
+// device's texture stages and out of the shaders' sampler records, and releases it. The records here:
+//  - the published lamp table (PointShadowForward::Slots: what the object shaders' cube stages, the atlas conversion and DebugView 3
+//    read): empty now, but the entries left in it from the last frame are cleared too;
+//  - the slot's state (CubeSlots / CubeStaticSlots): cleared, so the next lamp there counts as a new slot and is drawn before it is
+//    published, also when the new texture lands on the old one's address (RtLampShadows::KeepCube keeps no slot that is not valid);
+//  - the face records (CubeFaceCopySkip) and the static twin's contents serial;
+//  - the atlas's record of the slot's tile, so the tile is converted again from the new cube map.
+static bool ReleaseIdleCubeMap(ShadowsExteriorEffect* fx, int slot, bool staticTwin, double& megabytes) {
+	IDirect3DCubeTexture9* texture = staticTwin ? fx->Textures.ShadowCubeMapStaticTexture[slot] : fx->Textures.ShadowCubeMapTexture[slot];
+	if (!texture) return false;
+	D3DSURFACE_DESC desc = {};
+	const double size = SUCCEEDED(texture->GetLevelDesc(0, &desc)) ? 6.0 * desc.Width * desc.Height * 4.0 / 1048576.0 : 0.0;	// R32F
+	for (PointShadowForward::Slot& published : PointShadowForward::Slots) if (published.cube == texture) published.cube = nullptr;
+	if (staticTwin) {
+		CubeStaticSlots[slot] = PointShadowSlotState();
+		StaticCubeSerials.erase(texture);
+	}
+	else {
+		CubeSlots[slot] = PointShadowSlotState();
+		if (slot < 64) ShadowAtlas::LiveTiles[slot] = ShadowAtlas::LiveTile();
+	}
+	ForgetLiveFaces(slot);
+	if (!fx->ReleaseCubeMap(slot, staticTwin)) return false;	// (a face is a render target: left for a later sweep, drawn afresh if used before)
+	megabytes += size;
+	return true;
+}
+
+static void ReleaseIdleCubeMaps(ShadowsExteriorEffect* fx) {
+	if (!fx || !fx->CubeMapSizeCreated) return;	// before RegisterTextures
+	// The clock: seconds of drawn frames, a frame 0.25 s at most (a loading screen, a pause or a menu ages nothing).
+	static LARGE_INTEGER frequency = {}, last = {};
+	LARGE_INTEGER counter;
+	if (!frequency.QuadPart) QueryPerformanceFrequency(&frequency);
+	QueryPerformanceCounter(&counter);
+	const double step = last.QuadPart && frequency.QuadPart ? (double)(counter.QuadPart - last.QuadPart) / (double)frequency.QuadPart : 0.0;
+	last = counter;
+	fx->CubeClock += (std::min)((std::max)(step, 0.0), 0.25);
+	const double now = fx->CubeClock;
+	static double nextSweep = 1.0, nextCount = 30.0;
+	if (now < nextSweep) return;
+	nextSweep = now + 1.0;
+
+	static unsigned releasedEver = 0, releasedSinceCount = 0, madeCounted = 0;
+	static double megabytesSinceCount = 0.0;
+	static int aliveCounted = -1;
+	const float limit = fx->CubeReleaseSeconds;
+	// (never with lamps published: the table's pointers are read by this frame's draws)
+	if (limit > 0.0f && !PointShadowForward::Active && PointShadowForward::SlotCount == 0) {
+		unsigned released = 0;
+		double megabytes = 0.0;
+		for (int slot = 0; slot < ShadowCubeMapsMax; slot++) {
+			if (slot >= ShadowCubeMapsScreen && now - fx->CubeUsed[slot] >= limit && ReleaseIdleCubeMap(fx, slot, false, megabytes)) released++;
+			if (now - fx->CubeStaticUsed[slot] >= limit && ReleaseIdleCubeMap(fx, slot, true, megabytes)) released++;
+		}
+		if (released && !releasedEver)
+			Logger::Log("UNOFFICIAL lamp shadow cube maps: %u not used for %.0f s released, %.0f MB of video memory ([Shaders.ShadowsInteriors.Main] "
+				"CubeReleaseSeconds; 0 = keep them all, as before). Each is made again when a lamp needs it. From now on only the count lines say so.",
+				released, limit, megabytes);
+		releasedEver += released; releasedSinceCount += released; megabytesSinceCount += megabytes;
+	}
+
+	// The count, every 30 s while something changed: how many are alive and what they take.
+	if (now < nextCount) return;
+	nextCount = now + 30.0;
+	int lamps = 0, twins = 0;
+	double megabytes = 0.0;
+	for (int slot = 0; slot < ShadowCubeMapsMax; slot++) {
+		for (int kind = 0; kind < 2; kind++) {
+			IDirect3DCubeTexture9* texture = kind ? fx->Textures.ShadowCubeMapStaticTexture[slot] : fx->Textures.ShadowCubeMapTexture[slot];
+			D3DSURFACE_DESC desc = {};
+			if (!texture) continue;
+			(kind ? twins : lamps)++;
+			if (SUCCEEDED(texture->GetLevelDesc(0, &desc))) megabytes += 6.0 * desc.Width * desc.Height * 4.0 / 1048576.0;
+		}
+	}
+	const unsigned made = fx->CubeMapsMade - madeCounted;
+	if (lamps + twins == aliveCounted && !made && !releasedSinceCount) return;
+	Logger::Log("UNOFFICIAL lamp shadow cube maps: %d alive (%d lamp slots, %d static twins), %.0f MB; since the last count %u made, %u released as idle "
+		"(%.0f MB); %u released since the start; CubeReleaseSeconds %.0f; D3D9 says %u MB of texture memory free",
+		lamps + twins, lamps, twins, megabytes, made, releasedSinceCount, megabytesSinceCount, releasedEver, limit,
+		TheRenderManager->device->GetAvailableTextureMem() / 1048576u);
+	aliveCounted = lamps + twins; madeCounted = fx->CubeMapsMade; releasedSinceCount = 0; megabytesSinceCount = 0.0;
 }
 
 // UNOFFICIAL 2026-10-18 LampShadowMoveTolerance ([Main.Main.ReducedQuality], CHANGES THE IMAGE, off at 0): the point the cube map
@@ -2286,6 +2386,9 @@ void ShadowManager::RenderShadowMaps() {
 	// ClothWind's partition draws in the shadow passes read it (crashed in PipboyFit::ForPartition, right after a load). Off for them.
 	PipboyFit::Active = nullptr;
 	PointShadowForward::Begin();	// UNOFFICIAL: idle unless the cube maps below are published
+	// UNOFFICIAL 2026-11-12 CubeReleaseSeconds: here, while no lamp is published, and before every early out (outdoors by day the cube
+	// loop below does not run at all, and that is when the interior's cube maps are idle).
+	ReleaseIdleCubeMaps(TheShaderManager->Effects.ShadowsExteriors);
 	if (!TheSettingManager->SettingsMain.Main.RenderEffects) return; // cancel out if rendering effects is disabled
 	// UNOFFICIAL SkinnedShadowFaceTest: skeleton bounds are rebuilt once per frame; forget meshes not seen for a while.
 	if ((++SkinnedBoundFrame & 1023) == 0) {
@@ -2325,6 +2428,7 @@ void ShadowManager::RenderShadowMaps() {
 	// read an old map through an old matrix. The flashlight's map is a reason to stay now (nearSpots[0]: the light is on, GetNearbyLights).
 	const FlashlightEffect* torch = TheShaderManager->Effects.Flashlight;
 	const bool flashlightMapOn = torch && torch->Enabled && torch->spotLightActive && torch->WantsShadowMap() && nearSpots[0];
+	fx->CharacterNpcLive = 0;	// UNOFFICIAL 2026-11-08 CharacterShadowMapNpcs: no NPC maps on a frame without sun shadows
 	// early out in case shadow rendering is not required
 	if (!sunShadowsOn && !lampShadowsOn && !flashlightMapOn && !TheShaderManager->orthoRequired && !TheShaderManager->orthoSkyRequired || !ShadowShadersLoaded) {
 		return;
@@ -2334,6 +2438,7 @@ void ShadowManager::RenderShadowMaps() {
 	auto frameTimer = TimeLogger();
 	static CpuTimer shadowMapsCpuTimer("Shadow maps (CPU)");
 	CpuProfileScope shadowMapsCpu(shadowMapsCpuTimer);
+	fx->CharacterNpcLive = 0;	// UNOFFICIAL 2026-11-08 CharacterShadowMapNpcs: none until drawn this frame
 	fx->Constants.CharacterData.w = 0.0f;	// UNOFFICIAL 2026-10-23 CharacterShadowMap: read only once this frame's draw is in it (RenderCharacterShadowMap)
 
 	// prepare some pointers to the device and surfaces
@@ -2868,6 +2973,7 @@ void ShadowManager::RenderShadowMaps() {
 
 			// UNOFFICIAL 2026-10-23 CharacterShadowMap: the player's own map, from the same (quantised) sun, after the cascades.
 			RenderCharacterShadowMap(sunDir);
+			RenderNpcCharacterMaps(sunDir);	// UNOFFICIAL 2026-11-08 CharacterShadowMapNpcs: the nearest people, a map each
 		}
 #if NVR_TEST_TOOLS
 		// DIAGNOSTIC SkipWhenFadedCheck 4: the atlas set to 0 at any hour, nothing skipped (shows that the poison of 1 and 2
@@ -3060,12 +3166,12 @@ void ShadowManager::RenderShadowMaps() {
 		// Each slot's cubemap stores length(light - point) / radius, which does not depend on the camera,
 		// so with PointShadowInterval > 1 a slot can keep its contents between redraws (see
 		// PointShadowSchedule.h for when it must be redrawn at once).
-		static PointShadowSlotState slots[ShadowCubeMapsMax];
+		PointShadowSlotState* const slots = CubeSlots;	// UNOFFICIAL 2026-11-12 CubeReleaseSeconds: at file scope now (ReleaseIdleCubeMap clears a released slot's)
 		static unsigned scheduleFrame = 0, statFrames = 0, statPresent = 0, statRedrawn = 0, statStaticReused = 0;
 		static unsigned statReasons[(int)PointShadowRedraw::Count] = {};
 		const unsigned interval = (unsigned)TheSettingManager->SettingsMain.Main.PointShadowInterval;
 		// UNOFFICIAL RedrawActorsOnly (PointShadowSchedule.h PointShadowDrawPlan): what each slot's static cube map holds.
-		static PointShadowSlotState staticSlots[ShadowCubeMapsMax];
+		PointShadowSlotState* const staticSlots = CubeStaticSlots;	// (2026-11-12: at file scope, as slots)
 		static unsigned statStaticDrawn = 0, statMovingOnly = 0, statWhole = 0;
 		static unsigned statMovedLamps = 0, statMovedWithPeople = 0, statAnchored = 0;	// UNOFFICIAL 2026-10-18 diagnostic (intshadow)
 		static float statMovedStep = 0.0f, statMovedStepMax = 0.0f, statMovedWander = 0.0f, statMovedRadius = 0.0f;
@@ -3184,6 +3290,8 @@ void ShadowManager::RenderShadowMaps() {
 				AdoptStaticCubeMap(fx, staticSlots, i, shadowLight);
 				if (moving) fx->EnsureStaticCubeMap(i);
 				staticNow.texture = fx->Textures.ShadowCubeMapStaticTexture[i];
+				// UNOFFICIAL 2026-11-12 CubeReleaseSeconds: a twin this redraw may copy from (no people now, but the lamp is drawn again) is in use
+				if (staticNow.texture) fx->CubeStaticUsed[i] = fx->CubeClock;
 			}
 			const PointShadowDraw draw = PointShadowDrawPlan(split && hasList, staticSlots[i], staticNow, moving);
 			CubeEyeOverride = anchored || relocated ? &anchor : nullptr;	// UNOFFICIAL LampShadowMoveTolerance: draw from the kept point
@@ -3486,6 +3594,30 @@ void ShadowManager::RenderShadowMaps() {
 // alone over the box's outer band; so the cascades keep drawing the player as before (the player's shadow on the ground, and the
 // shadows of walls and trees on the player, stay theirs), and this map only adds the fine self-shadow the cascades' texels lose.
 // Off, or not compiled in, or in first person: nothing here, CharacterData.w stays 0, every shader skips the lookup.
+// 2026-11-08: the nodes of the actors in the game's process lists (high and middle-high, as CapsuleShadows reads them), the player
+// left out. Its own function: the __try needs a frame without C++ objects to unwind.
+static int CharacterMapActorNodes(NiNode** out, int max) {
+	int n = 0;
+	__try {
+		UInt8* lists = (UInt8*)0x11E0E80;	// ProcessLists
+		Actor** data = *(Actor***)(lists + 0x08);
+		for (int level = 0; data && level < 2; level++) {
+			const UInt32 begin = *(UInt32*)(lists + 0x14 + level * 4), end = *(UInt32*)(lists + 0x24 + level * 4);
+			if (end < begin || end - begin > 4096) continue;
+			for (UInt32 i = begin; i < end && n < max; i++) {
+				Actor* actor = data[i];
+				if (!actor || (TESObjectREFR*)actor == (TESObjectREFR*)Player || (actor->flags & 0x800) != 0) continue;	// 0x800: disabled
+				if (NiNode* node = actor->GetNode()) out[n++] = node;
+			}
+		}
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		static bool logged = false;
+		if (!logged) { logged = true; Logger::Log("[ERROR] CharacterShadowMapOthers: reading the actors failed (once)"); }
+	}
+	return n;
+}
+
 void ShadowManager::RenderCharacterShadowMap(const D3DXVECTOR3& SunDir) {
 	ShadowsExteriorEffect* Shadows = TheShaderManager->Effects.ShadowsExteriors;
 	if (!Shadows->Settings.ShadowMaps.CharacterMap || !Shadows->CharacterMapCompiled) return;
@@ -3513,22 +3645,17 @@ void ShadowManager::RenderCharacterShadowMap(const D3DXVECTOR3& SunDir) {
 	NiNode* playerNode = Shadows->CharacterTargetNode ? Shadows->CharacterTargetNode : Player->GetNode();
 	AccumChildren(playerNode, &map->Forms, false, false, &map->ShadowMapFrustumPlanes);
 	unsigned others = 0;
-	if (Shadows->Settings.ShadowMaps.CharacterMapOthers && Player->GetWorldSpace() && Tes && Tes->gridCellArray) {
-		GridCellArray* CellArray = Tes->gridCellArray;
-		const UInt32 CellArraySize = CellArray->size * CellArray->size;
-		for (UInt32 c = 0; c < CellArraySize; c++) {
-			TESObjectCELL* Cell = CellArray->GetCell(c);
-			if (!Cell || Cell->IsInterior()) continue;
-			for (TList<TESObjectREFR>::Entry* Entry = &Cell->objectList.First; Entry; Entry = Entry->next) {
-				TESObjectREFR* Ref = Entry->item;
-				if (!Ref || !Ref->baseForm || Ref == (TESObjectREFR*)Player) continue;
-				const UInt8 type = Ref->baseForm->formType;
-				if (type != TESForm::FormType::kFormType_NPC && type != TESForm::FormType::kFormType_Creature && type != TESForm::FormType::kFormType_LeveledCreature) continue;
-				NiNode* node = Ref->GetNode();
-				if (!node || node == playerNode || (node->m_flags & NiAVObject::APP_CULLED) || !node->WithinFrustum(&map->ShadowMapFrustumPlanes)) continue;
-				AccumChildren(node, &map->Forms, false, false, &map->ShadowMapFrustumPlanes);
-				others++;
-			}
+	// 2026-11-08 (tester: "CharacterShadowMapOthers does nothing"): the actors come from the game's process lists (high and
+	// middle-high, as CapsuleShadows and BloodFlow read them), not the loaded cells' object lists: most people are persistent
+	// references that live in the worldspace's persistent cell, so the cell walk found almost nobody.
+	if (Shadows->Settings.ShadowMaps.CharacterMapOthers && Player->GetWorldSpace()) {
+		NiNode* nodes[64];
+		const int count = CharacterMapActorNodes(nodes, 64);
+		for (int i = 0; i < count; i++) {
+			NiNode* node = nodes[i];
+			if (node == playerNode || (node->m_flags & NiAVObject::APP_CULLED) || !node->WithinFrustum(&map->ShadowMapFrustumPlanes)) continue;
+			AccumChildren(node, &map->Forms, false, false, &map->ShadowMapFrustumPlanes);
+			others++;
 		}
 	}
 	const unsigned casters = (unsigned)(geometryPass->GeometryList.size() + alphaPass->GeometryList.size() + skinnedGeoPass->GeometryList.size());
@@ -3544,6 +3671,81 @@ void ShadowManager::RenderCharacterShadowMap(const D3DXVECTOR3& SunDir) {
 			Logger::Log("CharacterShadowMap: fit %d, half-extent %.0f units (texel %.3f units = %.2f cm), %u casters (%u other actors), sun %.3f %.3f %.3f, bias %.5f, band %.3f",
 				Shadows->Settings.ShadowMaps.CharacterMapFit, radius, 2.0f * radius / map->ShadowMapResolution, 2.0f * radius / map->ShadowMapResolution * 1.428f,
 				casters, others, SunDir.x, SunDir.y, SunDir.z, Shadows->Constants.CharacterData.z, Shadows->Constants.CharacterData.y);
+		}
+	}
+}
+
+// UNOFFICIAL 2026-11-08 CharacterShadowMapNpcs ([Shaders.ShadowsExteriors.ShadowMaps], 0 = off; user: NPC faces look "crusty" up close).
+// The player's map gives only the player (or, with CharacterShadowMapTarget, one NPC in first person) the fine sun self-shadow; every
+// other person keeps the cascades' 4-10 mm texels. Here the nearest CharacterShadowMapNpcs people whose head is within
+// CharacterShadowMapNpcDistance of the camera each get a map of their own, fitted and drawn exactly as the player's (FitCharacterBox,
+// BeginShadowMap / DrawShadowMap, that person's node alone, plus the other people in its box with CharacterShadowMapOthers). The
+// shaders are unchanged: each NPC's own draws are given that NPC's map on s11 and its constants in c206-c214 (NpcCharacterMaps.h),
+// every other draw keeps the player's. Third and first person alike; nothing while the sun cascades are not drawn.
+void ShadowManager::RenderNpcCharacterMaps(const D3DXVECTOR3& SunDir) {
+	ShadowsExteriorEffect* Shadows = TheShaderManager->Effects.ShadowsExteriors;
+	Shadows->CharacterNpcLive = 0;
+	const int wanted = Shadows->CharacterMapCompiled && Shadows->Settings.ShadowMaps.CharacterMap ?
+		std::clamp(TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.ShadowMaps", "CharacterShadowMapNpcs"), 0, (int)ShadowsExteriorEffect::CharacterNpcMax) : 0;
+	const int resolution = std::clamp(TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.ShadowMaps", "CharacterShadowMapNpcResolution"), 256, 4096);
+	if (!Shadows->EnsureCharacterNpcMaps(wanted, (UINT)((resolution + 128) / 256 * 256))) return;
+	Character* npcs[ShadowsExteriorEffect::CharacterNpcMax];
+	const float distance = max(TheSettingManager->GetSettingF("Shaders.ShadowsExteriors.ShadowMaps", "CharacterShadowMapNpcDistance"), 0.0f);
+	const int count = Shadows->PickCharacterNpcs(npcs, wanted, distance, Shadows->CharacterTargetNode);
+	if (count == 0) return;
+
+	IDirect3DDevice9* Device = TheRenderManager->device;
+	NpcCharacterMaps::Reset(Device);	// no NPC map stays bound while it is drawn into
+	static GpuTimer npcMapsTimer("Character shadow maps (NPCs)");
+	static CpuTimer npcMapsCpuTimer("Character shadow maps (NPCs, CPU)");
+	CpuProfileScope cpu(npcMapsCpuTimer);
+	GpuProfileScope gpu(npcMapsTimer, Device);
+
+	ShadowsExteriorEffect::ShadowMapSettings* map = &Shadows->CharacterNpcMap;
+	D3DXVECTOR4* ShadowData = &Shadows->Constants.Data;
+	const float zWas = ShadowData->z;
+	const D3DXMATRIX viewProjWas = Shadows->Constants.ShadowViewProj;
+	ShadowData->z = 1.0f;	// plain depth, as the player's map
+	NiNode* others[64];
+	const int otherCount = Shadows->Settings.ShadowMaps.CharacterMapOthers && Player->GetWorldSpace() ? CharacterMapActorNodes(others, 64) : 0;
+	NiNode* playerNode = Player->GetNode();
+	int live = 0;
+	for (int t = 0; t < count; t++) {
+		ShadowsExteriorEffect::CharacterNpcTile& tile = Shadows->CharacterNpcTiles[live];
+		NiNode* node = npcs[t]->GetNode();
+		D3DXMATRIX viewProj;
+		if (!node || !Shadows->FitCharacterBox(npcs[t], node, SunDir, map->ShadowMapResolution, *map, viewProj, tile.center, tile.data)) continue;
+		tile.node = node;
+		tile.toLight = viewProj;
+		tile.data.w = 1.0f + (float)Shadows->Settings.ShadowMaps.CharacterMapDebug;
+		Shadows->Constants.ShadowViewProj = viewProj;
+		Device->SetRenderTarget(0, Shadows->CharacterNpcSurface[live]);
+		Device->SetDepthStencilSurface(Shadows->CharacterNpcDepthSurface);
+		BeginShadowMap(map, &viewProj);
+		AccumChildren(node, &map->Forms, false, false, &map->ShadowMapFrustumPlanes);
+		// CharacterShadowMapOthers: the people (the player too) standing in this box shade this NPC sharply as well
+		if (otherCount) {
+			if (playerNode && playerNode != node && Player->isThirdPerson && !(playerNode->m_flags & NiAVObject::APP_CULLED) && playerNode->WithinFrustum(&map->ShadowMapFrustumPlanes))
+				AccumChildren(playerNode, &map->Forms, false, false, &map->ShadowMapFrustumPlanes);
+			for (int i = 0; i < otherCount; i++) {
+				NiNode* other = others[i];
+				if (other == node || (other->m_flags & NiAVObject::APP_CULLED) || !other->WithinFrustum(&map->ShadowMapFrustumPlanes)) continue;
+				AccumChildren(other, &map->Forms, false, false, &map->ShadowMapFrustumPlanes);
+			}
+		}
+		DrawShadowMap(map);
+		live++;
+	}
+	ShadowData->z = zWas;
+	Shadows->Constants.ShadowViewProj = viewProjWas;
+	Shadows->CharacterNpcLive = live;
+
+	if (Shadows->Settings.ShadowMaps.CharacterMapLog) {
+		static DWORD lastLog = 0;
+		if (GetTickCount() - lastLog > 1000) {
+			lastLog = GetTickCount();
+			Logger::Log("CharacterShadowMapNpcs: %d of %d NPC maps drawn (%u x %u, within %.0f units), first half-extent %.0f", live, count,
+				Shadows->CharacterNpcSizeCreated, Shadows->CharacterNpcSizeCreated, distance, live ? Shadows->CharacterNpcTiles[0].center.w : 0.0f);
 		}
 	}
 }

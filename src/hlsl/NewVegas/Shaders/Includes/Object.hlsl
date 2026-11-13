@@ -161,10 +161,13 @@ float4 NVR_EnvData : register(c94);	// x 1 = on for this draw, y the env-map str
 // channel; without a map (or with the feature off) the factor is exactly 1. Strength blends it in (c194.x).
 #if defined(RMAOS) && defined(MICRO_SHADOW_ON) && MICRO_SHADOW_ON
 #define MICRO_SHADOW_ACTIVE
-float4 TESR_MicroShadow : register(c194);	// x strength (0: none, 1: the map as it is, up to 3: its crevices that much deeper)
+float4 TESR_MicroShadow : register(c194);	// x strength (0: none, 1: the map as it is, up to 3: its crevices that much deeper), y Bounce
 static float MicroShadowAO = 1.0f;	// the map's occlusion at this pixel, toward 1 by (1 - strength); set in RmaosRead
 float MicroShadowTerm(float3 N, float3 L) {
-    return MicroShadowAO >= 1.0f ? 1.0f : saturate(abs(dot(N, normalize(L))) + 2.0f * MicroShadowAO * MicroShadowAO - 1.0f);
+    // UNOFFICIAL 2026-11-12 Bounce (TESR_MicroShadow.y; the owner: cranked up, the crevices "appear to be pure black"): a crevice is never
+    // without light, its walls throw some of the light around it back in. The shadowed share keeps Bounce of the light (0 = as before).
+    const float shade = saturate(abs(dot(N, normalize(L))) + 2.0f * MicroShadowAO * MicroShadowAO - 1.0f);
+    return MicroShadowAO >= 1.0f ? 1.0f : shade + (1.0f - shade) * TESR_MicroShadow.y;
 }
 // MICRO_SHADOW(N, L) is a factor with its own "*": "x * MICRO_SHADOW(N, L) y". Off it expands to nothing at all, so the compiled
 // shaders stay byte-identical (a literal 1.0f factor reordered the compiler's constant pool in four parallax shaders).

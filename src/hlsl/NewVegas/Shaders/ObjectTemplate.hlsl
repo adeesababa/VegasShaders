@@ -380,6 +380,28 @@
     }
     #define getSunLighting(toSun, radiance, toEye, N, baseColor, r) EyeLight((toSun), (radiance), (baseColor))
     #define getPointLightLightingAtt(toLight, falloff, radiance, toEye, N, baseColor, r) (LampAtt(falloff) * EyeLight((toLight), (radiance), (baseColor)))
+    // UNOFFICIAL 2026-11-12 HairAndEyes (Includes/FlashBeam.hlsl; [Shaders.Flashlight.Deferred] HairAndEyes): the flashlight's light pass lit
+    // the eyeball's records as a glossy object's (the full PBR lamp term with its highlight, which the eye above never gets from a lamp).
+    // The eye takes the beam itself instead, by the same wrapped diffuse as its lamps, on the vertex normal in world space, with the beam's
+    // cone, reach, falloff and shadow map (no lens pattern: no sampler stage is free in every variant), and records itself as far away
+    // (see the outputs) so the light pass leaves it alone. c108-c116: Includes/Shadow.hlsl's sun cascade matrices, which no eye record
+    // reads (they are built with FORWARD_SHADOWS 0) and nothing writes per draw; no nine registers in a row are free in EVERY object
+    // pixel shader (c94 is NVR_EnvData, c37-c63 / c76-c87 / c98-c107 the many-lamp table). s15: the sixth lamp-shadow stage, unused
+    // here (no lamp shadow code either). Not for the deferred-lamp records (see the LIGHTS >= 4 shader): they keep the light pass.
+    #define FLASH_BEAM_REG c108
+    #define FLASH_BEAM_MATRIX_REG c113
+    #define FLASH_BEAM_SAMPLER s15
+    #include "includes/FlashBeam.hlsl"
+    float3 EyeBeam(float3 baseColor, float3 worldNormal, float3 worldPos, bool valid) {
+        float3 light = 0.0f;
+        [branch] if (FLASH_BEAM_ON && valid) {
+            float3 toLight;
+            const float beam = FlashBeamStrength(worldPos, toLight);
+            const float wrapped = saturate((dot(worldNormal, toLight) * rsqrt(max(dot(toLight, toLight), 1.0e-6f)) + EYE_WRAP) / (1.0f + EYE_WRAP));
+            light = lerp(luma(baseColor), baseColor, TESR_PBRExtraData.x) * TESR_FlashBeam[2].rgb * (wrapped * beam);
+        }
+        return light;
+    }
 #endif
 // UNOFFICIAL: the camera matrices Shadow.hlsl rebuilds world positions with move out of c100-c107 in skinned vertex
 // shaders: the game's bone upload reaches past Bones[54] (c97) and overwrote them, so actors sampled the sun shadow
@@ -1800,6 +1822,11 @@ PS_OUTPUT main(PS_INPUT IN) {
     #if SHADOW_CONTRAST_ON && !defined(DIFFUSE) && !defined(POINT)
         lighting *= ShadowContrastKeep(lighting, scLost);	// UNOFFICIAL ShadowContrast: a base pass has the ambient: darkened here
     #endif
+    #if defined(NVR_EYE) && defined(OBJ_AMBIENT)
+        // UNOFFICIAL 2026-11-12 HairAndEyes: the flashlight's beam on the eyeball, once (the pass that adds the ambient), on the colour the
+        // lamps above lit (a light-only pass: the texture pass multiplies its colour in afterwards, as for them)
+        lighting += EyeBeam(surface.rgb, faceNormal, IN.shadowWorldPos.xyz, SHADOW_VS_PRESENT(IN.shadowWorldPos.w));
+    #endif
     float3 shaded = LinEncode(lighting.rgb);	// UNOFFICIAL linear lighting: back to the stored (gamma) space
     #ifdef ONLY_LIGHT
         // UNOFFICIAL 2026-10-16 ExactPassSums (core/PassSums.h): while NVR redirects this run of added passes into its own buffer,
@@ -1909,10 +1936,16 @@ PS_OUTPUT main(PS_INPUT IN) {
             #endif
         #elif defined(ONLY_LIGHT) && CAPTURED_NORMALS_ON >= 3
             #ifdef NO_VERTEX_COLOR
-                float4 capAlbedo = CapturedAlbedoOut(LinColor(capBaseTex));
+                float3 capBase = LinColor(capBaseTex).rgb;
             #else
-                float4 capAlbedo = CapturedAlbedoOut(LinColor(capBaseTex * IN.vertexColor.rgb));
+                float3 capBase = LinColor(capBaseTex * IN.vertexColor.rgb).rgb;
             #endif
+            #if DUST_ON && !defined(HAIR) && !defined(OBJ_LAMP_FIRST)
+                // UNOFFICIAL 2026-11-12: the dust goes on in the game's later TEXTURE pass, which writes no record, so this pass's record had
+                // the bare texture: under path tracing (which reads the record) such objects lost their dust. The same dust as that pass.
+                capBase = DustCover(capBase, faceNormal, IN.shadowWorldPos.xyz, SHADOW_VS_PRESENT(IN.shadowWorldPos.w));
+            #endif
+            float4 capAlbedo = CapturedAlbedoOut(capBase);
             #ifdef NVR_FOLD
                 pout.capturedPad1 = NVR_SpecFade.y > 0.5f ? capFoldAlbedo : capAlbedo;
             #else
@@ -1922,10 +1955,11 @@ PS_OUTPUT main(PS_INPUT IN) {
             pout.capturedPad1 = CapturedAlbedoOut(surface.rgb);
         #endif
     #endif
+    // (2026-11-12 ptbump: the *NoHighlight forms, Includes/CapturedNormals.hlsl; the same values unless the draw is flagged for the path tracer)
     #ifdef METAL	// UNOFFICIAL 2026-10-31: the metal share and the finish it was lit with (metalRoughness is lerped where metallic > 0)
-        pout.capturedPad2 = CapturedMaterialOutMetal(metallic > 0.0f ? metalRoughness : rough, metallic);
+        pout.capturedPad2 = CapturedMaterialOutMetalNoHighlight(metallic > 0.0f ? metalRoughness : rough, metallic);
     #else
-        pout.capturedPad2 = CapturedMaterialOut(rough);	// UNOFFICIAL 2026-10-29 MaterialBuffer (0 without it)
+        pout.capturedPad2 = CapturedMaterialOutNoHighlight(rough);	// UNOFFICIAL 2026-10-29 MaterialBuffer (0 without it)
     #endif
     #if SHADOW_CONTRAST_ON && defined(DIFFUSE)
         // UNOFFICIAL ShadowContrast: an added lamp pass gives the light its shadows took (alpha only: core/CapturedNormals.h masks rgb off)
@@ -1941,6 +1975,11 @@ PS_OUTPUT main(PS_INPUT IN) {
         pout.capturedNormal = CapturedNormalOut(ShadowPlainNormal(float2(IN.lightDistSq.w, IN.lightDir.w), IN.vertexColor.a), IN.shadowWorldPos.xyz);
     #else
         pout.capturedNormal = CAPTURED_NORMAL_INVALID;	// SmoothObjectNormals off: no vertex normal here
+    #endif
+    #if defined(NVR_EYE) && defined(OBJ_AMBIENT)
+        // UNOFFICIAL 2026-11-12 HairAndEyes (Includes/FlashBeam.hlsl): while the eye takes the flashlight's beam itself (above) its record
+        // says "far away", so the light pass does not light it a second time. Its colour, material and normal stay.
+        [flatten] if (FLASH_BEAM_ON && SHADOW_VS_PRESENT(IN.shadowWorldPos.w) && pout.capturedNormal.a > 0.5f) pout.capturedNormal.b = FLASH_BEAM_FAR;
     #endif
     // UNOFFICIAL 2026-11-12 CapturedCoverage (Includes/CapturedNormals.hlsl): a blended draw (fading in, a rubble skirt's vertex alpha)
     // records only where its own alpha is 0.5 or more; below, alpha 0 = the texels stay as they were. An opaque draw: x 1, as before.
@@ -2261,6 +2300,14 @@ PS_OUTPUT main(PS_INPUT IN) {
         lighting += baseColor.rgb * LinColor(tex2D(GlowMap, IN.uv.xy).rgb * EmittanceColor.rgb);
     #endif
 
+    // UNOFFICIAL 2026-11-12 HairAndEyes (as the LIGHTS < 4 shader): the flashlight's beam on the eyeball. Not in a deferred-lamp record:
+    // the DeferredLamps pass takes the pixel's place from the recorded distance, so that record must stay true, and the flashlight's
+    // light pass lights the eye there as before.
+    #if defined(NVR_EYE) && !(LAMPS_DEFERRED && defined(MANY_LAMPS) && MANY_LAMPS_ON >= 2)
+        #define EYE_BEAM_HERE
+        lighting += EyeBeam(baseColor.rgb, skyNormal, SHADOW_WP_LOAD(IN), SHADOW_WP_VALID(IN));
+    #endif
+
     // TODO: Vanilla attenuates the full specular term by IN.lPosition.w for some reason. Is this a problem?
     float3 shaded = LinEncode(lighting);	// UNOFFICIAL linear lighting
     shaded = MaterialRulesDebug(shaded, albedoStored);   // UNOFFICIAL [Shaders.PBR.MaterialRules] DebugView
@@ -2293,10 +2340,18 @@ PS_OUTPUT main(PS_INPUT IN) {
     pout.color.a = ReflMaterialAlpha(baseColor.a * AmbientColor.a);	// UNOFFICIAL MaterialAware reflections (Object.hlsl)
 #if CAPTURED_NORMALS_ON
     pout.capturedPad1 = CapturedAlbedoOut(baseColor.rgb);	// UNOFFICIAL 2026-10-31 AlbedoBuffer (Includes/CapturedNormals.hlsl; the pad's 0 below level 3)
-    #ifdef METAL	// UNOFFICIAL 2026-10-31: the metal share and the finish it was lit with
-        pout.capturedPad2 = CapturedMaterialOutMetal(lightRoughness, metallic);
+    // (2026-11-12 ptbump: the *NoHighlight forms, as in the LIGHTS < 4 variant; not the many-lamp shiny records, whose roughness the
+    // DeferredLamps pass reads as it is: they are drawn for meshes with a highlight only)
+    #if defined(MANY_LAMPS)
+        #ifdef METAL	// UNOFFICIAL 2026-10-31: the metal share and the finish it was lit with
+            pout.capturedPad2 = CapturedMaterialOutMetal(lightRoughness, metallic);
+        #else
+            pout.capturedPad2 = CapturedMaterialOut(roughness);	// UNOFFICIAL 2026-10-29 MaterialBuffer (0 without it)
+        #endif
+    #elif defined(METAL)
+        pout.capturedPad2 = CapturedMaterialOutMetalNoHighlight(lightRoughness, metallic);
     #else
-        pout.capturedPad2 = CapturedMaterialOut(roughness);	// UNOFFICIAL 2026-10-29 MaterialBuffer (0 without it)
+        pout.capturedPad2 = CapturedMaterialOutNoHighlight(roughness);
     #endif
     #if LAMPS_DEFERRED && defined(MANY_LAMPS) && MANY_LAMPS_ON >= 2
     {
@@ -2329,6 +2384,10 @@ PS_OUTPUT main(PS_INPUT IN) {
         pout.capturedNormal = CapturedNormalOut(ShadowPlainNormal(IN.uv.zw, IN.vertexColor.a), SHADOW_WP_LOAD(IN));
     #else
         pout.capturedNormal = CAPTURED_NORMAL_INVALID;
+    #endif
+    #ifdef EYE_BEAM_HERE
+        // UNOFFICIAL 2026-11-12 HairAndEyes (as in the LIGHTS < 4 variant): recorded as far away while the eye takes the beam itself
+        [flatten] if (FLASH_BEAM_ON && SHADOW_WP_VALID(IN) && pout.capturedNormal.a > 0.5f) pout.capturedNormal.b = FLASH_BEAM_FAR;
     #endif
     // UNOFFICIAL 2026-11-12 CapturedCoverage (Includes/CapturedNormals.hlsl; as in the LIGHTS < 4 variant): x 1 on an opaque draw.
     // Not in the slot-tight six-lamp shader (it sits at the slot count drivers refuse): it records the whole polygon, as before.

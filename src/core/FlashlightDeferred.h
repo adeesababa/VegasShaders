@@ -85,12 +85,14 @@ namespace FlashlightDeferred {
 	// now, the first time Cookie is above 0 (TextureManager::GetFileTexture: "Loaded texture file Data\Textures\Effects\Flashlight.png" in
 	// the log, or its "[ERROR] : Couldn't load texture file" line and the one below). No file = no cookie (strength 0 to the shader: the
 	// clean beam), never a darker one.
+	inline IDirect3DBaseTexture9* CookieSlot = nullptr;	// UNOFFICIAL 2026-11-12 the same texture by name, TESR_FlashBeamCookie (the hair shaders' beam, Includes/FlashBeam.hlsl; FlashlightEffect::RegisterTextures)
 	inline IDirect3DBaseTexture9* CookieTexture() {
 		static bool tried = false;
 		static IDirect3DBaseTexture9* texture = nullptr;	// (TextureManager's cache owns it; never freed while the game runs)
 		if (!tried) {
 			tried = true;
 			texture = TheTextureManager->GetFileTexture("Data\\Textures\\Effects\\Flashlight.png",TextureRecord::TextureRecordType::PlanarBuffer);
+			CookieSlot = texture;
 			if (texture) Logger::Log("UNOFFICIAL FlashlightDeferred: the lens pattern (Data\\Textures\\Effects\\Flashlight.png) loaded for [Shaders.Flashlight.Deferred] Cookie");
 			else Logger::Log("[WARNING] UNOFFICIAL FlashlightDeferred: the lens pattern Data\\Textures\\Effects\\Flashlight.png was not found: [Shaders.Flashlight.Deferred] Cookie does nothing (the beam stays clean) until the file is there and the game is restarted");
 		}
@@ -100,6 +102,93 @@ namespace FlashlightDeferred {
 	// The PCF disc's radius in texels of a map Width wide: ShadowSoftness is in texels of a 512 map (2026-11-04), so the blur is as wide on
 	// the beam whatever ShadowMapSize is.
 	inline float SoftnessTexels(UINT Width) { return TheShaderManager->Effects.Flashlight->Deferred.ShadowSoftness * (float)Width / 512.0f; }
+
+	// UNOFFICIAL 2026-11-12 HairAndEyes ([Shaders.Flashlight.Deferred] HairAndEyes, default on, live; BUG FIX, report: in the beam "hair
+	// transparent / invisible on the forehead", the rest of the hair dark, "eyes discolored"). What the bench showed (Prospector Saloon, a
+	// woman's head in the beam, this key off / on, the pass's debug views; log line "CapturedNormals: HairAndEyes: ..."):
+	//  - HAIR. The game's own hair, brows and beards (SM3002 / SM3003.pso) are blended with no alpha test, so the game draws them in its
+	//    sorted blended list: AFTER the main list, so after this pass, through none of the per-object hooks. The pass never touched them
+	//    (the 2026-11-04 depth test had nothing to reject there). Their only flashlight light was the game lamp (core/FlashlightLamp.h),
+	//    which those hooks never shaped for them: full strength, no cone, no shadow, on every head in the lamp's reach; and none at all
+	//    with GameLight off, with the lamp not among the hair's three lamps, or under path tracing (GameLightUnderPT off): dark hair
+	//    blended over a brightly lit scalp.
+	//  - EYES. An eyeball writes its records (the eye variant, ObjectTemplate.hlsl NVR_EYE), and the pass lit them like any object's: the
+	//    full lamp term with the highlight of a smooth surface, a flat veil in the light's colour over iris and pupil. Its own shader
+	//    never does that (a wrapped diffuse; the game's own env pass gives the shine).
+	// With the key on, the hair and eye shaders take the beam themselves (Includes/FlashBeam.hlsl; TESR_FlashBeam below, as the grass
+	// takes TESR_GrassSpot): the pass's reach, Falloff, cone, NearFade, HotspotLimit and shadow map, on their own colour and normal.
+	// The hair leaves the flashlight's game lamp out of its lamps while it does (in its shader: no hook sees those draws). The eye
+	// marks its record "far away" in the distance, which the pass skips by its reach test; hair drawn in the main list (a hair mod's
+	// alpha-tested hair) writes the same mark over the record under it (core/CapturedNormals.h BeamMarkers), so the pass does not
+	// light the scalp through it.
+	// The pass's depth margin (FL_Depth below: 1 % of the distance + 2 units) is NOT made smaller. The recorded distance is a half
+	// float: 1 part in 1024 (0.5 unit at 1000, 0.03 at 50), so the number itself would allow a twentieth of it. But the margin also
+	// covers what the number does not: the per-sample depth of a sloped surface under the game's MSAA against a record taken at the
+	// pixel's centre (a few units a pixel at a grazing angle far out), and surfaces the game draws with a depth offset (decals). A
+	// tighter test would also still light a scalp through hair lying closer than it; the mark has no such distance.
+	// The beam is there from the main list's start (BeamBegin) to the end of that world pass (Render.cpp ShaderSplit: BeamShow), in a
+	// frame the pass lights. Any other view (reflections, the first person, a scope's camera), the light or the key off, no records
+	// (native Direct3D 9 with the game's MSAA), path tracing replacing the picture: [0].w = 0 and the shaders do what they did before.
+	// [0] xyz the light (camera-relative), w its reach; [1] the beam's axis, w cos of the cone's outer edge; [2] rgb linear light x the
+	// lamps' light scale, w cos of the full-strength edge; [3] the shadow map (x there, y texel size, z bias, w PCF radius);
+	// [4] x Falloff, y NearFade, z HotspotLimit, w Cookie (0 without its file).
+	inline D3DXVECTOR4 Beam[5] = {};	// TESR_FlashBeam (FlashlightEffect::RegisterConstants): what a shader bound NOW gets
+	inline D3DXVECTOR4 BeamScene[5] = {};	// this world scene's beam, from its main list's start ([0].w 0: none)
+	inline unsigned long long StatBeamSpans = 0;
+	// UNOFFICIAL 2026-11-13 HairUnderPT ([Shaders.Flashlight.Deferred] HairUnderPT, default on, live; docs/next/FLASHLIGHT-AUDIT-2026-11-13.md).
+	// Under path tracing the whole beam above was off ("the path tracer lights the picture"), but the game's blended hair, brows and
+	// beards are not always the tracer's: where the traced scene has no hair at the pixel, and everywhere with PTBlendedLayer 1, the
+	// GAME's hair is on screen, and it had no flashlight light at all (no beam; the game lamp steps aside under path tracing): dark hair
+	// on a head the tracer's flashlight lights. With the key the beam is there under path tracing too, but only AFTER the main list
+	// (BeamAfterSpan): for the sorted blended list, where that hair is drawn. Inside the main list nothing changes (no beam, no marks:
+	// eyes and alpha-tested hair keep their records as the tracer reads them, and are lit by its lamp 0).
+	inline bool BeamAfterSpan = false, BeamSpanOpen = false;
+	// Render.cpp ShaderSplit: the shaders get the beam only inside the world's own pass (true), never in a pass nested in it or after it.
+	inline void BeamShow(bool world) {
+		if (world && BeamScene[0].w > 0.0f && !(BeamAfterSpan && BeamSpanOpen)) memcpy(Beam, BeamScene, sizeof(Beam));
+		else Beam[0].w = 0.0f;
+	}
+	// A new world pass (or a new frame): no beam until its main list starts.
+	inline void BeamNewScene() { BeamScene[0].w = 0.0f; Beam[0].w = 0.0f; CapturedNormals::BeamNow = false; CapturedNormals::BeamHeld = false; BeamAfterSpan = false; BeamSpanOpen = false; }
+	// The main list's end: no more marks (the light pass draws next); the beam itself stays for the hair the game draws after it.
+	inline void BeamSpanEnd() { CapturedNormals::BeamNow = false; BeamSpanOpen = false; if (BeamAfterSpan) BeamShow(true); }	// (2026-11-13 HairUnderPT: the beam from here on)
+	inline void BeamBegin() {
+		BeamNewScene();
+		const FlashlightEffect* f = TheShaderManager->Effects.Flashlight;
+		// what Apply needs to light this frame (its own tests, as far as they are known before the list is drawn)
+		if (!f || !f->Deferred.HairAndEyes || !Usable() || !f->spotLightActive || !f->SpotLight) return;
+		if (!CapturedNormals::InSpan || CapturedNormals::VmSpan || !CapturedNormals::AlbedoTexture || !CapturedNormals::MaterialTexture || !CapturedNormals::Texture) return;
+		// the path tracer lights the picture with the flashlight as its own lamp: nothing of this in the main list then; with
+		// HairUnderPT (2026-11-13) the beam alone after it, for the game's blended hair
+		const bool traced = RtPathTrace::Replacing();
+		if (traced && !f->Deferred.HairUnderPT) return;
+		D3DXVECTOR4 params[3];
+		// (a reach the mark's "far" would not be far for: no such beam in practice; then as before)
+		if (!LightParams(params) || params[0].w > 12000.0f || !EnsurePass()) return;
+		float scale = 1.0f;	// the lamps' light scale, as the pass's lamp term takes it (Object.hlsl LIN_SCALE_LIGHT; as the grass's beam)
+		if (const PBRShaders* pbr = TheShaderManager->Shaders.PBR) if (pbr->Constants.LinearScales.x > 0.0f) scale = pbr->Constants.LinearScales.x;
+		BeamScene[0] = params[0];
+		BeamScene[1] = params[1];
+		BeamScene[2] = D3DXVECTOR4(params[2].x * scale, params[2].y * scale, params[2].z * scale, params[2].w);
+		BeamScene[3] = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
+		if (IDirect3DTexture9* map = ShadowMap()) {
+			D3DSURFACE_DESC desc = {};
+			map->GetLevelDesc(0, &desc);
+			if (desc.Width) BeamScene[3] = D3DXVECTOR4(1.0f, 1.0f / (float)desc.Width, f->Deferred.ShadowBias, SoftnessTexels(desc.Width));
+		}
+		BeamScene[4] = D3DXVECTOR4(f->Deferred.Falloff, f->Settings.NearFade, f->Settings.HotspotLimit, f->Deferred.Cookie > 0.0f && CookieTexture() ? f->Deferred.Cookie : 0.0f);
+		BeamAfterSpan = traced; BeamSpanOpen = true;
+		BeamShow(true);	// (under path tracing: nothing yet, BeamSpanEnd shows it)
+		CapturedNormals::BeamNow = !traced; CapturedNormals::BeamHeld = true;
+		CapturedNormals::BeamFrames++;
+		if (StatBeamSpans == 40) CapturedNormals::BeamLog();	// (once early: what the first frames with the beam drew)
+		if (StatBeamSpans++ == 0) Logger::Log("UNOFFICIAL FlashlightDeferred: HairAndEyes on: hair and eyes take the flashlight's beam in their own shaders; where they are drawn before the light pass they mark their pixels, so the pass does not light them a second time (reach %.0f, shadow map %s)",
+			BeamScene[0].w, BeamScene[3].x > 0.5f ? "read" : "not drawn");
+		{	// (2026-11-13 HairUnderPT) once per change: which of the two ways the beam is in
+			static int told = -1;
+			if (told != (traced ? 1 : 0)) { told = traced ? 1 : 0; if (traced) Logger::Log("UNOFFICIAL FlashlightDeferred: HairUnderPT on: under path tracing the game's blended hair (drawn after the main list) takes the flashlight's beam in its own shader; eyes and everything in the main list are the path tracer's"); }
+		}
+	}
 
 	// The pass: after CapturedNormals::EndSpan (G-buffer unbound and resolved), before LinearScene::EndSpan (Render.cpp DeferredSpan).
 	inline void Apply(IDirect3DDevice9* d) {

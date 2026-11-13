@@ -22,6 +22,7 @@
 #include "LandLight.h"	// UNOFFICIAL 2026-10-25 (SunFar)
 #include "ForwardCloudShadows.h"	// UNOFFICIAL 2026-11-04 ForwardCloudShadows (FORWARD_CLOUD_SHADOWS)
 #include "ShaderFallback.h"	// UNOFFICIAL 2026-11-12 ShaderFallback (a family too long for the driver goes without optional features)
+#include "GameShaderPairs.h"	// UNOFFICIAL 2026-11-13 GameShaderPairs (a freed shader leaves its list of the game's shaders)
 // Small helpers for the shader loader: a template's define list is searched by name, and a held interface
 // is released and cleared in one step.
 namespace {
@@ -381,6 +382,18 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	// UNOFFICIAL 2026-10-28 [Main.Main.Quality] CapturedNormals also gives the land and parallax templates their smooth vertex normal for
 	// the sun lookup and the sky ambient (TerrainTemplate / ParallaxTemplate CAPTURED_NORMALS_FORWARD), as SmoothObjectNormals did for objects.
 	if (CapturedNormals::MergeWanted()) AppendDefine("CAPTURED_NORMALS_FORWARD", "1");
+	// UNOFFICIAL 2026-11-12 (ptbump) CAPTURED_PT (core/CapturedNormals.h PtCodesCompiled / BumpCompiled; Includes/CapturedNormals.hlsl): the
+	// MaterialBuffer's two record codes that only the path tracer reads. 1 = the object / parallax shaders can code "no highlight on this
+	// mesh"; 2 = also the land shaders (up to 5 layers) write their normal-mapped normal ([Main.Main.Quality] CapturedBumpNormals,
+	// restart; a missing key = on). Only with the AlbedoBuffer level, and only under the DXVK fork (the one place path tracing runs: on
+	// native Direct3D 9, where these shaders sit nearest the driver's slot limit, they stay exactly as they were). Defined only then.
+	{
+		SettingManager::Configuration::ConfigNode bumpNode;
+		const bool bumpKey = !TheSettingManager->Config.FillNode(&bumpNode, "Main.Main.Quality", "CapturedBumpNormals") || bumpNode.BoolValue;
+		CapturedNormals::PtCodesCompiled = CapturedNormals::AlbedoCompiledIn() && TheRenderManager && !strncmp(TheRenderManager->D3D9RuntimeDescription(), "DXVK", 4);
+		CapturedNormals::BumpCompiled = CapturedNormals::PtCodesCompiled && bumpKey;
+		if (CapturedNormals::PtCodesCompiled) AppendDefine("CAPTURED_PT", CapturedNormals::BumpCompiled ? "2" : "1");
+	}
 #if NVR_TEST_TOOLS
 	// UNOFFICIAL 2026-10-31 LampCapsCensus ([Main.Main.Misc], development builds; Includes/PointShadowForward.hlsl LAMP_CAPS_VIEW, the lamps without a
 	// shadow source as debug view 4): defined only when on at startup, so that otherwise the define list and the shaders are exactly as before.
@@ -785,6 +798,10 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 								CapturedNormals::NoteGrassWriter(static_cast<ShaderRecordPixel*>(record)->ShaderHandle);
 							else if (!_stricmp(Name, "STLEAF2000.pso") || !_stricmp(Name, "STLEAF2000TMS.pso") || !_stricmp(Name, "STLEAF2001.pso") || !_stricmp(Name, "STLEAF2001TMS.pso"))
 								CapturedNormals::NoteLeafWriter(static_cast<ShaderRecordPixel*>(record)->ShaderHandle);
+							// UNOFFICIAL 2026-11-12 HairAndEyes (core/CapturedNormals.h BeamMarkers): the hair shaders, built at this level with
+							// the mark for the deferred flashlight (SM3002 / SM3003.pso.hlsl FLASH_BEAM_MARK)
+							else if (!_stricmp(Name, "SM3002.pso") || !_stricmp(Name, "SM3003.pso"))
+								CapturedNormals::NoteBeamMarker(static_cast<ShaderRecordPixel*>(record)->ShaderHandle);
 						}
 					}
 					// UNOFFICIAL 2026-10-17 LinearPreDecode (core/LinearPreDecode.h): ObjectTemplate pixel shaders compiled with linear lighting
@@ -1160,6 +1177,7 @@ void __fastcall NiD3DVertexShaderEx::Free(NiD3DVertexShaderEx* Shader) {
 	// (2026-11-03) another plugin's shader: its slots are not NVR's records, nothing of NVR's to free
 	if (!ShaderOwnership::Ours(Shader)) { ThisCall(0xE89B70, Shader); return; }
 	ShaderOwnership::Forget(Shader);
+	GameShaderPairs::Forget(Shader->ShaderHandleBackup);	// UNOFFICIAL 2026-11-13 (its handle goes with it)
 	Shader->DisposeShader();
 	if (ShaderCollection* family = TheShaderManager->GetShaderCollection(Shader->Name)) {
 		auto& members = family->VertexShaderList;
@@ -1267,6 +1285,7 @@ ShaderRecordPixel* NiD3DPixelShaderEx::GetShaderRecord(ShaderRecordType Variant)
 void __fastcall NiD3DPixelShaderEx::Free(NiD3DPixelShaderEx* Shader) {
 	if (!ShaderOwnership::Ours(Shader)) { ThisCall(0xE89970, Shader); return; }	// (2026-11-03) as the vertex version
 	ShaderOwnership::Forget(Shader);
+	GameShaderPairs::Forget(Shader->ShaderHandleBackup);	// UNOFFICIAL 2026-11-13 (its handle goes with it)
 	Shader->DisposeShader();
 	if (ShaderCollection* family = TheShaderManager->GetShaderCollection(Shader->Name)) {
 		auto& members = family->PixelShaderList;

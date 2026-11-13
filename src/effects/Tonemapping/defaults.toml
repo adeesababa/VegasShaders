@@ -1,10 +1,10 @@
 [_Shaders.Tonemapping.Main]
 HueSafeClip = true                    # UNOFFICIAL: a colour too bright for the screen keeps its hue, losing a little saturation instead of having its brightest channel cut (bright lit orange used to turn yellow, red pink, e.g. under the flashlight). Colours that fit on screen are not touched. Off = the old cut. Applies everywhere, live.
 TonemappingMode = 10                  # Tonemapping Algorithm -  0:None (vanilla - DXVK HDR), 1:VTLottes, 2:Lottes (tuned), 3:Reinhard, 4:Reinhard Jodie, 5:ACES Filmic, 6:ACES Fitted, 7:Uncharted 2, 8:Uchimura (GT), 9:AGX, 10:DICE (default, most neutral/accurate), 11:Perceptual (Polyphony Digital, SIGGRAPH 2025)
-Exposure = 1.5                        # Scales the engine lighting strength/brightness range before tonemap, useful for HDR rendering
+Exposure = 2.5                        # Scales the engine lighting strength/brightness range before tonemap, useful for HDR rendering UNOFFICIAL (2026-11-12) the daylight look tuned against photos of the Mojave: the default was 1.5.
 Gamma = 2.2                           # Gamma modifier to be applied after tonemapping, delinearises output. If placed at 1.0, outputs at linear space for HDR (UI unaffected)
 Linearization = 2.2                   # Converts image to corrected linear space before tonemapping. 1.0 is non-linear, if so place Gamma at 1.0 as well
-SkyMultiplier = 1.0                   # Scales the brightness of the sky/sun textures. Requires Sky shader enabled
+SkyMultiplier = 0.6                   # Scales the brightness of the sky/sun textures. Requires Sky shader enabled UNOFFICIAL (2026-11-12) the daylight look tuned against photos of the Mojave: the default was 1.0.
 WeatherModifier = 1.0                 # Influence of the vanilla weather modifiers (brightness, contrast, saturation)
 WeatherContrast = 0.0                 # Influence of the vanilla contrast setting, applies post-tonemap. Scales atop WeatherModifier, can cause black crush
 Saturation = 1.0                      # Saturation of the image before tonemapping

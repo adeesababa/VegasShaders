@@ -1277,6 +1277,36 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	}
 	D3DXHANDLE giHandle = ParameterHandle(paramGI, "NVR_ALGI");
 	if (giD3D9Texture && !giHandle) giD3D9Texture = nullptr;	// an older AmbientLight.fx.hlsl: nothing to switch
+	// UNOFFICIAL 2026-11-13 RT occlusion on the D3D9 passes ([Shaders.AmbientOcclusion.RT] OcclusionOnD3D9, on; AmbientLight.fx.hlsl NVR_ALRT), BUG FIX
+	// (a tester on an RTX card: the indoor RT effects "no worky"). With NvrDxvkAmbientLight off (the default since 2026-11-01) every pass here is
+	// D3D9, and the D3D9 Estimate kept its own screen search: the traced occlusion was made every frame (RtAOTrace) and read by nothing, while the
+	// log and the menu said "running (ray-traced occlusion in place of the screen estimate)". Bench rtindoor-a, saloon: AmbientLight's occlusion view
+	// with RT AO on and off differed by 0.7 of 255, the run's noise. Now the D3D9 Estimate takes the traced visibility (through the shared RT
+	// denoiser when [Shaders.AmbientOcclusion.RT] Denoise is on, as AmbientLightEstimateRT.frag takes it) with the same mapping (OcclusionStrength,
+	// the fades) and skips its screen search; the blurs, Accumulate and Apply after it are unchanged. Not with ComputeGI (it keeps its screen search)
+	// or the Vulkan passes (their own RT estimate). Off, or an older .fx file: NVR_ALRT is 0 and the Estimate is exactly as before.
+	IDirect3DTexture9* aoD3D9Texture = nullptr;
+	if (!giOn && !ExtOn() && rtS.OcclusionOnD3D9 && rtAO && RtAmbient::Ready()) {
+		if (IDirect3DTexture9* raw = rtAO->RtRaw()) {
+			IDirect3DTexture9* clean = rtAO->RtDenoised(Device);
+			aoD3D9Texture = clean ? clean : raw;
+		}
+	}
+	D3DXHANDLE rtHandle = ParameterHandle(paramRT, "NVR_ALRT");
+	if (aoD3D9Texture && !rtHandle) aoD3D9Texture = nullptr;
+	if (rtHandle) {
+		D3DXVECTOR4 rtFlags(aoD3D9Texture ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+		Effect->SetVector(rtHandle, &rtFlags);
+	}
+	{
+		// 1 the traced occlusion is used; 0 traced this frame but not used here (the key off, an older .fx); -1 nothing traced / not this path
+		const int aoState = aoD3D9Texture ? 1 : (!giOn && !ExtOn() && rtAO && RtAmbient::Ready() && rtAO->RtRaw()) ? 0 : -1;
+		if (aoState != aoD3D9Logged && aoState >= 0) {
+			Logger::Log(aoState ? "UNOFFICIAL RT AO: AmbientLight's D3D9 Estimate takes the traced occlusion (OcclusionOnD3D9)." :
+				"UNOFFICIAL RT AO: traced, but AmbientLight keeps its own screen occlusion (OcclusionOnD3D9 off, or an older AmbientLight.fx.hlsl): only the bounce light and the sky visibility use the rays.");
+		}
+		if (aoState >= 0) aoD3D9Logged = aoState;
+	}
 	if (giHandle) {
 		// w: UNOFFICIAL 2026-11-11 (sungi) GISingleHistory: the RT denoiser's GI (it keeps its own history): Accumulate keeps no bounce history
 		D3DXVECTOR4 giFlags(giD3D9Texture ? 1.0f : 0.0f, giD3D9Texture && giTest != 1 ? 1.0f : 0.0f, 0.0f,
@@ -1639,6 +1669,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 			if (p > 0) Device->SetTexture(5, prepTexture);
 			if (giApply) Device->SetTexture(5, giDebugTexture ? giDebugTexture : historyTexture[writeIndex]);	// UNOFFICIAL 2026-11-03 NVR_ALGIHistory (Apply does not read the prep; 2026-11-12: DebugView 14 / 15, giDebugTexture)
 			if (p == 1 && giD3D9Texture) Device->SetTexture(7, giD3D9Texture);	// UNOFFICIAL 2026-11-03 NVR_ALRTGI (Estimate does not read s7 otherwise)
+			if (p == 1 && aoD3D9Texture) Device->SetTexture(6, aoD3D9Texture);	// UNOFFICIAL 2026-11-13 NVR_ALRTAO (Estimate does not read s6 otherwise: its own target's stage)
 			Device->SetTexture(15, TheTextureManager->DepthTextureViewModel);	// NVR_ALViewModel (Prepare, Apply)
 			const bool applyLike = p == 5 || p == 7;	// the balance samples read what Apply reads
 			if (p == 2) Device->SetTexture(6, bufferTexture[0]);

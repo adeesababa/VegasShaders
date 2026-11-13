@@ -8,6 +8,8 @@
 class AmbientLightEffect : public EffectRecord
 {
 public:
+	// UNOFFICIAL 2026-11-12 (memleak) idle targets (core/TextureManager.h, EffectRecord::TargetParkable): the half-size buffers (prep, the two results, both histories, stats, balance, the GI light). NOT the light grid's (NVR_Grid*): Reflections keeps their pointers in its own slots (GridLightSlot / GridColorSlot)
+	bool	TargetParkable(const char* SamplerName) override { return strncmp(SamplerName, "NVR_AmbientLight", 16) == 0; }
 	AmbientLightEffect() : EffectRecord("AmbientLight") {};
 
 	struct ConstantsStruct {
@@ -24,6 +26,7 @@ public:
 	CachedHandle		paramLayout, paramFlags, paramTemporal, paramReproject, paramReach;
 	CachedHandle		paramSunFarFlags;	// UNOFFICIAL 2026-10-19 SunFar (NVR_SunFarFlags)
 	CachedHandle		paramGI;			// UNOFFICIAL 2026-11-03 NVR_ALGI: the RT bounce light in the D3D9 passes (Render)
+	CachedHandle		paramRT;			// UNOFFICIAL 2026-11-13 NVR_ALRT: the RT occlusion in the D3D9 Estimate (Render)
 	CachedHandle		paramScene;					// UNOFFICIAL 2026-10-18 (ambfix): NVR_ALScene, the scene's own light
 	CachedHandle		techSky;					// UNOFFICIAL 2026-10-20 (skyamb) Skylighting: technique AmbientLightSky
 	D3DXVECTOR4			sceneLight = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 1.0f);	// the light every surface gets (linear; Render)
@@ -110,6 +113,7 @@ public:
 	float				albedoFallbackCap = 0.12f;	// UNOFFICIAL 2026-11-10 AlbedoFallbackCap: the guessed colour's cap where the albedo buffer has no texel (0 = the old 0.6)
 	bool				albedoLogged = false;
 	bool				giD3D9Logged = false;	// UNOFFICIAL 2026-11-03 RT GI on the D3D9 passes: logged once
+	int					aoD3D9Logged = -1;		// UNOFFICIAL 2026-11-13 RT occlusion on the D3D9 Estimate: the state last logged
 	// UNOFFICIAL 2026-10-21 (alrocks; the occlusion cut off hard along low-poly rocks' triangle edges): NormalSmoothing (half-resolution
 	// texels the normal is averaged over after Prepare, 0 off) and HorizonBias (degrees above the tangent plane each horizon starts, 0 off); NVR_ALEdges.
 	int					normalSmoothing = 36;
