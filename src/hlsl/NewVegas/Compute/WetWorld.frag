@@ -69,7 +69,7 @@ const float StreakFadeFull = 1000.0;
 
 const float PuddleAccumulationStart = 0.08;
 const float PuddleAccumulationFull = 1.0;
-const float FlatPuddleBlurStrength = 0.0;
+const float FlatPuddleBlurStrength = 0.65;
 
 const float PuddleNormalStrength = 0.25;
 const float FlatPuddleNormalStrength = 0.15;
@@ -371,7 +371,7 @@ vec4 WetPass(vec2 uv, bool fast, bool fixTrace) {
 
     vec4 worldPosRelRoof = GetOrthoSurfacePosition(uv);
     vec4 orthoRoofPos = worldPosRelRoof * c.shadowToLight;
-    float roofMask = GetRoofMask(orthoRoofPos) * wetAllow;
+    float roofMask = GetRoofMask(orthoRoofPos, c.cameraPosition.xy + worldPosRelRoof.xy) * wetAllow;
 
     vec3 eyeDirection = toWorld(uv);
     vec3 camera_vector = eyeDirection * depth;
@@ -426,7 +426,7 @@ vec4 WetPass(vec2 uv, bool fast, bool fixTrace) {
     float splashAlpha;
     vec2 splashNXY;
     vec4 splashSample = SampleSplash(splashXY, c.gameTime.z, (rainAmt * roofMask) * 0.395, splashAlpha, splashNXY);
-    splashAlpha *= roofMask;
+    splashAlpha *= roofMask * (1.0 - vmMask);
 
     float splashStrength = 2.2;
     splashStrength *= splashAlpha;
@@ -652,17 +652,10 @@ vec4 WetPass(vec2 uv, bool fast, bool fixTrace) {
         vec3 baseLin = linearize(baseColor).rgb;
         vec3 rippleColor = mix(baseLin, refrLin, viewRefr);
 
-        // First-person composition
-        if (vmMask > 0.5) {
-            vec2 vmRefrUV = saturate(uv + refrOff);
-            float vmSampleValid = GetViewModelMask(vmRefrUV);
-
-            vec3 vmRefrLin = mix(baseLin, refrLin, vmSampleValid);
-            float vmRippleBlend = saturate(LODfade * rippleMask) * viewRefr;
-            vec3 vmWetLin = mix(baseLin, vmRefrLin, vmRippleBlend);
-            vec3 vmWetRGB = delinearize(vec4(vmWetLin, 1.0)).rgb;
-            return vec4(WetOut(vmWetRGB + splashAdd), baseColor.a);
-        }
+        // First-person composition: leave the 1st-person viewmodel untouched by ground puddle ripples and splashes
+        // (beaded weapon raindrops are handled separately by HudRaindrops).
+        if (vmMask > 0.5)
+            return vec4(WetOut(baseColor.rgb), baseColor.a);
 
         // Puddle sky lighting
         float sunAmbient = max(luma(linearize(c.sunAmbient)), 0.0001);
@@ -854,15 +847,9 @@ vec4 WetPass(vec2 uv, bool fast, bool fixTrace) {
     // and have a puddle weight, a streak or an SSR trace (or are first-person).
     vec3 baseLin = linearize(baseColor).rgb;
 
-    // First-person composition
+    // First-person composition: leave the 1st-person viewmodel untouched by ground puddle ripples and splashes.
     if (vmMask > 0.5)
-    {
-        vec3 vmRefrLin = mix(baseLin, refrLinPre, vmSampleValidPre);
-        float vmRippleBlend = saturate(LODfade * rippleMask) * viewRefr;
-        vec3 vmWetLin = mix(baseLin, vmRefrLin, vmRippleBlend);
-        vec3 vmWetRGB = delinearize(vec4(vmWetLin, 1.0)).rgb;
-        return vec4(WetOut(vmWetRGB + splashAdd), baseColor.a);
-    }
+        return vec4(WetOut(baseColor.rgb), baseColor.a);
 
     float sunAmbient = max(luma(linearize(c.sunAmbient)), 0.0001);
     vec4 shadows = shadowsPre;

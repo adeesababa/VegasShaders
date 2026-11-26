@@ -80,7 +80,7 @@ vec4 WetMap(vec2 uv) {
     float coverage = ComputeDepressionMask(surfacePosition, depth, vmMask) * step(0.75, wetClass);
     float dotUp = dot(GetWorldNormal(uv), vec3(0.0, 0.0, 1.0));
     vec4 roofPosition = surfacePosition * c.shadowToLight;
-    float flatCoverage = GetRoofMask(roofPosition) * smoothstep(0.65, 0.92, dotUp)
+    float flatCoverage = GetRoofMask(roofPosition, c.cameraPosition.xy + surfacePosition.xy) * smoothstep(0.65, 0.92, dotUp)
         * (1.0 - vmMask);
     float flatWetCoverage = flatCoverage * smoothstep(0.90, 0.97, dotUp);
     return vec4(coverage, flatCoverage, flatWetCoverage, wetClass);

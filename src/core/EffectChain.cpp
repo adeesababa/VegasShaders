@@ -170,10 +170,11 @@
 #include "../effects/CoverMap/CoverMap.h"	// UNOFFICIAL 2026-10-27 Persistent wetness and snow
 #include "RtCore.h"	// UNOFFICIAL 2026-10-28 (NVR DXVK) the ray tracing core
 #include "RtSunShadows.h"	// UNOFFICIAL 2026-10-28 RT sun shadows
-#include "BendContact.h"	// UNOFFICIAL 2026-11-06 forward Bend contact shadows (fork port 2026-11-13)
+#include "ScreenSpaceShadows.h"	// UNOFFICIAL 2026-11-26 Screen-Space Shadows (Bottled Shaders port): the old contact pass stands aside where it ran
 #include "RtFogVisibility.h"	// UNOFFICIAL 2026-11-07 (ptaaa-fog) RT fog visibility
 #include "RtPathTrace.h"	// UNOFFICIAL 2026-11-02 the reference path tracer
 #include "Upscaler.h"	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction
+#include "DistantLandProto.h"
 #include "EffectChain.h"
 
 // Defined in effects\ShadowsExterior.cpp (declared in ShaderManager.cpp as well).
@@ -487,12 +488,10 @@ void ShaderManager::PreStep_ShadowPasses(ChainContext& ctx) {
 				// the forward lookups are off for the fade: it gets the forward value, as without the switch.
 				const float forwardWas = sunShadows->Constants.ForwardData.x;
 				if (sunShadows->SunFaded && sunShadows->Settings.Exteriors.ForwardShadows) sunShadows->Constants.ForwardData.x = 0.0f;
-				// UNOFFICIAL 2026-11-06 forward Bend contact shadows (core/BendContact.h): Bend's march for next frame's lit shaders;
-				// when it ran, the old pass writes "no contact" (its ScreenSpaceData.x test) so nothing is darkened twice.
-				const bool bendRan = fusedForwardContact && sunShadows->Constants.ScreenSpaceData.x != 0.0f && BendContact::Produce(Device);
-				if (!bendRan) BendContact::Invalidate();	// the old pass has the contact this frame: next frame's lit shaders take none
 				const float screenSpaceWas = sunShadows->Constants.ScreenSpaceData.x;
-				if (bendRan) sunShadows->Constants.ScreenSpaceData.x = 0.0f;
+				// UNOFFICIAL 2026-11-26 Screen-Space Shadows (core/ScreenSpaceShadows.h, the Bottled Shaders port): where the deferred sun pass took
+				// this frame's mask, the old contact pass writes no contact too (the sun is darkened once, the ambient no longer)
+				if (ScreenSpaceShadows::UsedThisFrame()) sunShadows->Constants.ScreenSpaceData.x = 0.0f;
 				RenderEffectToRT(sunShadows->Textures.ShadowPassSurface, Effects.SunShadows, false, sharpContact ? 2 : fusedForwardContact ? 1 : 0);
 				sunShadows->Constants.ScreenSpaceData.x = screenSpaceWas;
 				sunShadows->Constants.ForwardData.x = forwardWas;
@@ -518,7 +517,6 @@ void ShaderManager::PreStep_ShadowPasses(ChainContext& ctx) {
 		// others), so reset it to the neutral "no shadow" value rather than leaving
 		// stale exterior data for them to read.
 		if (!shadowBufferClear) { Effects.ShadowsExteriors->clearShadowsBuffer(); shadowBufferClear = true; }
-		BendContact::Invalidate();	// UNOFFICIAL 2026-11-06: no Bend result made (the effect's UpdateConstants may not run either)
 	}
 }
 
@@ -635,7 +633,7 @@ void ShaderManager::PreStep_CompositePlan(ChainContext& ctx) {
 	// (ceiling gaps, the far plane: the fog's sky test) differing by a few 16-bit steps; everywhere else it matched bit for bit.
 	const bool interiorFoldable = !GameState.isExterior && keepDarkening && forwardInterior &&
 		!Effects.ShadowsExteriors->Settings.Interiors.Forward.DarkeningBlur && TheSettingManager->SettingsMain.Main.InteriorShadowFold &&
-		!(Effects.Reflections->Enabled && Effects.Reflections->Effect && Effects.Reflections->CubeWanted()) &&
+		!Effects.Reflections->CubeStandaloneRunnable() &&
 		Effects.ShadowsInteriors->DedicatedUsable(RenderTarget, TheTextureManager->RenderedSurface) && Fog->CanCompositeInterior() &&
 		(TheSettingManager->SettingsMain.Main.InteriorShadowFoldRound != 0 || Fog->HalfStoreMode(Device) >= 0);	// (measured once)
 	// DIAGNOSTIC InteriorShadowFoldCheck (test builds): on a check frame the old path runs and the fold is compared with it.
@@ -663,7 +661,7 @@ void ShaderManager::PreStep_CompositePlan(ChainContext& ctx) {
 				!forwardInterior ? "off (no forward lamp shadows this frame: the old blurred pass)" :
 				Effects.ShadowsExteriors->Settings.Interiors.Forward.DarkeningBlur ? "off (DarkeningBlur)" :
 				effectsBetween ? "off (an effect between it and the fog reads the picture)" :
-				(Effects.Reflections->Enabled && Effects.Reflections->Effect && Effects.Reflections->CubeWanted()) ? "off (the Reflections surroundings cube reads the picture)" :
+				Effects.Reflections->CubeStandaloneRunnable() ? "off (the Reflections surroundings cube reads the picture)" :
 				"off (the dedicated pass or the fog composite is unavailable, or this GPU's 16-bit rounding is unknown)");
 		}
 	}
@@ -974,8 +972,8 @@ void ShaderManager::PreStep_Reflections(ChainContext& ctx) {
 			{ Effects.Reflections->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface); PixelInspector::AfterFrame(Effects.Reflections); }
 			Effects.Reflections->ClearPassTextures();
 		}
-		else if (Effects.Reflections->Enabled && Effects.Reflections->Effect && Effects.Reflections->CubeWanted()) {
-			// No floor reflects now, but metal and the env maps may read the surroundings cube: keep it up.
+		else if (Effects.Reflections->CubeStandaloneRunnable()) {
+			// No floor reflects (or floor SSR is off), but metal and the env maps read the surroundings cube: keep it up.
 			Effects.Reflections->RenderCubeOnly(Device);
 			Device->SetRenderTarget(0, RenderTarget);
 		}
@@ -1075,6 +1073,7 @@ void ShaderManager::PreStep_VolumetricLight(ChainContext& ctx) {
 		}
 		Fog->gridTexture = nullptr;
 	}
+	DistantLandProto::Render(Device, RenderTarget);
 }
 
 void ShaderManager::PreStep_DustMotes(ChainContext& ctx) {

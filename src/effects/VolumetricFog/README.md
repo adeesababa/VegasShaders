@@ -331,6 +331,10 @@ the visibility (they are smooth along the view). The Vulkan and SM6 fog passes s
 
 **PackedFog.** Pass 1 at half size into the target's top-left quarter: (add, luma(mul)). Pass 2: the four half texels' coefficients, their
 depths found again (nearest of their 2 x 2), the same weights and own-fog fallback; the multiply is grey in this path.
+NOT DRAWN since 2026-11-24: the shader as written does not do the above. PackedFogEstimate returns the finished fogged colour (and depth
+in alpha) and PackedFogCombine upsamples that colour, so the whole picture came out at half resolution wherever this path ran (with
+ReShade loaded at RenderScale 1, every frame: a player's DLAA looked softer than RenderScale 0.5). The C++ (VolumetricFogEffect::Render)
+now falls back to the full-resolution technique instead; the techniques are still in the file.
 
 **HalfStoreProbe.** r = (1024 + i + q) / 1024 x 2^(i mod 7 - 3), q in {0.25, 0.5, 0.75} (ties included), i = texel index; g, b =
 RoundToHalf(r, 0 / 2). The C++ compares the stored r with g and b.

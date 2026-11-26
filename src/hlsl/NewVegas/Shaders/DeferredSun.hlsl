@@ -44,10 +44,19 @@
 // specular level). FD_SUN_SPEC_FADE: Includes/Object.hlsl getSunLightingModel's fade.
 static float DSSpecF0 = 0.04f;
 static float DSSpecFade = 1.0f;
+static float DSClearcoat = 0.0f;
+static float DSPearl = 0.0f;
 #define PBR_SPEC_F0(baseColor, metal) lerp(DSSpecF0.xxx, (baseColor), (metal))
 #define PBR_DIELECTRIC_F0 min(DSSpecF0, 0.04f)
 #define FD_SUN_SPEC_FADE DSSpecFade
 #define PBR_ROUGH_F90 1	// UNOFFICIAL 2026-11-19 (Finding 4.2): roughness-damped grazing F90 parity with RtPathTrace.comp
+// D3D9 SM3.0 DeferredSun.hlsl overflows r0..r31 (X4505) when FD_SKIN + FD_FOLIAGE compile with multi-scatter/clearcoat/pearl;
+// Vulkan Compute\DeferredSun.comp and forward Object.hlsl always keep full MultiScatter, Clearcoat, and Pearlescence.
+#if !(defined(FD_SKIN) && FD_SKIN)
+    #define PBR_MULTI_SCATTER 1
+    #define PBR_CLEARCOAT_AMT DSClearcoat
+    #define PBR_PEARL_AMT DSPearl
+#endif
 
 #include "includes/Helpers.hlsl"
 #include "includes/Object.hlsl"
@@ -85,8 +94,39 @@ float4 TESR_TerrainParallaxIso : register(c12);	// z ShadowBounce
 float4 DS_LandSun   : register(c14);	// (2026-11-15) the land's own light as its pixel shaders got it: xyz SunDir (c18, to the light), w 1 = read back this frame
 float4 DS_LandColor : register(c15);	// rgb SunColor (c3, the stored curve), w 1 = read back (core/LandLight.h); else the directional light (DS_Sun / DS_SunColor)
 float4 DS_Vis      : register(c16);	// (2026-11-16 fd-sunvis) x 1 = the land's recorded height self-shadow, y 1 = the recorded highlight F0, z SpecularFade's start (game units), w 1 / its range (0: no fade)
+float4 DS_SSS      : register(c17);	// (2026-11-25 MaterialSSS Phase 2) x: enable, y: isExterior
+float4 DS_Sheen    : register(c18);	// (2026-11-25 SunSheen) x strength, y micro-roughness (0.45..0.95)
+// UNOFFICIAL 2026-11-26 Screen-Space Shadows (core/ScreenSpaceShadows.h, Bottled Shaders port): x 1 = this span's mask is active
+float4 DS_BendSSS  : register(c19);
+sampler2D TESR_ScreenSpaceShadows : register(s13) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
 float4 DS_Fog      : register(c13);	// (2026-11-14) rgb the fog colour the records lerped with (stored curve), w 1 = the game's fog is drawn: the exact stored-curve add (FDAddFogged) from the frame's copy on s0
 #define DD TESR_DeferredDepthFrame
+
+float3 EvalSunSheen(float3 N, float3 V, float3 L, float3 albedo, float3 sunColor, float r, float metal, float isSpecular, float strength, float rSheen) {
+    const float dry = saturate(1.0f - metal);
+    if (strength <= 0.0001f || dry <= 0.001f) return float3(0.0f, 0.0f, 0.0f);
+    const float NdotL = saturate(dot(N, L));
+    if (NdotL <= 1.0e-4f) return float3(0.0f, 0.0f, 0.0f);
+    const float NdotV = saturate(dot(N, V));
+    const float3 H = normalize(V + L);
+    const float NdotH = saturate(dot(N, H));
+    const float roughW = isSpecular > 0.5f ? smoothstep(0.18f, 0.50f, r) : 1.0f;
+    const float a = rSheen * rSheen;
+    const float a2 = a * a;
+    const float dDenom = NdotH * NdotH * (a2 - 1.0f) + 1.0f;
+    const float broadD = a2 / max(3.14159265f * dDenom * dDenom, 1.0e-4f);
+    const float fGraz = pow(1.0f - NdotV, 3.0f);
+    const float fSheen = 0.04f + 0.14f * fGraz;
+    const float3 glaze = sunColor * (broadD * fSheen * NdotL * 0.65f);
+    const float litGate = smoothstep(0.0f, 0.22f, NdotL);
+    const float graze = pow(1.0f - NdotV, 2.5f);
+    const float retro = 0.5f + 0.5f * saturate(dot(V, L));
+    const float orenLift = (0.28f * NdotL + 0.38f * graze * litGate) * (0.75f + 0.45f * retro);
+    const float albLuma = dot(albedo, float3(0.2126f, 0.7152f, 0.0722f));
+    const float3 sheenTint = lerp(albedo, (albLuma * 0.70f + 0.30f).xxx, 0.40f);
+    const float3 dustSheen = sunColor * sheenTint * orenLift;
+    return (glaze + dustSheen) * (strength * dry * roughW);
+}
 
 // The G-buffer (one line each: ShaderTextureValue reads the sampler states to the end of the line).
 sampler2D DS_Frame : register(s0);	// (2026-11-14) the frame's copy, linear (DeferredSun::Apply), while DS_Fog.w is 1
@@ -278,12 +318,13 @@ float4 main(PS_IN IN, out float depth : DEPTH DS_SKIN_SPEC_OUT) : COLOR0 {
     DSSpecF0 = DS_Vis.y > 0.5f && !land ? specF0 : 0.04f;
     DSSpecFade = DS_Vis.w > 0.0f ? saturate(1.0f - (length(P) - DS_Vis.z) * DS_Vis.w) : 1.0f;
 
+    float sssAmbScalar = 0.0f;
     float3 light;
 #if FD_SKIN
     // UNOFFICIAL 2026-11-15 DeferredSkin: the lookup with the skin's options, whenever the sun is up (the skin's light wraps past the terminator);
     // the skin's light after it (its shadow is inside its model: the penumbra's scatter, the self-shadow's escape)
     [branch] if (skinPx) { ShadowSkinPixel = 1.0f; ShadowMinPenumbra = TESR_ShadowForwardData.z; light = sunLin; }
-    else
+    else {
 #endif
 #if FD_FOLIAGE
     [branch] if (foliage) {
@@ -292,11 +333,71 @@ float4 main(PS_IN IN, out float depth : DEPTH DS_SKIN_SPEC_OUT) : COLOR0 {
     }
     else
 #endif
-    [branch] if (land) light = LandSun(Lland, sunLand, V, N, albedo.rgb, r);
+    [branch] if (land) {
+        DSClearcoat = 0.0f;
+        DSPearl = 0.0f;
+        light = LandSun(Lland, sunLand, V, N, albedo.rgb, r);
+        #if !(SUN_CROSSFADE && SUN_CROSSFADE_PASS)
+        [branch] if (DS_Sheen.x > 0.0001f) {
+            light += EvalSunSheen(N, V, Lland, albedo.rgb, sunLand * (TESR_TerrainExtraData.x != 0.0f ? LinScale(TESR_TerrainData.z) : 1.0f), r, saturate(TESR_TerrainData.x), 0.0f, DS_Sheen.x, DS_Sheen.y);
+        }
+        #endif
+    }
     else {
         SetDiffuseEnergyKeep(N, V, r);	// (the object shaders' EnergySplit; the land does not take it)
-        light = getSunLightingModel(FDSunSpecular(albedo.a, m.r), L, sunLin, V, N, albedo.rgb, r, metal);
+        const float isSpec = FDSunSpecular(albedo.a, m.r);
+        DSClearcoat = saturate(DS_Sheen.z);
+        DSPearl = saturate(DS_Sheen.w);
+        light = getSunLightingModel(isSpec, L, sunLin, V, N, albedo.rgb, r, metal);
+        #if !(SUN_CROSSFADE && SUN_CROSSFADE_PASS)
+        [branch] if (DS_Sheen.x > 0.0001f) {
+            light += EvalSunSheen(N, V, L, albedo.rgb, sunLin * LIN_SCALE_LIGHT, r, metal, isSpec, DS_Sheen.x, DS_Sheen.y);
+        }
+        #endif
     }
+    #if !(SUN_CROSSFADE && SUN_CROSSFADE_PASS)
+    // UNOFFICIAL 2026-11-25 MaterialSSS Phase 2: direct/transmitted terms fold before shadow lookup (exact cascade+sunVis gating, minimal live regs).
+    [branch] if (DS_SSS.x > 0.5f && abs(model - 8.0f) > 0.5f) {
+#if FD_FOLIAGE
+        const bool sssFol = foliage, sssGrass = grassF;
+#else
+        const bool sssFol = false, sssGrass = false;
+#endif
+        if (!sssFol && !sssGrass && metal < 0.25f && r > 0.42f) {
+            const float nmr = (1.0f - metal) * smoothstep(0.42f, 0.88f, r);
+            light += albedo.rgb * (land ? sunLand : sunLin) * (r * r * 0.20f * (0.35f + 0.65f * (1.0f - saturate(dot(N, V)))) * max(dot(N, land ? Lland : L), 0.0f) * nmr);
+        }
+        if (DS_SSS.y > 0.5f && L.z > 0.02f && metal < 0.35f) {
+            const float gW = saturate(0.56f - 0.56f * N.z) * smoothstep(0.02f, 0.28f, L.z) * (land ? 0.35f : 1.0f) * ((sssFol || sssGrass) ? 0.65f : lerp(0.25f, 1.0f, smoothstep(0.35f, 0.85f, r)));
+            const float bs = dot(land ? sunLand : sunLin, float3(0.2126f, 0.7152f, 0.0722f)) * 0.36f * gW * (1.0f - metal);
+            light += albedo.rgb * float3(0.36f, 0.25f, 0.14f) * (bs * 0.70f);
+            sssAmbScalar = bs * 0.30f * (sssFol ? 1.0f : sunVis);
+        }
+        if (abs(model - 3.0f) < 0.5f) {
+            light += lerp(float3(1.0f, 1.0f, 1.0f), albedo.rgb, 0.55f) * sunLin * (0.12f * pow(1.0f - saturate(dot(N, V)), 3.2f) * saturate(dot(Nw, L) * 0.65f + 0.35f));
+        }
+        const bool isPlant = (sssFol && !sssGrass) || abs(model - 5.0f) < 0.5f;
+        const bool isGrass = sssGrass || abs(model - 7.0f) < 0.5f;
+        if ((isPlant || isGrass || abs(model - 3.0f) < 0.5f) && DS_SSS.y > 0.5f && L.z > 0.02f) {
+            const float gnl = dot(Nw, L);
+            const float ww = isPlant ? 0.32f : isGrass ? 0.28f : 0.22f;
+            const float bp = pow(saturate(dot(-V, normalize(L + Nw * (abs(model - 3.0f) < 0.5f ? 0.45f : 0.35f)))), isPlant ? 3.2f : 3.0f);
+            const float tt = (0.34f * max(0.0f, saturate((gnl + ww) / (1.0f + ww)) - saturate(gnl)) + bp * saturate(0.65f - 0.35f * gnl)) * (isPlant ? 0.85f : isGrass ? 0.70f : 0.28f);
+            const float3 st = isPlant ? float3(1.15f, 1.32f, 0.45f) : isGrass ? float3(1.22f, 1.16f, 0.52f) : float3(1.05f, 0.98f, 0.88f);
+            light += albedo.rgb * st * sunLin * tt;
+        } else if (model > 10.5f && model < 14.5f) {
+            const float gnl = dot(Nw, L);
+            const float ww = abs(model - 12.0f) < 0.5f ? 0.18f : 0.32f;
+            const float bp = pow(saturate(dot(-V, normalize(L + Nw * 0.35f))), 3.0f);
+            const float tt = (0.34f * max(0.0f, saturate((gnl + ww) / (1.0f + ww)) - saturate(gnl)) + bp * saturate(0.65f - 0.35f * gnl)) * 0.44f;
+            const float3 st = (model < 11.5f) ? float3(1.22f, 0.58f, 0.20f) : (model < 12.5f) ? float3(0.95f, 0.90f, 0.82f) : (model < 13.5f) ? float3(0.58f, 0.86f, 1.22f) : float3(1.22f, 0.36f, 0.16f);
+            light += albedo.rgb * st * sunLin * tt;
+        }
+    }
+    #endif
+#if FD_SKIN
+    }
+#endif
     // the lookup only where the light reaches (UnlitShadowSkip's rule: exactly 0 there whatever the shadow)
     float shadow = 1.0f;
     // (2026-11-15 batch 4, frame replay of og-ground: the land came out shadowed in triangles and blobs where the forward land shader, with
@@ -331,6 +432,10 @@ float4 main(PS_IN IN, out float depth : DEPTH DS_SKIN_SPEC_OUT) : COLOR0 {
     #endif
         [branch] if (cloudStrength > 0.0f) shadow *= DSCloudSunAt(P, cloudStrength);
 #endif
+        // UNOFFICIAL 2026-11-26 Screen-Space Shadows (Bottled Shaders' Lighting.hlsl, DEFERRED: outdoors, dirLightAngle >= 0)
+        #if !(SUN_CROSSFADE && SUN_CROSSFADE_PASS)
+        [branch] if (DS_BendSSS.x > 0.5f && dot(N, L) >= 0.0f) shadow *= tex2Dlod(TESR_ScreenSpaceShadows, DDUv(IN.vpos, DD[5])).r;
+        #endif
     }
 #if FD_SKIN
     [branch] if (skinPx) {	// SkinTemplate.hlsl's sun: SkinLight(PBRLight(the sun), the shadow) + its highlight, in world space
@@ -338,15 +443,15 @@ float4 main(PS_IN IN, out float depth : DEPTH DS_SKIN_SPEC_OUT) : COLOR0 {
         float3 skinSpecular;
         light = FDSkinLight(albedo.rgb, N, Nw, V, L, sunLin * LIN_SCALE_LIGHT, shadow, true, skinSpecular);
         light += skinSpecular;
-        light += FDSkinSunTransmission(P, Nw, L, albedo.rgb, sunLin * LIN_SCALE_LIGHT);	// (SSS v2 Transmission; 0 without it)
+        light += FDSkinSunTransmission(P, Nw, V, L, albedo.rgb, sunLin * LIN_SCALE_LIGHT);	// (SSS v2 Transmission; 0 without it)
         skinSpecOut = float4(skinSpecular + SkinSkyReflection(V, Nw, N), 1.0f);	// (the sky reflection is in the record's colour, COLOR0: its share here)
     }
     else
 #endif
 #if FD_FOLIAGE
-    light *= shadow * (foliage ? 1.0f : sunVis);	// (2026-11-16 fd-sunvis: the recorded share, 1 where nothing was recorded)
+    { light *= shadow * (foliage ? 1.0f : sunVis); light += albedo.rgb * float3(0.36f, 0.25f, 0.14f) * sssAmbScalar; }	// (2026-11-16 fd-sunvis)
 #else
-    light *= shadow * sunVis;	// (2026-11-16 fd-sunvis: the recorded share, 1 where nothing was recorded)
+    { light *= shadow * sunVis; light += albedo.rgb * float3(0.36f, 0.25f, 0.14f) * sssAmbScalar; }	// (2026-11-16 fd-sunvis)
 #endif
     // the land's ShadowBounce (TerrainTemplate.hlsl): the sun its relief took, back x its colour, outside cast shadows. (2026-11-16 fd-sunvis)
     // the height self-shadow (crackShadow) is the recorded share (1 with LandCrackShadow off), as the land record's reliefLoss takes it.

@@ -24,6 +24,10 @@ GONE = {('shaders.shadowsexteriors.shadowmaps', 'mode')}   # 70's key is no long
 LOOK_OR_CHOICE = {
     ('shaders.ambientlight.status', 'enabled'),            # 68: an effect switch
     ('shaders.terrain.rain', 'lightingscale'), ('shaders.pbr.rain', 'lightingscale'),  # 79: the look
+    # 98 (2026-11-24): the dynamic-reflections upgrade's look (PolishedRoughness, a fix, is in the table)
+    ('shaders.pbr.metal', 'roughness'), ('shaders.pbr.envmaps', 'lighting'), ('shaders.pbr.envmaps', 'strength'),
+    ('shaders.pbr.envmaps', 'withmetal'), ('shaders.reflections.main', 'cubecapture'), ('shaders.reflections.main', 'cubefade'),
+    ('shaders.ambientlight.main', 'exteriorbalance'),
 }
 
 moved = []

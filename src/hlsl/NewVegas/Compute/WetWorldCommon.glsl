@@ -107,19 +107,54 @@ vec4 GetOrthoSurfacePosition(vec2 screenUV) {
     return vec4(relativeWorldPosition, 1.0);
 }
 
-float GetRoofMask(vec4 orthoPos) {
+vec2 RoofHash22(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.xx + p3.yz) * p3.zy);
+}
+
+vec2 RoofWander(vec2 worldXY) {
+    vec2 p = worldXY * 0.08;
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    vec2 a = RoofHash22(i);
+    vec2 b = RoofHash22(i + vec2(1.0, 0.0));
+    vec2 c0 = RoofHash22(i + vec2(0.0, 1.0));
+    vec2 d = RoofHash22(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c0, d, u.x), u.y) - 0.5;
+}
+
+float SampleOrthoDepthPoint(vec2 uv) {
+    return textureLod(sampler2D(t_ortho, NVR_SAMPLER(pc.sPoint)), uv, 0.0).r;
+}
+
+float GetRoofMask(vec4 orthoPos, vec2 worldXY) {
     orthoPos.xyz /= orthoPos.w;
 
     float outofbounds = float(orthoPos.x < -1.0 || orthoPos.x > 1.0 ||
         orthoPos.y < -1.0 || orthoPos.y > 1.0 ||
         orthoPos.z < 0.0 || orthoPos.z > 1.0);
 
-    orthoPos.x = orthoPos.x * 0.5 + 0.5;
-    orthoPos.y = orthoPos.y * -0.5 + 0.5;
+    float texel = c.orthoData.y > 0.0 ? c.orthoData.y : (1.0 / 512.0);
+    float res = 1.0 / texel;
 
-    float ortho = SampleOrthoDepth(orthoPos.xy);
+    vec2 uv = vec2(orthoPos.x * 0.5 + 0.5, orthoPos.y * -0.5 + 0.5);
+    uv += RoofWander(worldXY) * (0.9 * texel);
 
-    return float(ortho > orthoPos.z - 0.0001) * (1.0 - outofbounds);
+    vec2 p = uv * res - 0.5;
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 c00 = (i + 0.5) * texel;
+    float zRef = orthoPos.z - 0.0005;
+
+    float s00 = SampleOrthoDepthPoint(c00) > zRef ? 1.0 : 0.0;
+    float s10 = SampleOrthoDepthPoint(c00 + vec2(texel, 0.0)) > zRef ? 1.0 : 0.0;
+    float s01 = SampleOrthoDepthPoint(c00 + vec2(0.0, texel)) > zRef ? 1.0 : 0.0;
+    float s11 = SampleOrthoDepthPoint(c00 + vec2(texel, texel)) > zRef ? 1.0 : 0.0;
+
+    float lit = mix(mix(s00, s10, f.x), mix(s01, s11, f.x), f.y);
+    return smoothstep(0.0, 1.0, lit) * (1.0 - outofbounds);
 }
 
 float GetOrthoDepthScale() {

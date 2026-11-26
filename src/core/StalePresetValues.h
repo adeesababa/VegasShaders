@@ -93,6 +93,13 @@ namespace StalePresetValues {
 		{ "Shaders.WetWorld.Main", "ReflectionsOwnPuddles", 0.0f, 92 },
 		{ "Shaders.PBR.Main", "VanillaBridgeDielectricMax", 0.08f, 94 },
 		{ "Main.Main.RayTracing", "ActorFlushPerSpace", 0.0f, 95 },
+		{ "Shaders.ShadowsExteriors.Main", "NightMinDarkness", 0.35f, 97 },
+		{ "Shaders.ShadowsExteriors.Main", "UsePointShadowsNight", 0.0f, 97 },
+		{ "Shaders.PBR.Metal", "PolishedRoughness", 0.65f, 98 },	// (the inverted polished finish; step 98's other keys are the look)
+		{ "Shaders.PBR.Metal", "GreyMetal", 0.5f, 99 },
+		{ "Shaders.PBR.Metal", "Reflections", 0.6f, 99 },
+		{ "Shaders.Reflections.RT", "Weapon", 0.0f, 99 },
+		{ "Shaders.Reflections.RT", "WeaponRoughness", 0.3f, 99 },
 	};
 
 	// Keys that moved (UpdateOldDefaults 61 and 67): the value goes to the new key. [Shaders.VolumetricLight.Main] NightStrength (64) has

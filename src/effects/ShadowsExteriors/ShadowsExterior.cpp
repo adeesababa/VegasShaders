@@ -6,7 +6,7 @@
 #include "../../core/SunDepthFit.h"	// UNOFFICIAL 2026-10-27 FitToDepth
 #include "../../core/RtSunShadows.h"	// UNOFFICIAL 2026-10-28 RT sun shadows
 #include "../../core/SunFadeDeferred.h"	// UNOFFICIAL 2026-11-15 fd-smoothsun (the deferred renderer's sun steps)
-#include "../../core/BendContact.h"	// UNOFFICIAL 2026-11-06 forward Bend contact shadows (fork port 2026-11-13)
+#include "../../core/DeferredLamps.h"	// UNOFFICIAL 2026-11-23 deferred exterior night lamp shadows via ShadowAtlas
 
 // UNOFFICIAL 2026-10-16 lamp contact shadows (PointShadows.fx LampContactPS, technique 2; drawn by ShaderManager after the lamp
 // pass): every number the shader needs (see the constants' comments there). Kept out of ShadowsExterior.h (widely included).
@@ -29,7 +29,6 @@ static D3DXVECTOR4 ScreenSpaceFade(0.0f, 0.0f, 0.0f, 0.0f);
 static float ScreenSpaceNearFade = 0.0f;	// the setting (UpdateSettings); ScreenSpaceFade is made from it each frame (UpdateConstants)
 
 void ShadowsExteriorEffect::UpdateConstants() {
-	BendContact::UpdateConstants();	// UNOFFICIAL 2026-11-06: last frame's Bend result, reprojected for this frame's lit shaders
 	// Contact-shadow start and end: NearFade, pushed out to where the land's bumps end while those are on (DxvkCompute::DisplaceContactFade).
 	ScreenSpaceFade = D3DXVECTOR4(ScreenSpaceNearFade * 0.5f, ScreenSpaceNearFade, 0.0f, 0.0f);
 	float displaceBegin = 0.0f, displaceEnd = 0.0f;
@@ -40,8 +39,8 @@ void ShadowsExteriorEffect::UpdateConstants() {
 
 	Constants.ShadowFade.x = 0; // Fade 1.0 == no shadows
 	if (TheShaderManager->GameState.isExterior) {
-		// the sun's shadows fade to 0 around sunrise and sunset
-		Constants.ShadowFade.x = smoothStep(0.5f, 0.1f, abs(TheShaderManager->GameState.dayLight - 0.5f));
+		// the sun's shadows fade to 0 around sunrise and sunset (tightened deadband keeps early-night moonlight shadows crisp)
+		Constants.ShadowFade.x = smoothStep(0.32f, 0.08f, abs(TheShaderManager->GameState.dayLight - 0.5f));
 
 		TimeGlobals* timeGlobals = TimeGlobals::Get();
 		const float daysPassed = timeGlobals->GameDaysPassed ? timeGlobals->GameDaysPassed->data : 1.0f;
@@ -77,8 +76,11 @@ void ShadowsExteriorEffect::UpdateConstants() {
 		}
 
 		// The point-light shadows' enabled flag goes into ShadowFade.z every frame (not only when the day/night state changes).
+		// When DeferredLamps handles exterior point shadows per-lamp from ShadowAtlas, keep ShadowFade.z off so the screen-space
+		// pass and AmbientLight do not apply screen-wide darkening.
 		const bool usePointLights = (TheShaderManager->GameState.isDayTime > 0.5) ? Settings.Exteriors.UsePointShadowsDay : Settings.Exteriors.UsePointShadowsNight;
-		Constants.ShadowFade.z = usePointLights;
+		const bool deferredExtPointShadows = usePointLights && DeferredLamps::Live && !RtLampShadows::ExteriorReplacing();
+		Constants.ShadowFade.z = (usePointLights && !deferredExtPointShadows) ? 1.0f : 0.0f;
 		Constants.ShadowFade.y = Settings.Exteriors.Enabled && Enabled;
 		Constants.ShadowFade.w = Constants.ShadowMapRadius.w;	// furthest distance for point lights shadows
 		// UNOFFICIAL 2026-10-27 FitToDepth: the lamp shadows' reach stays the unfitted one (the fit may end the cascades sooner).
@@ -188,7 +190,8 @@ void ShadowsExteriorEffect::UpdateLightColors() {
 	const float dimmer = *bHDR ? sun->Dimmer : (std::min)(sun->Dimmer, 1.0f);
 	D3DXVECTOR3 ambient(sun->Amb.r * dimmer, sun->Amb.g * dimmer, sun->Amb.b * dimmer);
 	if (*fMinAmbient > 0.0f) {
-		const float luminance = ambient.x * 0.33f + ambient.y * 0.34f + ambient.z * 0.33f;
+		// Matches BSShaderLightingProperty::SetLight1x2x (0x00B70A04..0x00B70A30): 0.33R + 0.34G + B + 0.33.
+		const float luminance = ambient.x * 0.33f + ambient.y * 0.34f + ambient.z + 0.33f;
 		if (luminance > 0.0f) {
 			const float boost = luminance <= *fMinAmbient ? *fMinAmbient / luminance : 1.0f;
 			ambient = (ambient + D3DXVECTOR3(0.1f, 0.1f, 0.1f)) * boost;
@@ -826,7 +829,6 @@ void ShadowsExteriorEffect::RegisterConstants() {
 	// Each name is bound to the memory the shaders read it from, in the order they were always bound.
 	const auto bind = [](const char* name, D3DXVECTOR4* value) { TheShaderManager->RegisterConstant(name, value); };
 	bind("TESR_SmoothedSunDir", &Constants.SmoothedSunDir);
-	BendContact::RegisterConstants();	// UNOFFICIAL 2026-11-06 TESR_ContactReproject, TESR_ContactForwardData
 	bind("TESR_RtSunReplace", RtSunShadows::ReplaceConstant());	// UNOFFICIAL 2026-10-28 RT sun shadows Mode 1
 	// UNOFFICIAL 2026-11-13 ForwardLookup (Includes/Shadow.hlsl RT_SUN_FORWARD)
 	bind("TESR_RtSunRowX", RtSunShadows::ForwardConstant(0));
@@ -923,7 +925,6 @@ static void MakeCascadeSurfaces(ShadowsExteriorEffect& fx, ULONG cascadeSize, UL
 void ShadowsExteriorEffect::RegisterTextures() {
 	TerrainShadows.RegisterTextures();	// UNOFFICIAL 2026-10-19
 	RtSunShadows::RegisterForwardTexture();	// UNOFFICIAL 2026-11-13 ForwardLookup: TESR_RtSunForward (nothing unless compiled in)
-	BendContact::RegisterTextures();	// UNOFFICIAL 2026-11-06 TESR_ContactForward (only when Bend is on at start)
 	PuddleMap::RegisterTextures();		// 2026-11-12 Puddles map mode: TESR_PuddleMap (only in map mode)
 	const ULONG cascadeSize = Settings.ShadowMaps.CascadeResolution;
 	const ULONG cubeSize = Settings.Interiors.ShadowCubeMapSize;
@@ -1228,6 +1229,7 @@ void ShadowsExteriorEffect::RecreateTextures(bool cascades, bool ortho, bool cub
 			ReleaseAndClear(ShadowDynamicSurface);
 			ReleaseAndClear(ShadowDynamicTexture);
 			ShadowDynamicSize = 0;
+			ShadowDynamicNeedsClear = true;
 			DeferredDynamicFailed = false;
 			DeferredFading = DeferredHolding = DeferredCapturePending = DeferredCaptureReady = false;
 			Constants.CrossFade.x = 0.0f;
@@ -1454,7 +1456,7 @@ bool ShadowsExteriorEffect::GetCharacterViewProj(const D3DXVECTOR3& sunDir, D3DX
 	CharacterTargetNode = nullptr;
 	if (!Player) return false;
 	Character* target = (Character*)Player;
-	if (!Player->isThirdPerson) {
+	if (!Player->IsDrawnThirdPerson()) {
 		if (TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.ShadowMaps", "CharacterShadowMapTarget") != 1) return false;
 		target = CharacterMapNpc(max(TheSettingManager->GetSettingF("Shaders.ShadowsExteriors.ShadowMaps", "CharacterShadowMapNpcDistance"), 0.0f));
 		if (!target) return false;
@@ -1498,10 +1500,14 @@ bool ShadowsExteriorEffect::FitCharacterBox(Character* target, NiNode* node, con
 	D3DXVec3Normalize(&dir, &dir);
 	D3DXVECTOR3 up(0.0f, 0.0f, 1.0f);
 	if (SunOverhead(dir)) up = D3DXVECTOR3(0.0f, 1.0f, 0.0f);	// as GetCascadeViewProj's OverheadSunFix
-	const D3DXVECTOR3 eye = centre + dir * radius;
+	// UNOFFICIAL: back off the near plane sunward so raised arms / swung melee weapons extending beyond
+	// radius do not get pancaked to depth 0 by ShadowMap.vso while keeping XY texel resolution sharp.
+	const float nearBackoff = 96.0f;
+	const float depthSpan = 2.0f * radius + nearBackoff;
+	const D3DXVECTOR3 eye = centre + dir * (radius + nearBackoff);
 	D3DXMATRIX view, proj;
 	D3DXMatrixLookAtRH(&view, &eye, &centre, &up);
-	D3DXMatrixOrthoOffCenterRH(&proj, -radius, radius, -radius, radius, 0.0f, 2.0f * radius);
+	D3DXMatrixOrthoOffCenterRH(&proj, -radius, radius, -radius, radius, 0.0f, depthSpan);
 	viewProj = view * proj;
 
 	// the world origin on a texel corner (GetCascadeViewProj's rounding): the picture moves by whole texels as the character moves
@@ -1524,7 +1530,7 @@ bool ShadowsExteriorEffect::FitCharacterBox(Character* target, NiNode* node, con
 	map.ClearColor = D3DXVECTOR4(1.0f, 0.0f, 0.0f, 1.0f);
 	map.ShadowMapCascadeCenterRadius = D3DXVECTOR4(centre.x, centre.y, centre.z, radius);
 	map.CameraTranslation = D3DXVECTOR3(cameraPosition.x, cameraPosition.y, cameraPosition.z);
-	NiFrustum frustum(-radius, radius, radius, -radius, 0.0f, 2.0f * radius, true);
+	NiFrustum frustum(-radius, radius, radius, -radius, 0.0f, depthSpan, true);
 	TheCameraManager->SetFrustumPlanes(&map.ShadowMapFrustumPlanes, &viewProj, eye, frustum);
 	map.ShadowMapFrustumPlanes.SetActivePlaneState(62);
 
@@ -1532,7 +1538,7 @@ bool ShadowsExteriorEffect::FitCharacterBox(Character* target, NiNode* node, con
 	centerOut = D3DXVECTOR4(centre.x, centre.y, centre.z, radius);
 	dataOut.x = 1.0f / mapSize;
 	dataOut.y = (std::min)(Settings.ShadowMaps.CharacterMapBlend / radius, 0.9f);
-	dataOut.z = Settings.ShadowMaps.CharacterMapBias / (2.0f * radius);	// world units -> the map's depth (0..1 over 2R)
+	dataOut.z = Settings.ShadowMaps.CharacterMapBias / depthSpan;	// world units -> the map's depth (0..1 over depthSpan)
 	return true;
 }
 
@@ -1833,6 +1839,7 @@ bool ShadowsExteriorEffect::EnsureDeferredFadeTargets() {
 			: E_FAIL;
 		if (SUCCEEDED(depthHr) && ShadowDynamicDepthSurface) {
 			ShadowDynamicSize = dynSize;
+			ShadowDynamicNeedsClear = true;
 			Logger::Log("UNOFFICIAL deferred sun steps: %ux%u dynamic shadow overlay created (%.1f MB)", dynSize, dynSize,
 				TextureManager::TargetBytes((int)dynSize, (int)dynSize, D3DFMT_R32F, false) / 1048576.0);
 		}
@@ -1841,6 +1848,7 @@ bool ShadowsExteriorEffect::EnsureDeferredFadeTargets() {
 			ReleaseAndClear(ShadowDynamicSurface);
 			ReleaseAndClear(ShadowDynamicTexture);
 			ShadowDynamicSize = 0;
+			ShadowDynamicNeedsClear = true;
 			DeferredDynamicFailed = true;
 			Logger::Log("UNOFFICIAL deferred sun steps: %ux%u dynamic shadow overlay could not be made; fading without live dynamic separation", dynSize, dynSize);
 		}
@@ -2038,7 +2046,7 @@ D3DXMATRIX ShadowsExteriorEffect::GetCascadeViewProj(ShadowMapSettings* ShadowMa
 	// UNOFFICIAL 2026-10-23 PlayerInNear ([Shaders.ShadowsExteriors.ShadowMaps], world units, live, 0 = off). In third person the Near
 	// sphere grows to the smallest one holding both its slice and the player's head (24 units round the head, plus the hand-over band),
 	// while the camera is within PlayerInNear of the head. Its texels grow with the sphere; the radius is rounded up to 16 units.
-	if (Settings.ShadowMaps.PlayerInNear > 0.0f && ShadowMap == &ShadowMaps[MapNear] && Player && Player->isThirdPerson &&
+	if (Settings.ShadowMaps.PlayerInNear > 0.0f && ShadowMap == &ShadowMaps[MapNear] && Player && Player->IsDrawnThirdPerson() &&
 		Player->ActorSkinInfo && Player->ActorSkinInfo->HeadNode) {
 		const NiPoint3& h = Player->ActorSkinInfo->HeadNode->m_worldTransform.pos;
 		const D3DXVECTOR3 head(h.x - cameraPos.x, h.y - cameraPos.y, h.z - cameraPos.z);	// camera-relative, as the corners

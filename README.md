@@ -99,6 +99,15 @@ With work from:
   ([docs/COMMUNITY-SHADERS-PORTS.md](docs/COMMUNITY-SHADERS-PORTS.md)).
 - [WallSoGB](https://github.com/WallSoGB)'s Fallout: New Vegas database, behind the engine fixes; the NVSE / xNVSE
   projects and the community's reverse engineering of the game.
+- [Bottled Shaders](https://github.com/InTheBottle/Bottled-Shaders) (GPL-3.0, a Community Shaders fork) via
+  [mrfury97/VegasShaders@9107a20](https://github.com/mrfury97/VegasShaders/commit/9107a20): deferred Screen-Space
+  Shadows, built on Bend Studio's screen-space shadows, Copyright 2023 Sony Interactive Entertainment (Apache-2.0).
+- **iro**: extensive live testing, profiling, and root-cause engineering investigations for ReShade + DLAA sharpness
+  (`VolumetricFog`), `NvrRtHelper` GPU priority preemption stalls, `ReplaceForward` panning dilation/reprojection,
+  `ReflectionsTemporal` `RenderScale` history drift, `WeaponMask` sun-glare/blend stencil guards, Reflections `.spv`
+  hash syncing, `NoCloud\SLS2023–2027` `X4505` register-budget unification, `AmbientLight` `AlbedoBuffer` bleed-through
+  depth validation, `DlssBiasMask` reversed-depth alignment, `TESR_ShadowDynamic` fade strobing fix, per-target
+  `TargetReleaseSeconds` RT AO/GI retention, and RT `ActorRebuildInterval` tuning.
 - SMAA by Jorge Jimenez et al. (MIT).
 - Polyphony Digital: the Perceptual tone mapper (their sample code, MIT) and the eye adaptation design, from "Driving Toward
   Reality" (SIGGRAPH 2025, Gran Turismo 7).

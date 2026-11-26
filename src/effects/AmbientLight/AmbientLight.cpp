@@ -114,7 +114,18 @@ void AmbientLightEffect::UpdateSettings() {
 		sunGiForced = sunGi && !status;
 		roomGiForced = roomGi && !status;	// UNOFFICIAL 2026-11-12 RoomGI: the same for the interior switch (ShouldRender keeps each to its own side of the door)
 		// the runtime Enabled flag follows a live change of the key (load and revert: SettingManager::GetMenuShaderEnabled)
-		if (IsLoaded()) { if ((sunGi || roomGi) && !Enabled) Enabled = true; else if (!sunGi && !roomGi && wasForced) Enabled = false; }
+		if ((sunGi || roomGi) && !Enabled) {
+			if (IsLoaded()) Enabled = true;
+			else if (PendingLazyLoad) {
+				Enabled = true;
+				LazyLoadQueued = true;
+				if (TheShaderManager) TheShaderManager->LazyEffectLoadQueued = true;
+			}
+		}
+		else if (!sunGi && !roomGi && wasForced && !status) {
+			Enabled = false;
+			if (!IsLoaded()) LazyLoadQueued = false;
+		}
 		settingsOutdoors = TheShaderManager->GameState.isExterior;
 		const bool on = sunGi && settingsOutdoors;
 		CapturedNormals::SunGIWantsAlbedo = on;
@@ -1412,8 +1423,8 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	// UNOFFICIAL 2026-10-31 AlbedoBuffer: the templates' own base colour for the bounce (NVR_ALAlbedo on s12 in the Apply and balance passes) when
 	// it holds this frame's; those two passes then run as D3D9 passes (their Vulkan twins have no albedo input yet; logged once).
 	const bool albedoOn = albedoBuffer && CapturedNormals::AlbedoData.x > 0.5f && CapturedNormals::AlbedoTexture != nullptr;
-	// UNOFFICIAL 2026-11-15 DeferredALAlbedo (core/FdIndirect.h): made here, before any pass begins; AlbedoTexture itself while off
-	IDirect3DBaseTexture9* const albedoTexture = albedoOn ? FdIndirect::ALAlbedo(Device) : nullptr;
+	// UNOFFICIAL 2026-11-15 DeferredALAlbedo (core/FdIndirect.h): made here, before any pass begins; depth-validated against TESR_DepthBuffer.
+	IDirect3DBaseTexture9* const albedoTexture = albedoOn ? FdIndirect::ALAlbedo(Device, ExtFileTexture("TESR_DepthBuffer")) : nullptr;
 	if (D3DXHANDLE h = ParameterHandle(paramBump, "NVR_ALBump")) {
 		D3DXVECTOR4 bump(0.0f, roomShareScaleOffset, 0.0f, 0.0f);
 		Effect->SetVector(h, &bump);
@@ -1637,6 +1648,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 					drawn = ExtDraw(ExtReduce, targets, 1, textures, 0, balanceViewport);
 				}
 				else {
+					if (!ExtOn() && ExtOnRect()) Device->SetRenderTarget(1, nullptr);
 					// Stage 8 (DebugView 8, 12) as below; stage 7 is only read indoors (NVR_ALBalance).
 					IDirect3DBaseTexture9* waveStage = Constants.Data2.w > 11.5f && gridValid ? gridGeometry : gridScreenValid ? gridScreen[gridScreenIndex] : nullptr;
 					IDirect3DBaseTexture9* balance = interiorMode ? balanceTexture[balanceRuns ? balanceWrite : balanceRead] : nullptr;
@@ -1781,6 +1793,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	Device->SetDepthStencilSurface(depthSurface);
 	if (depthSurface) depthSurface->Release();
 	if (SUCCEEDED(result)) {
+		EffectStatus::Note(StatusSlot, Name, EffectStatus::Drawn);
 		if (chained) chain.Commit();
 		else Device->StretchRect(RenderTarget, NULL, RenderedSurface, NULL, D3DTEXF_NONE);
 		shadowApplied = shadow;

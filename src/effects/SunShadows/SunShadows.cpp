@@ -33,6 +33,12 @@ void SunShadowsEffect::RegisterTextures() {
 		TheRenderManager->width, TheRenderManager->height, D3DFMT_G16R16);
 }
 
+bool SunShadowsEffect::TargetsWanted() {
+	return Enabled && TheShaderManager && TheShaderManager->GameState.isExterior &&
+		TheShaderManager->Effects.ShadowsExteriors && TheShaderManager->Effects.ShadowsExteriors->Enabled &&
+		TheShaderManager->Effects.ShadowsExteriors->Settings.Exteriors.Enabled;
+}
+
 /*
 * The stock path renders every pass into TESR_PointShadowBuffer while the same passes sample it
 * (the contact-shadow blurs read neighbouring texels), a read/write feedback loop with undefined

@@ -167,7 +167,7 @@ namespace GrassShadows {
 		// (preserving GrassWind::Lanes in column 4) and world-space GrassBend in c0-c1.
 		float view[4][4] = {};
 		const bool viewSaved = SUCCEEDED(device->GetVertexShaderConstantF(252, &view[0][0], 4));
-		if (!viewSaved) { StatSkipped++; return D3D_OK; }
+		if (!viewSaved) { GrassShaders::PendingTstgRestore = false; StatSkipped++; return D3D_OK; }
 		float bendSaved[2][4] = {};
 		const bool bendSavedOk = SUCCEEDED(device->GetVertexShaderConstantF(0, &bendSaved[0][0], 2));
 		float bendWorld[4] = { 0.0f, 0.0f, 0.0f, 0.0f }, bendParams[4] = { 0.0f, 0.0f, 0.0f, 0.0f };

@@ -24,6 +24,8 @@
 #include "FailOnce.h"	// UNOFFICIAL 2026-11-16 fd-batchB: the pass's real failures retried after the next cell change
 #include "FdTestFault.h"	// UNOFFICIAL 2026-11-16 fd-batchB (test only: DebugVar4 901 / 902)
 #include "ForwardCloudShadows.h"	// UNOFFICIAL 2026-11-16 fd-batchB: c169 for this pass (item 22)
+#include "MaterialSSSProto.h"	// UNOFFICIAL 2026-11-25 MaterialSSS Phase 2
+#include "ScreenSpaceShadows.h"	// UNOFFICIAL 2026-11-26 Bottled Shaders Screen-Space Shadows (GPL-3.0 + Bend Apache-2.0)
 #include <unordered_set>
 
 namespace DeferredSun {
@@ -39,22 +41,37 @@ namespace DeferredSun {
 	// the forward sun's terms the G-buffer now carries. The pass's own: the land's height self-shadow, the recorded highlight F0, SpecularFade's
 	// highlight fade rebuilt from the pixel's distance. (CanopyShadow, ParallaxShadow and MicroShadow are applied by the records: PBR.cpp.)
 	inline bool LandCrackShadow = true, AuthoredHighlight = true, HighlightFade = true, MatchSunDisc = false;
+	inline int RealSunPath = 0;
+	inline float SunSheen = 0.0f, SunSheenRoughness = 0.78f;
 	inline float SmoothStep01(float edge0, float edge1, float x) {
 		float t = (x - edge0) / (edge1 - edge0);
 		t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
 		return t * t * (3.0f - 2.0f * t);
 	}
+	inline void FillSheenConst(bool isVm, float out[4]) {
+		const float sheenOn = (!isVm && TheShaderManager && TheShaderManager->GameState.isExterior &&
+			TheShaderManager->GameState.dayLight > 0.35f && SunSheen > 0.0f)
+			? SunSheen * SmoothStep01(0.35f, 0.65f, TheShaderManager->GameState.dayLight) : 0.0f;
+		const float sheenRough = SunSheenRoughness < 0.45f ? 0.45f : (SunSheenRoughness > 0.95f ? 0.95f : SunSheenRoughness);
+		const float clearcoat = (TheShaderManager && TheShaderManager->Shaders.PBR) ? TheShaderManager->Shaders.PBR->MetalSettings.Clearcoat : 0.0f;
+		const float pearlescence = (TheShaderManager && TheShaderManager->Shaders.PBR) ? TheShaderManager->Shaders.PBR->MetalSettings.Pearlescence : 0.0f;
+		out[0] = sheenOn; out[1] = sheenRough; out[2] = clearcoat; out[3] = pearlescence;
+	}
 	inline float BlendMatchSunDisc(D3DXVECTOR3& toSun, bool& has) {
 		const float len = D3DXVec3Length(&toSun);
 		has = len > 1.0e-6f;
 		if (has) toSun /= len;
-		if (!MatchSunDisc || !TheShaderManager || !TheShaderManager->GameState.isExterior) return 0.0f;
+		if (!TheShaderManager || !TheShaderManager->GameState.isExterior) return 0.0f;
+		const float dayBlend = (MatchSunDisc || RealSunPath > 0) ? SmoothStep01(0.45f, 0.65f, TheShaderManager->GameState.dayLight) : 0.0f;
+		const float nightBlend = SmoothStep01(0.50f, 0.35f, TheShaderManager->GameState.dayLight);
+		const float dirBlend = dayBlend > nightBlend ? dayBlend : nightBlend;
+		if (dirBlend <= 0.0f) return 0.0f;
 		const D3DXVECTOR4& disc = TheShaderManager->ShaderConst.SunDir;
 		D3DXVECTOR3 discV(disc.x, disc.y, disc.z);
 		const float discLen = D3DXVec3Length(&discV);
 		if (discLen <= 1.0e-6f) return 0.0f;
 		const D3DXVECTOR3 discDir = discV / discLen;
-		const float blend = SmoothStep01(0.45f, 0.65f, TheShaderManager->GameState.dayLight) * SmoothStep01(0.0f, 0.12f, discDir.z);
+		const float blend = dirBlend * SmoothStep01(0.0f, 0.12f, discDir.z);
 		if (blend <= 0.0f) return 0.0f;
 		if (has) {
 			D3DXVec3Lerp(&toSun, &toSun, &discDir, blend);
@@ -77,6 +94,42 @@ namespace DeferredSun {
 		if (len > 1.0e-6f) scratch /= len;
 		else scratch = toSun;
 		return &scratch.x;
+	}
+	// UNOFFICIAL 2026-11-24 fd-complete batch 8 (docs/next/FD-COMPLETE.md): the sun's / cell light's colour from the LIGHT, not read back from
+	// a forward draw's constants. Since batch 6 the pass took the colour the game had handed an object (c3, LandLight::ObjectColor) or a land
+	// draw (LandLight::Color) and only fell back to Diff x Dimmer; with the game's forward lighting removed (ForwardLightKill) every sunlit
+	// surface went dark, i.e. the deferred sun depended on the forward constants. The game's own formula (xFNV BSShaderLightingProperty::
+	// SetLight1x2x for a directional light): Diff x Dimmer (clamped to 1 unless HDR) x the ShadowSceneLight's LOD dimmer, x
+	// BSShaderManager::fSunlightDimmer 0x011F9190 outdoors under HDR (bHDR 0x011F941E, bInterior 0x011F9427); the property's forced darkness
+	// (1 on everything the read-back ever saw) is per object and left out. [Shaders.ShadowsExteriors.Deferred] SunColorFromLight (live, default
+	// true); false = the read-back as before. The read-back still runs (direction, and a ratio logged now and then to check the formula).
+	inline bool SunColorFromLight = true;
+	inline void GameSunColor(const NiDirectionalLight* sun, float out[3]) {
+		const bool hdr = *(const bool*)0x011F941E;
+		const bool interior = *(const bool*)0x011F9427;
+		float k = sun->Dimmer;
+		if (!hdr && k > 1.0f) k = 1.0f;
+		if (const ShadowSceneNode* node = BSShaderManager::GetShadowSceneNode(0))
+			if (node->directionalLight && node->directionalLight->fLODDimmer >= 0.0f && node->directionalLight->fLODDimmer <= 1.5f) k *= node->directionalLight->fLODDimmer;
+		if (hdr && !interior) k *= *(const float*)0x011F9190;
+		out[0] = sun->Diff.r * k; out[1] = sun->Diff.g * k; out[2] = sun->Diff.b * k;
+	}
+	// The colour the passes use for objects (and, from the light, for the land too); objectFresh: a read-back of this frame or the last 4.
+	inline void SunColor(const NiDirectionalLight* sun, bool objectFresh, float out[3]) {
+		if (SunColorFromLight || !objectFresh) {
+			if (SunColorFromLight) GameSunColor(sun, out);
+			else { out[0] = sun->Diff.r * sun->Dimmer; out[1] = sun->Diff.g * sun->Dimmer; out[2] = sun->Diff.b * sun->Dimmer; }
+		}
+		else { out[0] = LandLight::ObjectColor[0]; out[1] = LandLight::ObjectColor[1]; out[2] = LandLight::ObjectColor[2]; }
+		static unsigned frames = 0, lines = 0;
+		if (objectFresh && ++frames % 1800 == 1 && lines < 30) {	// the formula against what the game handed the objects
+			lines++;
+			float g[3];
+			GameSunColor(sun, g);
+			Logger::Log("UNOFFICIAL DeferredSun: sun colour from the light %.3f %.3f %.3f, as the game handed the objects %.3f %.3f %.3f, the land %.3f %.3f %.3f (%s)",
+				g[0], g[1], g[2], LandLight::ObjectColor[0], LandLight::ObjectColor[1], LandLight::ObjectColor[2], LandLight::Color[0], LandLight::Color[1], LandLight::Color[2],
+				SunColorFromLight ? "the light's used" : "the read-back used");
+		}
 	}
 	inline int SpecFadeCompiled = -1;	// [Shaders.PBR.Main] SpecularFade at startup (the records' SPEC_FADE_ON; core/PbrPop.h SpecFade::Compiled), -1 not read yet
 	inline std::unordered_set<IDirect3DPixelShader9*> Handles;	// the lighting-free records' handles (from LightFreeRecords::Records)
@@ -146,7 +199,8 @@ namespace DeferredSun {
 		UInt32 revision = 0;
 		bool enabled = false, shadows = true, landCrackShadow = true, authoredHighlight = true;
 		bool matchSunDisc = false, highlightFade = true, specFadeLive = true, grassShadowFix = false;
-		int debugView = 0, nvrDxvkDeferred = 1, smithMode = 0;
+		int debugView = 0, nvrDxvkDeferred = 1, smithMode = 0, realSunPath = 0;
+		float sunSheen = 0.0f, sunSheenRoughness = 0.78f;
 	} gSettings;
 	inline const CachedSettings& SyncSettings() {
 		if (!TheSettingManager) return gSettings;
@@ -160,6 +214,10 @@ namespace DeferredSun {
 			gSettings.landCrackShadow = TheSettingManager->GetSettingI(kSection, "LandCrackShadow") != 0;
 			gSettings.authoredHighlight = TheSettingManager->GetSettingI(kSection, "AuthoredHighlight") != 0;
 			gSettings.matchSunDisc = TheSettingManager->GetSettingI(kSection, "MatchSunDisc") != 0;
+			gSettings.realSunPath = TheSettingManager->GetSettingI(kSection, "RealSunPath");
+			gSettings.sunSheen = TheSettingManager->GetSettingF(kSection, "SunSheen");
+			gSettings.sunSheenRoughness = TheSettingManager->GetSettingF(kSection, "SunSheenRoughness");
+			SunColorFromLight = TheSettingManager->GetSettingI(kSection, "SunColorFromLight") != 0;	// (2026-11-24 fd-complete batch 8)
 			gSettings.highlightFade = TheSettingManager->GetSettingI(kSection, "HighlightFade") != 0;
 			gSettings.specFadeLive = TheSettingManager->GetSettingI("Shaders.PBR.Main", "SpecularFade") != 0;
 			gSettings.grassShadowFix = TheSettingManager->GetSettingI("Shaders.Grass.Main", "ShadowFix") != 0;
@@ -330,10 +388,16 @@ namespace DeferredSun {
 		LandLight::ReadColor = SettingForce::Mode() >= 2 || cfg.enabled;
 		if (LinearScene::DrawWatch == &LandDrawWatch || LinearScene::DrawWatch == &ObjectDrawWatch) LinearScene::DrawWatch = nullptr;	// (no watch across frames)
 		DebugView = cfg.debugView;
+		DeferredDistant::ComputeHandlesStoredCurve = Live && DebugView == 0 && !ComputeFailed && !SunFadeDeferred::Fading && !SkylightingMode1 &&
+			DxvkCompute::PassesOnRect() && DxvkCompute::Available() && !DxvkCompute::KeptOnD3D9("DeferredSun") &&
+			cfg.nvrDxvkDeferred != 0;
 		Shadows = cfg.shadows;
 		LandCrackShadow = cfg.landCrackShadow;
 		AuthoredHighlight = cfg.authoredHighlight;
 		MatchSunDisc = cfg.matchSunDisc;
+		RealSunPath = cfg.realSunPath;
+		SunSheen = cfg.sunSheen;
+		SunSheenRoughness = cfg.sunSheenRoughness;
 		if (SpecFadeCompiled < 0) SpecFadeCompiled = cfg.specFadeLive ? 1 : 0;
 		HighlightFade = cfg.highlightFade && SpecFadeCompiled == 1 && cfg.specFadeLive;	// (as the records fade: compiled at startup, live while compiled)
 		{
@@ -411,7 +475,7 @@ namespace DeferredSun {
 	// Eliminates saving/restoring 224 pixel constants, 208 sampler states, 15 render states, DeferredFog::FrameCopy,
 	// and DEPTH output while supporting both full resolution and RenderScale < 1.0 natively.
 	inline bool TryApplyCompute(IDirect3DDevice9* d, IDirect3DSurface9* target, const D3DSURFACE_DESC& t, bool linearDepth, const NiDirectionalLight* sun) {
-		if (ComputeFailed || Vm.on || SunFadeDeferred::Fading || SkylightingMode1) return false;
+		if (ComputeFailed || Vm.on || SunFadeDeferred::Fading || SkylightingMode1 || (!LinearScene::Linear && DebugView != 0)) return false;
 		if (!DxvkCompute::PassesOnRect() || !DxvkCompute::Available() || DxvkCompute::KeptOnD3D9("DeferredSun")) return false;
 		const CachedSettings& cfg = SyncSettings();
 		if (cfg.nvrDxvkDeferred == 0) return false;
@@ -472,8 +536,9 @@ namespace DeferredSun {
 			float rtSunRowY[4];              // 69
 			float rtSunRowW[4];              // 70
 			float rtSunData[4];              // 71
+			float dsSheen[4];                // 72
 		};
-		static_assert(sizeof(ComputeConstants) == 72 * 16, "DeferredSun ComputeConstants layout mismatch");
+		static_assert(sizeof(ComputeConstants) == 73 * 16, "DeferredSun ComputeConstants layout mismatch");
 
 		auto copyBytes = [](void* dst, const char* name, size_t bytes) {
 			auto found = TheShaderManager->ConstantsTable.find(name);
@@ -498,6 +563,7 @@ namespace DeferredSun {
 				{ 1, 7, NVR_EXT_BIND_SAMPLED_IMAGE,  7, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_rtSunForward
 				{ 1, 8, NVR_EXT_BIND_STORAGE_IMAGE,  8, NVR_EXT_VIEW_2D, TRUE,  0 }, // i_scene
 				{ 1, 9, NVR_EXT_BIND_STORAGE_IMAGE,  9, NVR_EXT_VIEW_2D, TRUE,  0 }, // i_skinSpec
+				{ 1, 10, NVR_EXT_BIND_SAMPLED_IMAGE, 10, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_sssMask
 				{ 2, 0, NVR_EXT_BIND_UNIFORM_BUFFER, 0, NVR_EXT_VIEW_2D, FALSE, 0 }, // Constants
 				{ 0, 0, NVR_EXT_BIND_SAMPLER,        0, NVR_EXT_VIEW_2D, FALSE, 0 }, // linearSampler
 				{ 0, 0, NVR_EXT_BIND_SAMPLER,        1, NVR_EXT_VIEW_2D, FALSE, 4 }, // pointSampler
@@ -599,9 +665,7 @@ namespace DeferredSun {
 		const bool objectFresh = LandLight::ObjectReadFrame && (UInt32)TheFrameRateManager->FrameNumber - LandLight::ObjectReadFrame <= 4;
 		const D3DXMATRIX& proj = NiDX9Renderer::GetSingleton()->projMatrix;
 		cb.dsSun[0] = toSun.x; cb.dsSun[1] = toSun.y; cb.dsSun[2] = toSun.z; cb.dsSun[3] = has ? 1.0f : 0.0f;
-		cb.dsSunColor[0] = objectFresh ? LandLight::ObjectColor[0] : sun->Diff.r * sun->Dimmer;
-		cb.dsSunColor[1] = objectFresh ? LandLight::ObjectColor[1] : sun->Diff.g * sun->Dimmer;
-		cb.dsSunColor[2] = objectFresh ? LandLight::ObjectColor[2] : sun->Diff.b * sun->Dimmer;
+		SunColor(sun, objectFresh, cb.dsSunColor);	// (2026-11-24 fd-complete batch 8: from the light)
 		cb.dsSunColor[3] = foliageW;
 		cb.dsCtrl[0] = (float)DebugView;
 		cb.dsCtrl[1] = linearDepth ? 1.0f : 0.0f;
@@ -617,6 +681,7 @@ namespace DeferredSun {
 		cb.dsLandSun[0] = landDir[0]; cb.dsLandSun[1] = landDir[1]; cb.dsLandSun[2] = landDir[2]; cb.dsLandSun[3] = landDirValid ? 1.0f : 0.0f;
 		cb.dsLandColor[0] = LandLight::Color[0]; cb.dsLandColor[1] = LandLight::Color[1]; cb.dsLandColor[2] = LandLight::Color[2];
 		cb.dsLandColor[3] = (landFresh && LandLight::ColorGood) ? 1.0f : 0.0f;
+		if (SunColorFromLight) { GameSunColor(sun, cb.dsLandColor); cb.dsLandColor[3] = 1.0f; }	// (2026-11-24 fd-complete batch 8)
 
 		{
 			const float start = *BSShaderManager::fSpecularLODStartFade, end = *BSShaderManager::fSpecularLODEnd;
@@ -631,6 +696,7 @@ namespace DeferredSun {
 		float fog[4] = {};
 		const bool fogExact = LinearCompiled && DebugView == 0 && DeferredFog::Params(fog);
 		if (fogExact) memcpy(cb.dsFog, fog, 16);
+		FillSheenConst(false, cb.dsSheen);
 
 		UINT flags = 0;
 		if (GBufferV2()) flags |= 1u << 0u;
@@ -652,6 +718,14 @@ namespace DeferredSun {
 		else flags |= 1u << 16u;
 		if (ForwardShadowsCompiled && cloudTex) flags |= 1u << 17u;
 		if (SlackCapAllCompiled) flags |= 1u << 18u;
+		if (LinearScene::Linear) flags |= 1u << 19u;
+		const bool sssOn = !Vm.on && ScreenSpaceShadows::MadeThisSpan();
+		{
+			const int sssMode = MaterialSSSProto::EffectiveMode();
+			if (sssMode >= 1 && sssMode <= 3) flags |= 1u << 20u; // UNOFFICIAL 2026-11-25 MaterialSSS Phase 2
+			if (TheShaderManager && TheShaderManager->GameState.isExterior) flags |= 1u << 21u;
+			if (sssOn) flags |= 1u << 22u; // UNOFFICIAL 2026-11-26 Bottled Shaders Screen-Space Shadows
+		}
 
 		ID3D9NvrExt* ext = DxvkCompute::Extension();
 		if (FAILED(ext->UpdateBuffer(ComputeUbo, 0, sizeof(cb), &cb))) return false;
@@ -669,6 +743,7 @@ namespace DeferredSun {
 			{ 7, NVR_EXT_BIND_SAMPLED_IMAGE,  rtSunTex ? rtSunTex : depthTex,   0, 0, 0, FALSE },
 			{ 8, NVR_EXT_BIND_STORAGE_IMAGE,  target,                           0, 0, 0, FALSE },
 			{ 9, NVR_EXT_BIND_STORAGE_IMAGE,  skinSpecTarget,                   0, 0, 0, FALSE },
+			{ 10, NVR_EXT_BIND_SAMPLED_IMAGE, (sssOn && ScreenSpaceShadows::Texture) ? static_cast<IDirect3DBaseTexture9*>(ScreenSpaceShadows::Texture) : depthTex, 0, 0, 0, FALSE },
 			{ 0, NVR_EXT_BIND_UNIFORM_BUFFER, ComputeUbo,                       0, 0, sizeof(cb), FALSE },
 			{ 0, NVR_EXT_BIND_SAMPLER,        DxvkCompute::LinearClamp(),       0, 0, 0, FALSE },
 			{ 1, NVR_EXT_BIND_SAMPLER,        DxvkCompute::PointClamp(),        0, 0, 0, FALSE },
@@ -696,6 +771,7 @@ namespace DeferredSun {
 			Logger::Log("[WARNING] UNOFFICIAL DeferredSun: compute dispatch failed (%08lX); falling back to D3D9 pass", hr);
 			return false;
 		}
+		if (sssOn) ScreenSpaceShadows::MarkUsed();
 		StatPasses++;
 		StatCompute++;
 		if (fogExact) StatFogExact++;
@@ -727,39 +803,74 @@ namespace DeferredSun {
 		IDirect3DSurface9* target = nullptr;
 		d->GetRenderTarget(0, &target);
 		if (!target) { StatSkipped++; if (!Vm.on) SkipFrame("no scene target at the span's end"); return; }
-		static GpuTimer timer("Deferred sun"), vmTimer("Deferred sun (first person)");	// (with the conversion to linear light below, when it runs)
-		GpuProfileScope gpu(Vm.on ? vmTimer : timer, d);
-		// The space (bench batch 2): LinearScene switches the frame between linear light and the stored curve draw by draw (BeforeDraw: a
-		// draw that is not one of NVR's lit records, or that blends other than additively, gets the stored curve), and the main list outdoors
-		// ends with such draws (the game's own shaders, blended ones), so at the span's end the frame is usually in the stored curve. The pass
-		// puts it into linear light itself with LinearScene's own conversion (the same one BeforeDraw makes; exact without MSAA, and the span
-		// does not run under the game's MSAA), then adds its light; DeferredLamps and the flashlight after it find the frame linear, and
-		// LinearScene::EndSpan converts back once, as for any span that ends linear. No span (LinearScene off, the game's MSAA) or a failed
-		// conversion: refused (2026-11-16 fd-batchB: SkipFrame for the span, Latch for a failed conversion).
 		if (!LinearScene::Linear && !Vm.on) {	// (DeferredFirstPerson: its own light target, linear)
 			if (!LinearScene::InSpan || !LinearScene::SpanTarget || target != LinearScene::SpanTarget) {
 				target->Release(); StatSkipped++;
 				SkipFrame(!LinearScene::InSpan ? "LinearScene's span is not running (LinearScene off, or the game's MSAA)" : "the scene target at the span's end is not LinearScene's");
 				return;
 			}
+		}
+		D3DSURFACE_DESC t = {};
+		target->GetDesc(&t);
+
+		const bool linearDepth = !Vm.on && DeferredDepth::EnsureLinear(d);	// (the world's view z: not the view model's)
+		if (!DeferredDepth::Ready() && !linearDepth && !Vm.on) DeferredDepth::FillFrame(d);	// the ray mapping (TESR_DeferredDepthFrame) without the copy
+		if (!Vm.on) LogSources(linearDepth);
+		if (linearDepth) StatLinearDepth++;
+
+		// UNOFFICIAL 2026-11-23 Interior DeferredSun fold: indoors on Vulkan compute, pass directional fill params to
+		// DeferredLamps so both interior directional lighting and froxel lamps run in a single compute dispatch.
+		if (TheShaderManager && !TheShaderManager->GameState.isExterior && !Vm.on && DebugView == 0 &&
+			!SunFadeDeferred::Fading && !SkylightingMode1 && !ComputeFailed &&
+			!DxvkCompute::KeptOnD3D9("DeferredSun") && DeferredLamps::CanFoldInteriorDir(d, t)) {
+			const NiPoint3& dir = sun->direction;
+			D3DXVECTOR3 toSun(-dir.x, -dir.y, -dir.z);
+			bool has = false;
+			BlendMatchSunDisc(toSun, has);
+			const bool objectFresh = LandLight::ObjectReadFrame && (UInt32)TheFrameRateManager->FrameNumber - LandLight::ObjectReadFrame <= 4;
+			auto& id = DeferredLamps::InteriorDir;
+			id.sun[0] = toSun.x; id.sun[1] = toSun.y; id.sun[2] = toSun.z; id.sun[3] = has ? 1.0f : 0.0f;
+			SunColor(sun, objectFresh, id.color);	// (2026-11-24 fd-complete batch 8: from the light)
+			id.color[3] = 0.0f;
+			const float start = *BSShaderManager::fSpecularLODStartFade, end = *BSShaderManager::fSpecularLODEnd;
+			const bool fade = HighlightFade && end > start + 1.0f;
+			id.vis[0] = LandCrackShadow ? 1.0f : 0.0f;
+			id.vis[1] = AuthoredHighlight ? 1.0f : 0.0f;
+			id.vis[2] = fade ? start : 0.0f;
+			id.vis[3] = fade ? 1.0f / (end - start) : 0.0f;
+			memset(id.skyIrradiance, 0, sizeof(id.skyIrradiance));
+			if (DeferredLamps::SkinCompiledIn()) {
+				auto found = TheShaderManager->ConstantsTable.find("TESR_SkyIrradianceObjects");
+				if (found != TheShaderManager->ConstantsTable.end() && found->second)
+					memcpy(id.skyIrradiance, found->second, sizeof(id.skyIrradiance));
+			}
+			id.hairDeferred = LightFreeRecords::HairDeferred();
+			id.foliageCompiled = FoliageCompiled;
+			id.active = true;
+			LogLight(toSun, sun, false);
+			StatPasses++;
+			StatCompute++;
+			if (SkipStreak && SkipLogs <= 21) Logger::Log("UNOFFICIAL DeferredSun: the sun pass drew again after %u skipped frame%s", SkipStreak, SkipStreak == 1 ? "" : "s");
+			SkipStreak = 0;
+			static int latchTold = 0;
+			if (Fail.tries != latchTold) { latchTold = Fail.tries; Logger::Log("UNOFFICIAL DeferredSun: the sun pass draws again after its latch (attempt %d of %d)", Fail.tries + 1, FailOnce::kTries); }
+			target->Release();
+			return;
+		}
+
+		static GpuTimer timer("Deferred sun"), vmTimer("Deferred sun (first person)");	// (with the conversion to linear light below, when it runs)
+		GpuProfileScope gpu(Vm.on ? vmTimer : timer, d);
+		if (TryApplyCompute(d, target, t, linearDepth, sun)) { target->Release(); return; }
+		// Compute fallback / D3D9 pass: D3D9 ps_3_0 adds in linear light, so convert now if still on stored curve.
+		if (!LinearScene::Linear && !Vm.on) {
 			if (!LinearScene::Convert(d, target, true)) {
 				target->Release(); StatSkipped++;
-				// LinearScene's own latch (its line says why; it turns the renderer forward by itself): this frame only here
 				if (LinearScene::Fail.failed) SkipFrame("LinearScene failed (see its line)");
 				else Latch("LinearScene's conversion to linear light failed");
 				return;
 			}
 			StatConverted++;
 		}
-		D3DSURFACE_DESC t = {};
-		target->GetDesc(&t);
-
-
-		const bool linearDepth = !Vm.on && DeferredDepth::EnsureLinear(d);	// (the world's view z: not the view model's)
-		if (!DeferredDepth::Ready() && !linearDepth && !Vm.on) DeferredDepth::FillFrame(d);	// the ray mapping (TESR_DeferredDepthFrame) without the copy
-		if (!Vm.on) LogSources(linearDepth);
-		if (linearDepth) StatLinearDepth++;
-		if (TryApplyCompute(d, target, t, linearDepth, sun)) { target->Release(); return; }
 
 		auto* rs = TheRenderManager->renderState;
 		D3DVIEWPORT9 vp = {}; d->GetViewport(&vp);
@@ -815,22 +926,25 @@ namespace DeferredSun {
 		const NiPoint3& dir = sun->direction;
 		D3DXVECTOR3 toSun(-dir.x, -dir.y, -dir.z);
 		// UNOFFICIAL 2026-11-19 MatchSunDisc: outdoors by day, vanilla FNV clamps Tes->directionalLight (and land c18) to a
-		// 45-degree southern plane (only 24.9 deg high at 14:17 while the sun disc and shadow maps are at 70.6 deg). Align
-		// surface sun lighting to the true sun disc direction (ShaderConst.SunDir) while above the horizon so N.L matches
-		// the sky and shadow cascades. Interiors and nighttime (moon) keep Tes->directionalLight unchanged.
+		// 45-degree southern plane (only 24.9 deg high at 14:17 while the sun disc and shadow maps are at 70.6 deg). When
+		// MatchSunDisc is on, daytime aligns surface sun lighting to ShaderConst.SunDir; at night, BlendMatchSunDisc aligns
+		// both objects and terrain to the moon direction ShaderConst.SunDir while above the horizon so N.L matches the moon
+		// shadow cascades. Interiors leave Tes->directionalLight unchanged.
 		bool has = false;
 		const float discBlend = BlendMatchSunDisc(toSun, has);
 		const bool objectFresh = LandLight::ObjectReadFrame && (UInt32)TheFrameRateManager->FrameNumber - LandLight::ObjectReadFrame <= 4;
 		const D3DXMATRIX& proj = NiDX9Renderer::GetSingleton()->projMatrix;
+		float sunColor[3];
+		SunColor(sun, objectFresh, sunColor);	// (2026-11-24 fd-complete batch 8: from the light)
 		const float own[4][4] = {
 			{ toSun.x, toSun.y, toSun.z, has ? 1.0f : 0.0f },
 			// (2026-11-15 batch 6) the objects' sun colour as the game handed them this frame (c3 read back at a sun-lit object record's draw:
 			// 1.21 x Diff x Dimmer in every recording so far), else the directional light's Diff x Dimmer as before
-			{ objectFresh ? LandLight::ObjectColor[0] : sun->Diff.r * sun->Dimmer, objectFresh ? LandLight::ObjectColor[1] : sun->Diff.g * sun->Dimmer,
+			{ sunColor[0], sunColor[1],
 			  // w (2026-11-16 fd-merged-1116, FD-BATCH-D item 22): 1 = the forward clouds shade plants ([Shaders.VolumetricClouds.Main]
 			  // PlantShadows), 0 = they do not: DeferredSun.hlsl leaves model 5's pixels out of the cloud term then, as forward's PassPlant does
 			  // (2026-11-16 fast-restart) the clouds' strength for the foliage records' pixels (ForwardShadows on; 0 off), -1 = PlantShadows off
-			  objectFresh ? LandLight::ObjectColor[2] : sun->Diff.b * sun->Dimmer, foliageW },
+			  sunColor[2], foliageW },
 			// w (2026-11-14, read only by the foliage branch, FD_FOLIAGE): 2 = [Shaders.Grass.Main] ShadowFix (the grass's lookup takes the world's up)
 			{ (float)DebugView, linearDepth ? 1.0f : 0.0f, Shadows ? 1.0f : 0.0f, FoliageCompiled && TheSettingManager->GetSettingI("Shaders.Grass.Main", "ShadowFix") ? 2.0f : 1.0f },
 			{ proj._33, proj._43, 0.01f, 2.0f } };
@@ -852,9 +966,10 @@ namespace DeferredSun {
 		D3DXVECTOR3 blendedLandDir;
 		bool landDirValid = false;
 		const float* const landDir = ResolveLandDir(toSun, has, landFresh, discBlend, blendedLandDir, landDirValid);
-		const float land[2][4] = {
+		float land[2][4] = {
 			{ landDir[0], landDir[1], landDir[2], landDirValid ? 1.0f : 0.0f },
 			{ LandLight::Color[0], LandLight::Color[1], LandLight::Color[2], landFresh && LandLight::ColorGood ? 1.0f : 0.0f } };
+		if (SunColorFromLight) { GameSunColor(sun, land[1]); land[1][3] = 1.0f; }	// (2026-11-24 fd-complete batch 8: from the light)
 		d->SetPixelShaderConstantF(14, land[0], 2);
 		// (2026-11-16 fd-sunvis) c16 DS_Vis: x 1 = the land's height self-shadow, y 1 = the recorded highlight F0, z / w SpecularFade's band
 		// (the game's fSpecularLODStartFade and 1 / (fSpecularLODEnd - it); w 0 = no fade: SpecularFade off or not compiled, or the key off)
@@ -863,6 +978,24 @@ namespace DeferredSun {
 			const bool fade = HighlightFade && end > start + 1.0f;
 			const float vis[4] = { LandCrackShadow ? 1.0f : 0.0f, AuthoredHighlight ? 1.0f : 0.0f, fade ? start : 0.0f, fade ? 1.0f / (end - start) : 0.0f };
 			d->SetPixelShaderConstantF(16, vis, 1);
+		}
+		{
+			const int sssMode = MaterialSSSProto::EffectiveMode();
+			const float sss[4] = { (sssMode >= 1 && sssMode <= 3) ? 1.0f : 0.0f, (TheShaderManager && TheShaderManager->GameState.isExterior) ? 1.0f : 0.0f, 0.0f, 0.0f };
+			d->SetPixelShaderConstantF(17, sss, 1);
+		}
+		{
+			float dsSheen[4];
+			FillSheenConst(Vm.on, dsSheen);
+			d->SetPixelShaderConstantF(18, dsSheen, 1);
+		}
+		// UNOFFICIAL 2026-11-26 Screen-Space Shadows (core/ScreenSpaceShadows.h): this span's mask (TESR_ScreenSpaceShadows, bound by name on s13
+		// by SetCT) taken by the world's pass; never by the first-person pass (the view model is not in the depth the march read)
+		{
+			const bool sss = !Vm.on && ScreenSpaceShadows::MadeThisSpan();
+			const float sssConst[4] = { sss ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
+			d->SetPixelShaderConstantF(19, sssConst, 1);
+			if (sss) ScreenSpaceShadows::MarkUsed();	// the old contact pass stands aside this frame (EffectChain.cpp)
 		}
 		LogLight(toSun, sun, landFresh);
 		const float one[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
