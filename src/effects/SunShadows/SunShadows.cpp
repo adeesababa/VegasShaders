@@ -34,9 +34,9 @@ void SunShadowsEffect::RegisterTextures() {
 }
 
 bool SunShadowsEffect::TargetsWanted() {
-	return Enabled && TheShaderManager && TheShaderManager->GameState.isExterior &&
-		TheShaderManager->Effects.ShadowsExteriors && TheShaderManager->Effects.ShadowsExteriors->Enabled &&
-		TheShaderManager->Effects.ShadowsExteriors->Settings.Exteriors.Enabled;
+	ShadowsExteriorEffect* ext = TheShaderManager ? TheShaderManager->Effects.ShadowsExteriors : nullptr;
+	return Enabled && TheShaderManager && TheShaderManager->GameState.isExterior && ext && ext->Enabled &&
+		(ext->Settings.Exteriors.Enabled || ext->Constants.ShadowFade.z > 0.0f);
 }
 
 /*

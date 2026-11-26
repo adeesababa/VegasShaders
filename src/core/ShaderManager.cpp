@@ -1089,7 +1089,7 @@ void ShaderManager::UpdateConstants() {
 	WaterShaders* const water = Shaders.Water;
 	if (Effects.Underwater->Enabled && !water->Enabled) water->UpdateConstants();
 	ShadowsExteriorEffect* const sunShadows = Effects.ShadowsExteriors;
-	if (!sunShadows->Enabled && Effects.ShadowsInteriors->Enabled) sunShadows->UpdateConstants();
+	if (sunShadows && !sunShadows->Enabled) sunShadows->UpdateConstants();
 
 	TheSettingManager->SettingsChanged = false;	// handled for this frame
 	updateClock.LogTime("ShaderManager::UpdateConstants");

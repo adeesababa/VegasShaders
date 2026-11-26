@@ -4926,6 +4926,9 @@ static RtStatusLine RtSunLine() {
 	if (!RtOn(s, "Enabled")) return { RtState::Off, "off", detail };
 	if (!RtCore::Running()) return RtNotRunningLine(detail);
 	if (!TheShaderManager->GameState.isExterior) return { RtState::Off, "indoors: the sun is traced outdoors only", detail };
+	ShadowsExteriorEffect* shadows = TheShaderManager->Effects.ShadowsExteriors;
+	if (!shadows || !shadows->Enabled || !shadows->Settings.Exteriors.Enabled)
+		return { RtState::Off, "off: sun shadows are disabled", detail };
 	return { RtState::Running, TheSettingManager->GetSettingI(s, "Mode") == 1 ? "running (replaces the shadow maps near you)" :
 		"running (combined with the shadow maps)", detail };
 }

@@ -346,10 +346,12 @@ void ShaderManager::PreStep_ShadowPasses(ChainContext& ctx) {
 	// shadow pass (a full-screen clear and two target switches for a buffer that already held the clear value).
 	static bool shadowBufferClear = false;
 	// render a shadow pass for point lights
+	const bool extShadowPasses = GameState.isExterior && Effects.ShadowsExteriors->Enabled &&
+		(Effects.ShadowsExteriors->Settings.Exteriors.Enabled || Effects.ShadowsExteriors->Constants.ShadowFade.z > 0.0f);
 	if (forwardInterior && !keepDarkening) {
 		if (!shadowBufferClear) { Effects.ShadowsExteriors->clearShadowsBuffer(); shadowBufferClear = true; }
 	}
-	else if ((GameState.isExterior && Effects.ShadowsExteriors->Enabled) || (!GameState.isExterior && Effects.ShadowsInteriors->Enabled)) {
+	else if (extShadowPasses || (!GameState.isExterior && Effects.ShadowsInteriors->Enabled)) {
 		shadowBufferClear = false;	// the passes below write it
 		{
 			GpuProfileScope gpu(pointShadowTimer, Device);

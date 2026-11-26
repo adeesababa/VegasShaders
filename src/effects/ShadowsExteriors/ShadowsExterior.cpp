@@ -401,7 +401,6 @@ void ShadowsExteriorEffect::UpdateSettings() {
 	const char* const interiorSection = "Shaders.ShadowsInteriors.Main";
 
 	// Screen-space contact shadows, and their NearFade (the start of the fade, pushed out per frame by UpdateConstants).
-	Constants.ScreenSpaceData.x = ShadowSettingI(screenSpaceSection, "Enabled") && Enabled;
 	Constants.ScreenSpaceData.y = ShadowSettingF(screenSpaceSection, "BlurRadius");
 	Constants.ScreenSpaceData.z = ShadowSettingF(screenSpaceSection, "RenderDistance");
 	Constants.ScreenSpaceData.w = LargerOf(ShadowSettingF(screenSpaceSection, "Intensity"), 0.0f);
@@ -425,6 +424,7 @@ void ShadowsExteriorEffect::UpdateSettings() {
 	ExteriorsStruct& exteriors = Settings.Exteriors;
 	exteriors.Enabled = ShadowSettingI(mainSection, "Enabled");
 	exteriors.ForwardShadows = ShadowSettingI(mainSection, "ForwardShadows");
+	Constants.ScreenSpaceData.x = ShadowSettingI(screenSpaceSection, "Enabled") && Enabled && exteriors.Enabled;
 
 	// The runtime half of the forward/deferred switch. FORWARD_SHADOWS (a macro) decides whether the forward code is compiled in;
 	// this decides whether it runs. Both the game shaders and SunShadows.fx read it, so the two halves hand over in the same frame.
@@ -674,6 +674,11 @@ void ShadowsExteriorEffect::UpdateSettings() {
 * by the Darkness setting. Skip the apply instead (this also skips the composite apply in the fog pass).
 */
 bool ShadowsExteriorEffect::ShouldRender() {
+	if (TheShaderManager->GameState.isExterior && !Settings.Exteriors.Enabled) {
+		const bool needPoint = Constants.ShadowFade.z > 0.0f;
+		const bool needSunFar = TheShaderManager->Effects.SunFar && TheShaderManager->Effects.SunFar->Constants.Apply.x > 0.5f;
+		if (!needPoint && !needSunFar) return false;
+	}
 	SunShadowsEffect* sun = TheShaderManager->Effects.SunShadows;
 	if (!TheShaderManager->GameState.isExterior || (sun && sun->Enabled && sun->Effect)) return true;
 	static bool reported = false;

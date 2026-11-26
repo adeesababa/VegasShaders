@@ -733,6 +733,7 @@ bool ShadowManager::CheckShaderFlags(NiGeometry* Geometry) {
 // UNOFFICIAL 2026-10-17 (TB-1): true while a cell's land is being accumulated (AccumExteriorCell), so its geometry is noted
 // in RenderPass::LandSet for the Terrain Blending shadow drop.
 static bool AccumulatingLand = false;
+static bool WalkSunIsTree = false;
 
 // UNOFFICIAL 2026-10-31 SunLayers (RenderPass::LayerMode, DrawSunLayer below): the reference being accumulated (its geometry is noted
 // in RenderPass::LayerGeoRef while a static layer is drawn), the references a static layer held back (drawn by the overlay), and
@@ -922,7 +923,7 @@ void ShadowManager::AccumChildren(NiAVObject* Root, ShadowsExteriorEffect::Forms
 #if NVR_TEST_TOOLS
 			if (OrthoProbe::Recording && isLand && !isLOD && child->IsFadeNode() && static_cast<BSFadeNode*>(child)->FadeAlpha < 0.75f) OP_LAND(10);	// 10 faded
 #endif
-			if (child->IsFadeNode() && static_cast<BSFadeNode*>(child)->FadeAlpha < TheShaderManager->Effects.ShadowsExteriors->Settings.ShadowMaps.CasterFadeMin) { FrameJournal::FadeDrops++; continue; } // stop rendering fadenodes below a certain opacity (UNOFFICIAL 2026-10-28: CasterFadeMin, 0.75 = as before)
+			if (!WalkSunIsTree && child->IsFadeNode() && static_cast<BSFadeNode*>(child)->FadeAlpha < TheShaderManager->Effects.ShadowsExteriors->Settings.ShadowMaps.CasterFadeMin) { FrameJournal::FadeDrops++; continue; } // stop rendering fadenodes below a certain opacity (UNOFFICIAL 2026-10-28: CasterFadeMin)
 			if (skipLoadedLod && IsLodInLoadedCells(child)) continue; // object LOD inside the loaded cells
 			sortOrQueue(child, lodOfLand);
 		}
@@ -1103,7 +1104,9 @@ void ShadowManager::AccumExteriorCell(TESObjectCELL* Cell, ShadowsExteriorEffect
 		if (SunShadowStats::Current) { SunShadowStats::Current->refsIn++; SunShadowStats::CheckRef(refRoot, ref); }
 #endif
 		LayerAccumRef = ref;
+		WalkSunIsTree = ref && ref->baseForm && ref->baseForm->formType == TESForm::FormType::kFormType_Tree;
 		AccumChildren(refRoot, forms, false, false, planes);
+		WalkSunIsTree = false;
 		LayerAccumRef = nullptr;
 #if NVR_TEST_TOOLS
 		OrthoProbe::CurrentRef = nullptr;
@@ -1228,7 +1231,9 @@ void ShadowManager::WalkSunCell(TESObjectCELL* Cell, unsigned mask) {
 		OrthoProbe::CurrentRef = entry->item;
 #endif
 		WalkSunDynamic = entry->item && entry->item->baseForm ? RefMovesByKind(entry->item, refNode, false) : false;
+		WalkSunIsTree = entry->item && entry->item->baseForm && entry->item->baseForm->formType == TESForm::FormType::kFormType_Tree;
 		WalkSunChildren(refNode, inMask, false, false);
+		WalkSunIsTree = false;
 		WalkSunDynamic = false;
 #if NVR_TEST_TOOLS
 		OrthoProbe::CurrentRef = nullptr;
@@ -1306,7 +1311,7 @@ void ShadowManager::WalkSunChildren(NiAVObject* Root, unsigned mask, bool isLand
 			if (!isLOD) cm = SunCastMask(child->GetWorldBound(), cm);	// UNOFFICIAL 2026-11-04 CasterCulling: skip LOD chunks (distant ridges taller than CasterDrop cast into Near/Middle at low sun)
 			if (!cm) continue;
 
-			if (child->IsFadeNode() && static_cast<BSFadeNode*>(child)->FadeAlpha < TheShaderManager->Effects.ShadowsExteriors->Settings.ShadowMaps.CasterFadeMin) { FrameJournal::FadeDrops++; continue; } // stop rendering fadenodes below a certain opacity (UNOFFICIAL 2026-10-28: CasterFadeMin, 0.75 = as before)
+			if (!WalkSunIsTree && child->IsFadeNode() && static_cast<BSFadeNode*>(child)->FadeAlpha < TheShaderManager->Effects.ShadowsExteriors->Settings.ShadowMaps.CasterFadeMin) { FrameJournal::FadeDrops++; continue; } // stop rendering fadenodes below a certain opacity (UNOFFICIAL 2026-10-28: CasterFadeMin)
 			if (skipLoadedLod && IsLodInLoadedCells(child)) continue; // object LOD inside the loaded cells
 			queueOrTake(child, cm, isLand && isLOD);
 		}
@@ -2532,8 +2537,10 @@ void ShadowManager::RenderShadowMaps() {
 	const FlashlightEffect* torch = TheShaderManager->Effects.Flashlight;
 	const bool flashlightMapOn = torch && torch->Enabled && torch->spotLightActive && torch->WantsShadowMap() && nearSpots[0];
 	fx->CharacterNpcLive = 0;	// UNOFFICIAL 2026-11-08 CharacterShadowMapNpcs: no NPC maps on a frame without sun shadows
+	fx->Constants.CharacterData.w = 0.0f;	// UNOFFICIAL 2026-10-23 CharacterShadowMap: read only once this frame's draw is in it (RenderCharacterShadowMap)
 	fx->Constants.DynamicData = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
 	if (!sunShadowsOn || !ShadowShadersLoaded) {
+		fx->TerrainShadows.Constants.Data.w = 0.0f;
 		SunFadeDeferred::Fading = false;
 		fx->DeferredFading = fx->DeferredHolding = fx->DeferredCapturePending = fx->DeferredCaptureReady = false;
 		fx->Constants.CrossFade.x = 0.0f;
@@ -2551,8 +2558,6 @@ void ShadowManager::RenderShadowMaps() {
 	auto frameTimer = TimeLogger();
 	static CpuTimer shadowMapsCpuTimer("Shadow maps (CPU)");
 	CpuProfileScope shadowMapsCpu(shadowMapsCpuTimer);
-	fx->CharacterNpcLive = 0;	// UNOFFICIAL 2026-11-08 CharacterShadowMapNpcs: none until drawn this frame
-	fx->Constants.CharacterData.w = 0.0f;	// UNOFFICIAL 2026-10-23 CharacterShadowMap: read only once this frame's draw is in it (RenderCharacterShadowMap)
 
 	// prepare some pointers to the device and surfaces
 	IDirect3DDevice9* dev = TheRenderManager->device;

@@ -88,7 +88,9 @@ namespace ScreenSpaceShadows {
 	inline bool Produce(IDirect3DDevice9* Device) {
 		SpanCounter++;
 		if (!Texture || Failed || !DeferredDepth::Ready() || !DxvkCompute::Available()) return false;
-		if (!TheShaderManager->GameState.isExterior || TheSettingManager->GetSettingI(kSection, "Enabled") == 0) return false;
+		ShadowsExteriorEffect* shadows = TheShaderManager ? TheShaderManager->Effects.ShadowsExteriors : nullptr;
+		if (!TheShaderManager->GameState.isExterior || !shadows || !shadows->Enabled || !shadows->Settings.Exteriors.Enabled ||
+			TheSettingManager->GetSettingI(kSection, "Enabled") == 0) return false;
 		if (!Pipeline) {
 			if (Tried) return false;
 			Tried = true;
