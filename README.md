@@ -77,6 +77,12 @@ plugin comes out as `VegasShaders.dll`. Shaders are compiled by the game at runt
 maps to `Data\Shaders\VegasShaders\`. Each effect's code, settings defaults and notes are in `src/effects/<Name>/`
 (index: `src/effects/INDEX.md`). The generated textures can be rebuilt with `tools/gen_textures.py`.
 
+## Contributing
+
+- **`main`** tracks the latest stable release.
+- **`dev`** tracks in-progress work and test builds for the next release.
+- Open pull requests against **`dev`** for new features, improvements, or general fixes (or against **`main`** for hotfixes to the current release).
+
 ## Credits
 
 Vegas Shaders is based on **New Vegas Reloaded / TESReloaded** by Alessio Tamburini (Alenet), maintained by Llde,
