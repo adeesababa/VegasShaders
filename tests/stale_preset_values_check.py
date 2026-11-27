@@ -9,7 +9,7 @@ Run with Python 3.11+ (py -3.11). exit 0 = consistent
 import os, re, sys
 
 root = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), '..')
-sm = open(os.path.join(root, 'src/core/SettingManager.cpp'), encoding='utf-8', errors='replace').read()
+sm = open(os.path.join(root, 'src/core/SettingMigrations.cpp'), encoding='utf-8', errors='replace').read()
 hdr = open(os.path.join(root, 'src/core/StalePresetValues.h'), encoding='utf-8', errors='replace').read()
 
 body = sm[sm.index('void SettingManager::Configuration::UpdateOldDefaults()'):]

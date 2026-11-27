@@ -1884,15 +1884,19 @@ template <typename Lookup> static bool CapTextureLookup(Lookup& lookup, size_t& 
 namespace MaterialRulesDraw {
 	static MaterialRules::Table Table;
 	static bool Loaded = false;
-	struct Entry { std::string Path; int Rule; unsigned Frame = ~0u; };	// Frame: UNOFFICIAL 2026-11-04, the frame its path was last compared in
+	struct Entry { std::string Path; MaterialRules::MatchResult Match; unsigned Frame = ~0u; };	// Frame: UNOFFICIAL 2026-11-04, the frame its path was last compared in
 	static std::unordered_map<const NiSourceTexture*, Entry> ByTexture;
 	static size_t ByTextureCap = 4096;	// UNOFFICIAL 2026-11-12: ByTexture is bounded (CapTextureLookup above)
 	static unsigned ByTextureCleared = ~0u;
+	static std::unordered_map<std::string, int> ByMeshName;	// bounded mesh-name keyword cache for broad buckets
+	static std::unordered_set<std::string> LoggedMatches;	// deduplicates LogMatches lines per (texture, resolved class)
 	static float Current[12] = {};
 	static bool Active = false;		// Current holds a rule's values (sent; resent after each bind)
 
 	static void Load() {
 		Loaded = true;
+		ByMeshName.clear();
+		LoggedMatches.clear();
 		// VegasShaders.materials.txt next to the DLL, else an older install's NewVegasReloaded.dll.materials.txt (Paths.h)
 		const std::string pathText = Paths::ReadPath(Paths::ModuleDir(), Paths::File::Materials);
 		const char* path = pathText.c_str();
@@ -1903,6 +1907,16 @@ namespace MaterialRulesDraw {
 		std::string errors;
 		if (!Table.Load(text.str(), errors)) Logger::Log("MaterialRules: lines skipped in %s:\n%s", path, errors.c_str());
 		Logger::Log("MaterialRules: %d classes read from %s.", Table.Count() - 1, path);
+	}
+
+	static int MeshKeywordRule(const char* name) {
+		if (!name || !name[0]) return 0;
+		auto it = ByMeshName.find(name);
+		if (it != ByMeshName.end()) return it->second;
+		if (ByMeshName.size() >= 2048) ByMeshName.clear();
+		const int rule = Table.MatchKeywordText(name);
+		ByMeshName[name] = rule;
+		return rule;
 	}
 
 	static int RuleFor(NiGeometry* geometry, bool log) {
@@ -1918,13 +1932,62 @@ namespace MaterialRulesDraw {
 		// UNOFFICIAL 2026-11-04 (cpu-workers trims): the path is compared once per texture per frame, not at every pass of every object: the
 		// compare guards against a freed texture's address being reused, and a texture an object is drawn with stays alive for the frame.
 		const unsigned frame = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
-		if (known != ByTexture.end() && known->second.Frame == frame) return known->second.Rule;
-		if (known != ByTexture.end() && known->second.Path == diffuse->ddsPath1) { known->second.Frame = frame; return known->second.Rule; }
-		const int rule = Table.Match(MaterialRules::Normalize(diffuse->ddsPath1));
-		CapTextureLookup(ByTexture, ByTextureCap, ByTextureCleared);	// UNOFFICIAL 2026-11-12: was insert-only (known is not used past here)
-		ByTexture[diffuse] = { std::string(diffuse->ddsPath1), rule, frame };
-		if (log && rule) Logger::Log("[MaterialRules] %s -> %s", diffuse->ddsPath1, Table.Get(rule).Name.c_str());
-		return rule;
+		MaterialRules::MatchResult pathMatch;
+		if (known != ByTexture.end() && known->second.Frame == frame) {
+			pathMatch = known->second.Match;
+		}
+		else if (known != ByTexture.end() && known->second.Path == diffuse->ddsPath1) {
+			known->second.Frame = frame;
+			pathMatch = known->second.Match;
+		}
+		else {
+			pathMatch = Table.MatchDetailed(MaterialRules::Normalize(diffuse->ddsPath1));
+			CapTextureLookup(ByTexture, ByTextureCap, ByTextureCleared);	// UNOFFICIAL 2026-11-12: was insert-only (known is not used past here)
+			ByTexture[diffuse] = { std::string(diffuse->ddsPath1), pathMatch, frame };
+		}
+
+		const UInt32 flags = property->ulFlags[0];
+		MaterialRules::MeshSignals sig;
+		sig.IsFaceGen = (flags & (1u << BSSP_FACEGEN)) != 0;
+		sig.IsHair = (flags & (1u << BSSP_HAIR)) != 0;
+		sig.IsEyeEnv = (flags & (1u << BSSP_EYE_ENVIRONMENT_MAPPING)) != 0;
+		sig.IsWindowEnv = (flags & (1u << BSSP_WINDOW_ENVIRONMENT_MAPPING)) != 0;
+		sig.IsRefraction = (flags & (1u << BSSP_REFRACTION)) != 0;
+		sig.IsDecal = (flags & ((1u << BSSP_DECAL) | (1u << BSSP_DYNAMIC_DECAL))) != 0;
+		sig.HasEnvMap = (flags & (1u << BSSP_ENVIRONMENT_MAPPING)) != 0 && !sig.IsFaceGen && !sig.IsHair && !sig.IsEyeEnv && !sig.IsWindowEnv;
+		sig.HasEnvMask = sig.HasEnvMap && lighting->ppTextures[5] && lighting->ppTextures[5][0] != nullptr;
+		sig.EnvMapScale = sig.HasEnvMap ? std::clamp(property->fEnvMapScale, 0.0f, 4.0f) : 0.0f;
+		sig.HasSpecular = (flags & BSShaderProperty::Specular) != 0;
+
+		int cachedMeshRule = 0;
+		if (pathMatch.IsBroad()) {
+			if (const NiMaterialProperty* mat = (const NiMaterialProperty*)geometry->GetProperty(NiProperty::PropertyType::kType_Material)) {
+				sig.HasMaterial = true;
+				sig.Glossiness = mat->fShine;
+				sig.SpecularLuma = 0.2126f * mat->spec.r + 0.7152f * mat->spec.g + 0.0722f * mat->spec.b;
+				const float emitLuma = (0.2126f * mat->emit.r + 0.7152f * mat->emit.g + 0.0722f * mat->emit.b) * mat->fEmitMult;
+				sig.IsEmissive = emitLuma > 0.25f;
+			}
+			sig.MeshName = geometry->m_pcName;
+			cachedMeshRule = MeshKeywordRule(sig.MeshName);
+		}
+
+		const char* reason = nullptr;
+		const int resolved = Table.RefineWithMesh(pathMatch, sig, &reason, cachedMeshRule);
+		if (log && resolved) {
+			const std::string& className = Table.Get(resolved).Name;
+			std::string logKey(diffuse->ddsPath1);
+			logKey += '|';
+			logKey += className;
+			if (LoggedMatches.size() >= 2048) LoggedMatches.clear();
+			if (LoggedMatches.insert(std::move(logKey)).second) {
+				if (reason)
+					Logger::Log("[MaterialRules] %s (mesh:%s, %s) -> %s", diffuse->ddsPath1, sig.MeshName ? sig.MeshName : "", reason, className.c_str());
+				else
+					Logger::Log("[MaterialRules] %s -> %s", diffuse->ddsPath1, className.c_str());
+			}
+		}
+		return resolved;
 	}
 
 	static int SssModelFor(NiGeometry* geometry) {
@@ -2511,6 +2574,17 @@ namespace RmaosDraw {
 			EnvData::Dirty = env[1] > 0.0f;
 		}
 		Send(values, on ? map->Texture : (IDirect3DTexture9*)envMask);
+	}
+
+	// UNOFFICIAL 2026-11-27: legacy additive env-map ("chrome") passes (0x244-0x24B) double-reflect and wash out authored _rmaos PBR surfaces
+	// now that _rmaos dielectrics + metals evaluate unified roughness-filtered IBL on the base pass. Skip on _rmaos assets except eyes/windows.
+	static bool ShouldSkipEnvPass(const PointShadowForward::RenderPassView* pass) {
+		if (!ThisDraw || !pass || pass->passEnum < 0x244 || pass->passEnum > 0x24B) return false;
+		NiGeometry* geo = pass->geometry;
+		BSShaderProperty* prop = geo ? (BSShaderProperty*)geo->GetProperty(NiProperty::PropertyType::kType_Shade) : nullptr;
+		if (!prop) return false;
+		const UInt32 flags = prop->ulFlags[0];
+		return (flags & ((1u << BSSP_EYE_ENVIRONMENT_MAPPING) | (1u << BSSP_WINDOW_ENVIRONMENT_MAPPING))) == 0;
 	}
 
 	// UNOFFICIAL 2026-11-09 FromGameData: after the object's draw. A draw that does not come through ForObject (the game's sorted blended
@@ -4667,11 +4741,24 @@ static void MaterialForPass(void* Pass) {
 	float w = 0.0f;
 	if (MaterialWFor(Pass, w, CapturedNormals::InSpan)) PbrPop::SpecFade::SendMaterial(TheRenderManager->device, w);	// c211.w (c217 is the RT lamp shadows')
 }
+// UNOFFICIAL 2026-11-27 equip-weather: an unskinned mesh under a skeleton bone (the same name test as IsSeeThroughPass's
+// CharactersKeepDepth walk). No cache: the answer must follow a weapon that is dropped or picked up, and MergeCopies asks at plan
+// time and again per draw (the same answer both times); every unskinned world pass walks its chain to the root (cost not measured; expected small, NpcCharacterMaps::TileOf walks the same chain).
+static bool HangsOnSkeleton(const NiGeometry* geometry) {
+	const NiNode* node = geometry->m_parent;
+	for (int depth = 0; node && depth < 32; ++depth, node = node->m_parent)
+		if (node->m_pcName && !_strnicmp(node->m_pcName, "Bip01", 5)) return true;
+	return false;
+}
 static bool MaterialWFor(const void* Pass, float& w, bool inSpan) {
 	if (!inSpan || !CapturedNormals::MaterialCompiled || !CapturedNormals::MaterialTexture) return false;
 	NiGeometry* geometry = ((const PointShadowForward::RenderPassView*)Pass)->geometry;
 	if (!geometry) return false;
-	float materialClass = geometry->skinInstance ? 2.0f : 1.0f;
+	// UNOFFICIAL 2026-11-27 equip-weather (a 1.1.5 tester: a holstered rifle and its holster changed colour as he walked): a rigid mesh
+	// hung on a skeleton's bones (a holstered or held weapon, a hat, rigid armour parts; the player's and NPCs') is worn gear (2) like
+	// the skinned meshes, not a world object (1). As class 1 it took WorldSurface's dust, rust and moss, whose pattern is fixed in the
+	// world, so it slid over the mesh as the actor moved; WetWorld's puddle class and SnowAccumulation now treat it as worn gear too (no wet look or puddles, no snow), as the skinned parts beside it.
+	float materialClass = (geometry->skinInstance || HangsOnSkeleton(geometry)) ? 2.0f : 1.0f;
 	BSShaderProperty* property = (BSShaderProperty*)geometry->GetProperty(NiProperty::PropertyType::kType_Shade);
 	if (property && property->IsLightingProperty()) {
 		NiSourceTexture** textures = ((BSShaderPPLightingProperty*)property)->ppTextures[0];
@@ -4895,6 +4982,7 @@ void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32
 			pbr->SetFirstPersonWeapon(TheRenderManager->device, IsFirstPersonWeaponGeometry(((const PointShadowForward::RenderPassView*)Pass)->geometry));
 	}
 	RmaosDraw::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL _rmaos maps
+	if (RmaosDraw::ShouldSkipEnvPass((const PointShadowForward::RenderPassView*)Pass)) { RmaosDraw::AfterObject(); ClothWind::AfterDraw(TheRenderManager->device); return; }
 	{	// UNOFFICIAL SpecularFade, and FoldHighlights' switches for this draw (same constant)
 		float fold = 0.0f, foldVertexColor = 0.0f;
 		FoldHighlights::ForDraw(TheRenderManager->device, Pass, ShaderSplit::CurrentContext == ShaderSplit::World, fold, foldVertexColor);
@@ -4902,7 +4990,8 @@ void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32
 	}
 	CharacterObjectReach::ForDraw(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-10-23
 	NpcCharacterMaps::ForDraw(TheRenderManager->device, (const NiAVObject*)((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World, false);	// UNOFFICIAL 2026-11-08
-	DustDraw::ForDraw(TheRenderManager->device, ShaderSplit::CurrentContext == ShaderSplit::World);	// 2026-11-04: a static mesh in the world scene takes dust
+	// (2026-11-27 equip-weather: not a rigid mesh on a skeleton's bones: the dust's patches are fixed in the world too and slid over a carried weapon)
+	DustDraw::ForDraw(TheRenderManager->device, DustDraw::Compiled && ShaderSplit::CurrentContext == ShaderSplit::World && !(((const PointShadowForward::RenderPassView*)Pass)->geometry && HangsOnSkeleton(((const PointShadowForward::RenderPassView*)Pass)->geometry)));	// 2026-11-04: a static mesh in the world scene takes dust
 	BarrelHeat::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL GunFX barrel glow, per object
 	ForwardShadowsForPass(Pass);
 	if (LampScissor::Before((const PointShadowForward::RenderPassView*)Pass, ShaderSplit::CurrentContext == ShaderSplit::World, BarrelHeat::Active) == LampScissor::Skip) {
@@ -5005,6 +5094,7 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 			pbr->SetFirstPersonWeapon(TheRenderManager->device, IsFirstPersonWeaponGeometry(((const PointShadowForward::RenderPassView*)Pass)->geometry));
 	}
 	RmaosDraw::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL _rmaos maps
+	if (RmaosDraw::ShouldSkipEnvPass((const PointShadowForward::RenderPassView*)Pass)) { RmaosDraw::AfterObject(); PipboyFit::AfterDraw(); ClothWind::AfterDraw(TheRenderManager->device); return; }
 	{	// UNOFFICIAL SpecularFade, and FoldHighlights' switches for this draw (same constant)
 		float fold = 0.0f, foldVertexColor = 0.0f;
 		FoldHighlights::ForDraw(TheRenderManager->device, Pass, ShaderSplit::CurrentContext == ShaderSplit::World, fold, foldVertexColor);
@@ -5899,6 +5989,8 @@ void __fastcall RenderFirstPersonHook(Main* This, UInt32 edx, NiDX9Renderer* Ren
 	}
 	bool swappedFpInvProj = false;
 	D3DXMATRIX savedInvProj;
+	bool swappedFpInvView = false;
+	D3DXMATRIX savedInvView;
 	if (This && This->camera && TheRenderManager && TheRenderManager->device) {
 		const NiFrustum& f = This->camera->Frustum;
 		const float width = f.Right - f.Left, height = f.Top - f.Bottom;
@@ -5923,6 +6015,17 @@ void __fastcall RenderFirstPersonHook(Main* This, UInt32 edx, NiDX9Renderer* Ren
 				swappedFpInvProj = true;
 			}
 		}
+		const NiMatrix33& axes = This->camera->m_worldTransform.rot;
+		D3DXMATRIX fpInvView(
+			axes.data[0][2], axes.data[1][2], axes.data[2][2], 0.0f,
+			axes.data[0][1], axes.data[1][1], axes.data[2][1], 0.0f,
+			axes.data[0][0], axes.data[1][0], axes.data[2][0], 0.0f,
+			0.0f, 0.0f, 0.0f, 1.0f);
+		savedInvView = TheRenderManager->InvViewMatrix;
+		TheRenderManager->InvViewMatrix = fpInvView;
+		TheRenderManager->device->SetVertexShaderConstantF(104, (const float*)&fpInvView, 4);
+		TheRenderManager->device->SetVertexShaderConstantF(244, (const float*)&fpInvView, 4);
+		swappedFpInvView = true;
 	}
 	GrassShaders::PendingTstgRestore = false;
 	GrassShaders::BoundGrassVS = false;
@@ -5937,6 +6040,11 @@ void __fastcall RenderFirstPersonHook(Main* This, UInt32 edx, NiDX9Renderer* Ren
 		TheRenderManager->InvProjMatrix = savedInvProj;
 		TheRenderManager->device->SetVertexShaderConstantF(100, (const float*)&savedInvProj, 4);
 		TheRenderManager->device->SetVertexShaderConstantF(240, (const float*)&savedInvProj, 4);
+	}
+	if (swappedFpInvView) {
+		TheRenderManager->InvViewMatrix = savedInvView;
+		TheRenderManager->device->SetVertexShaderConstantF(104, (const float*)&savedInvView, 4);
+		TheRenderManager->device->SetVertexShaderConstantF(244, (const float*)&savedInvView, 4);
 	}
 	ViewModelMotion::EndCapture();
 	ReflMaterial::EndFirstPerson(TheRenderManager->renderState, TheRenderManager->device);

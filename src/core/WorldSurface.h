@@ -102,6 +102,7 @@ namespace WorldSurface {
 		if (!TheSettingManager || !TheShaderManager) return;
 
 		if (TheSettingManager->GetSettingI("Shaders.WorldSurface.Status", "Enabled") == 0) return;
+		if (!TheShaderManager->GameState.isExterior && TheSettingManager->GetSettingI("Shaders.WorldSurface.Main", "Interiors") == 0) return;
 
 		const float strength = (std::max)(0.0f, TheSettingManager->GetSettingF("Shaders.WorldSurface.Main", "Strength"));
 		if (strength <= 1.0e-4f) return;

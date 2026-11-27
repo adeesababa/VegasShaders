@@ -67,7 +67,7 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.CubeMap = TheSettingManager->GetSettingI(section, "CubeMap") != 0;
 	{
 		SettingManager::Configuration::ConfigNode cubeNode;
-		Settings.CubeMode = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeMode") ? std::clamp(cubeNode.IntValue, 0, 2) : 2;	// a missing key defaults to 2 (tier-2 world cubemap)
+		Settings.CubeMode = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeMode") ? std::clamp(cubeNode.IntValue, 0, 2) : 0;	// a missing key defaults to 0 (legacy screen cube)
 		const int rawRes = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeResolution") ? cubeNode.IntValue : 128;
 		Settings.CubeResolution = rawRes < 96 ? 64 : (rawRes >= 192 ? 256 : 128);
 		Settings.CubeDistance = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeDistance") ? std::clamp(cubeNode.FloatValue, 1024.0f, 16384.0f) : 4096.0f;
@@ -1508,11 +1508,11 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 
 	// The textures as SetCT binds them. Those read without a guard must exist; the guarded ones (the light grid, the sky
 	// visibility, the material buffer, the ortho map without the roof test) take the placeholder when absent, which is never read.
+	const bool cubePass = (techniqueIndex == 5 || techniqueIndex == 6);
 	IDirect3DBaseTexture9* depth = SlotTexture("TESR_DepthBuffer");
-	IDirect3DBaseTexture9* normals = FdReflNormals(Device, SlotTexture("TESR_NormalsBuffer"));	// (2026-11-15 DeferredReflections: the shading normals while on)
+	IDirect3DBaseTexture9* normals = cubePass ? nullptr : FdReflNormals(Device, SlotTexture("TESR_NormalsBuffer"));	// (2026-11-15 DeferredReflections: the shading normals while on; cube passes only fill unseen sky/world directions)
 	IDirect3DBaseTexture9* viewModel = SlotTexture("TESR_DepthBufferViewModel");
 	IDirect3DBaseTexture9* ortho = SlotTexture("TESR_OrthoMapBuffer");
-	const bool cubePass = (techniqueIndex == 5 || techniqueIndex == 6);
 	if (!depth || (!cubePass && !normals) || !viewModel || !TheTextureManager->RenderedTexture ||
 		(!cubePass && !ortho && Constants.Data4.y > 0.5f) ||
 		!Cubes.Capture[0] || !Cubes.Capture[1] || !Cubes.Env)

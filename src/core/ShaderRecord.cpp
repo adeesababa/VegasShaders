@@ -959,8 +959,10 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 						DxvkCompute::NoteLandPixelShader(static_cast<ShaderRecordPixel*>(record)->ShaderHandle, Template.Defines);
 					// UNOFFICIAL 2026-10-28 LinearScene (core/LinearScene.h): the pixel shaders that can give linear light (LinearSceneOut).
 					if (pixelProfile && Template.Name && (!strcmp(Template.Name, "ObjectTemplate") || !strcmp(Template.Name, "ParallaxTemplate") ||
-						!strcmp(Template.Name, "SkinTemplate") || !strcmp(Template.Name, "TerrainTemplate"))) {
+						!strcmp(Template.Name, "SkinTemplate") || !strcmp(Template.Name, "TerrainTemplate") || !strcmp(Template.Name, "EnvTemplate"))) {
 						if (isOne(lastDefinition(Template, "LINEAR_SCENE_ON"))) LinearScene::NoteCapable(static_cast<ShaderRecordPixel*>(record)->ShaderHandle);
+						if (!strcmp(Template.Name, "EnvTemplate")) { }	// EnvTemplate converts for LinearScene only, not CapturedNormals G-buffer
+						else {
 						// UNOFFICIAL 2026-10-28 CapturedNormals (core/CapturedNormals.h): the pixel shaders that write the normal target (COLOR3).
 						const char* capturedOn = lastDefinition(Template, "CAPTURED_NORMALS_ON");
 						const bool writes = capturedOn && (!strcmp(capturedOn, "1") || !strcmp(capturedOn, "2") || !strcmp(capturedOn, "3") || !strcmp(capturedOn, "4"));	// (3: 2026-10-31 AlbedoBuffer; 4: 2026-11-14 GBufferV2)
@@ -994,6 +996,7 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 						// UNOFFICIAL 2026-10-29 ShadowContrast: the object shader's added lamp passes (DIFFUSE) give their shadows' light to it
 						if (writes && PBRShaders::ShadowContrastCompiledIn() && !strcmp(Template.Name, "ObjectTemplate")) {
 							if (hasDefine(Template, "DIFFUSE")) CapturedNormals::NoteContrastWriter(static_cast<ShaderRecordPixel*>(record)->ShaderHandle);
+						}
 						}
 					}
 					// UNOFFICIAL 2026-11-14 DeferredDistant (core/DeferredDistant.h): the far land's pixel shaders compiled with DISTANT_GBUFFER write all

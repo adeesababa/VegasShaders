@@ -310,7 +310,9 @@ public:
 		bool			IsMaxQualityKey(const char* Section, const char* Key);	// UNOFFICIAL: Max Quality sets this one (while it is on)
 		static void		MergeTables(tomlValue& Into, const tomlValue& From);	// UNOFFICIAL: From's values over Into's, tables merged
 		tomlValue*		UserSection(const char* section);	// the user's own table for a section, or NULL
+		static void		StorageKeys(const char* section, StringList* steps);
 		void			UpdateOldDefaults();	// one-time moves of saved old defaults ([_Unofficial] SettingsVersion)
+		static constexpr int UnofficialSettingsVersion = 103;	// user config [_Unofficial] SettingsVersion this build brings it up to
 
 		tomlValue		TomlConfig;		// the user's settings
 		tomlValue		DefaultConfig;	// the defaults (with their comments)

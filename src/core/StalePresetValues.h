@@ -100,6 +100,9 @@ namespace StalePresetValues {
 		{ "Shaders.PBR.Metal", "Reflections", 0.6f, 99 },
 		{ "Shaders.Reflections.RT", "Weapon", 0.0f, 99 },
 		{ "Shaders.Reflections.RT", "WeaponRoughness", 0.3f, 99 },
+		{ "Main.Main.Performance", "NvrDxvkAmbientLight", 0.0f, 103 },
+		{ "Main.Main.Performance", "AvgLumaCompute", 0.0f, 103 },
+		{ "Main.Main.Performance", "NvrDxvkClouds", 0.0f, 103 },
 	};
 
 	// Keys that moved (UpdateOldDefaults 61 and 67): the value goes to the new key. [Shaders.VolumetricLight.Main] NightStrength (64) has

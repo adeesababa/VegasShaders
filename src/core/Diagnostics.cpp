@@ -2629,6 +2629,21 @@ void EffectStatus::ShaderLoaded(ShaderEvent what) {
 	if ((unsigned)what < 5) InterlockedIncrement(&ShaderCounts[what]);
 }
 
+long EffectStatus::CompileFailureCount() {
+	return ShaderCounts[CompileFailed];
+}
+
+std::vector<std::string> EffectStatus::CompileFailureItems() {
+	std::vector<std::string> out;
+	std::lock_guard<std::mutex> guard(LevelLock);
+	for (const LevelEntry& l : Levels) {
+		if (l.isDefault) continue;
+		if (l.chosen.find("FAILED") != std::string::npos || l.chosen.find("REFUSED") != std::string::npos || l.chosen.find("X4505") != std::string::npos)
+			out.push_back(l.what + ": " + l.chosen);
+	}
+	return out;
+}
+
 void EffectStatus::D3DFail(const char* site, long hr) {
 	if (!site) return;
 	std::lock_guard<std::mutex> guard(FailLock);

@@ -1421,8 +1421,11 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	D3DXHANDLE flagsHandle = ParameterHandle(paramFlags, "NVR_ALFlags");
 	const bool shadow = foldShadow && flagsHandle;
 	// UNOFFICIAL 2026-10-31 AlbedoBuffer: the templates' own base colour for the bounce (NVR_ALAlbedo on s12 in the Apply and balance passes) when
-	// it holds this frame's; those two passes then run as D3D9 passes (their Vulkan twins have no albedo input yet; logged once).
-	const bool albedoOn = albedoBuffer && CapturedNormals::AlbedoData.x > 0.5f && CapturedNormals::AlbedoTexture != nullptr;
+	// it holds this frame's. Only request FdIndirect::ALAlbedo when a reader actually consumes albedo this frame (bounce, balance, GI, AmbientReplace, or DebugView).
+	const bool albedoNeeded = gridOn || giOn || rtGI != nullptr || interiorMode
+		|| (TheShaderManager->GameState.isExterior && exteriorBalance)
+		|| AmbientReplaceActive() || Constants.Data2.w > 0.5f;
+	const bool albedoOn = albedoBuffer && albedoNeeded && CapturedNormals::AlbedoData.x > 0.5f && CapturedNormals::AlbedoTexture != nullptr;
 	// UNOFFICIAL 2026-11-15 DeferredALAlbedo (core/FdIndirect.h): made here, before any pass begins; depth-validated against TESR_DepthBuffer.
 	IDirect3DBaseTexture9* const albedoTexture = albedoOn ? FdIndirect::ALAlbedo(Device, ExtFileTexture("TESR_DepthBuffer")) : nullptr;
 	if (D3DXHANDLE h = ParameterHandle(paramBump, "NVR_ALBump")) {

@@ -201,6 +201,15 @@ namespace CapturedNormals {
 	inline float VmContrastSaved = 0.0f;
 	inline IDirect3DTexture9* VmSkinTex = nullptr;  inline IDirect3DSurface9* VmSkinSurface = nullptr;
 	inline IDirect3DPixelShader9* VmSkinFillPS = nullptr;
+	// UNOFFICIAL 2026-11-26 FirstPersonNativeScale + DeferredFirstPerson: dedicated full-size G-buffer targets swapped in for the view-model span.
+	inline IDirect3DTexture9* VmNativeTex = nullptr;     inline IDirect3DSurface9* VmNativeSurf = nullptr;
+	inline IDirect3DTexture9* VmNativeMatTex = nullptr;  inline IDirect3DSurface9* VmNativeMatSurf = nullptr;
+	inline IDirect3DTexture9* VmNativeAlbTex = nullptr;  inline IDirect3DSurface9* VmNativeAlbSurf = nullptr;
+	inline UINT VmNativeW = 0, VmNativeH = 0;
+	inline bool VmNativeSwapped = false;
+	inline IDirect3DTexture9* SavedWorldTex = nullptr;     inline IDirect3DSurface9* SavedWorldSurf = nullptr;
+	inline IDirect3DTexture9* SavedWorldMatTex = nullptr;  inline IDirect3DSurface9* SavedWorldMatSurf = nullptr;
+	inline IDirect3DTexture9* SavedWorldAlbTex = nullptr;  inline IDirect3DSurface9* SavedWorldAlbSurf = nullptr;
 
 	// UNOFFICIAL 2026-10-29 MaterialBuffer ([Main.Main.Quality] MaterialBuffer, restart, with CapturedNormals; CAPTURED_NORMALS_ON 2; ROOT-ASSUMPTIONS-
 	// PLAN B2, format sent to the RT sessions): the same span, a second fp16 target on stage 2 (TESR_MaterialBuffer), written by the
@@ -1041,10 +1050,73 @@ namespace CapturedNormals {
 	inline UINT LastClearedW = 0, LastClearedH = 0;
 	inline UINT VmClearedW = 0, VmClearedH = 0;
 
+	inline void PopVmNativeGBuffer() {
+		if (!VmNativeSwapped) return;
+		Texture = SavedWorldTex;            TextureSurface = SavedWorldSurf;
+		MaterialTexture = SavedWorldMatTex; MaterialSurface = SavedWorldMatSurf;
+		AlbedoTexture = SavedWorldAlbTex;   AlbedoSurface = SavedWorldAlbSurf;
+		SavedWorldTex = nullptr;            SavedWorldSurf = nullptr;
+		SavedWorldMatTex = nullptr;         SavedWorldMatSurf = nullptr;
+		SavedWorldAlbTex = nullptr;         SavedWorldAlbSurf = nullptr;
+		VmNativeSwapped = false;
+	}
+
+	inline bool PushVmNativeGBuffer(IDirect3DDevice9* d, UINT w, UINT h) {
+		if (!d || !w || !h || !Live || !Texture || !MaterialCompiled || !AlbedoCompiled) return false;
+		if (VmNativeSwapped) return VmNativeW == w && VmNativeH == h;
+		auto releasePair = [](IDirect3DTexture9*& tex, IDirect3DSurface9*& surf) {
+			if (surf) { surf->Release(); surf = nullptr; }
+			if (tex) { tex->Release(); tex = nullptr; }
+		};
+		auto ensurePair = [&](IDirect3DTexture9*& tex, IDirect3DSurface9*& surf) -> bool {
+			if (tex && surf) return true;
+			releasePair(tex, surf);
+			if (FAILED(d->CreateTexture(w, h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &tex, NULL)) || !tex ||
+				FAILED(tex->GetSurfaceLevel(0, &surf)) || !surf) {
+				releasePair(tex, surf);
+				return false;
+			}
+			return true;
+		};
+		if (VmNativeW != w || VmNativeH != h) {
+			releasePair(VmNativeTex, VmNativeSurf);
+			releasePair(VmNativeMatTex, VmNativeMatSurf);
+			releasePair(VmNativeAlbTex, VmNativeAlbSurf);
+			VmNativeW = VmNativeH = 0;
+		}
+		if (!ensurePair(VmNativeTex, VmNativeSurf) || !ensurePair(VmNativeMatTex, VmNativeMatSurf) || !ensurePair(VmNativeAlbTex, VmNativeAlbSurf)) {
+			releasePair(VmNativeTex, VmNativeSurf);
+			releasePair(VmNativeMatTex, VmNativeMatSurf);
+			releasePair(VmNativeAlbTex, VmNativeAlbSurf);
+			VmNativeW = VmNativeH = 0;
+			return false;
+		}
+		VmNativeW = w; VmNativeH = h;
+		ClearSurface(d, VmNativeSurf, w, h, D3DCOLOR_ARGB(0, 0, 0, 0), true);
+		ClearSurface(d, VmNativeMatSurf, w, h, D3DCOLOR_ARGB(0, 0, 0, 0), true);
+		ClearSurface(d, VmNativeAlbSurf, w, h, D3DCOLOR_ARGB(0, 0, 0, 0), true);
+		SavedWorldTex = Texture;            SavedWorldSurf = TextureSurface;
+		SavedWorldMatTex = MaterialTexture; SavedWorldMatSurf = MaterialSurface;
+		SavedWorldAlbTex = AlbedoTexture;   SavedWorldAlbSurf = AlbedoSurface;
+		Texture = VmNativeTex;              TextureSurface = VmNativeSurf;
+		MaterialTexture = VmNativeMatTex;   MaterialSurface = VmNativeMatSurf;
+		AlbedoTexture = VmNativeAlbTex;     AlbedoSurface = VmNativeAlbSurf;
+		VmNativeSwapped = true;
+		return true;
+	}
+
 	inline void Release() {
+		PopVmNativeGBuffer();
 		ReleasePassStateBlocks();
 		LastClearedW = LastClearedH = 0;
 		VmClearedW = VmClearedH = 0;
+		VmNativeW = VmNativeH = 0;
+		if (VmNativeSurf) { VmNativeSurf->Release(); VmNativeSurf = nullptr; }
+		if (VmNativeTex) { VmNativeTex->Release(); VmNativeTex = nullptr; }
+		if (VmNativeMatSurf) { VmNativeMatSurf->Release(); VmNativeMatSurf = nullptr; }
+		if (VmNativeMatTex) { VmNativeMatTex->Release(); VmNativeMatTex = nullptr; }
+		if (VmNativeAlbSurf) { VmNativeAlbSurf->Release(); VmNativeAlbSurf = nullptr; }
+		if (VmNativeAlbTex) { VmNativeAlbTex->Release(); VmNativeAlbTex = nullptr; }
 		if (MsaaSurface) { MsaaSurface->Release(); MsaaSurface = nullptr; }
 		if (TextureSurface) { TextureSurface->Release(); TextureSurface = nullptr; }
 		if (Texture) { Texture->Release(); Texture = nullptr; }
@@ -2121,8 +2193,10 @@ namespace CapturedNormals {
 		if (FAILED(d->GetRenderTarget(0, &rt0)) || !rt0) return;
 		D3DSURFACE_DESC t = {};
 		rt0->GetDesc(&t);
-		if (t.Width != Made.Width || t.Height != Made.Height || t.MultiSampleType != D3DMULTISAMPLE_NONE) {
-			if (!VmRefusedLogged) { VmRefusedLogged = true; Logger::Log("UNOFFICIAL RT path trace: the first-person model draws into a %ux%u target (msaa %u), the G-buffer is %ux%u: its colour and normals are not captured, it keeps the game's own pixels (logged once)", t.Width, t.Height, (unsigned)t.MultiSampleType, Made.Width, Made.Height); }
+		const UINT expectW = VmNativeSwapped ? VmNativeW : Made.Width;
+		const UINT expectH = VmNativeSwapped ? VmNativeH : Made.Height;
+		if (t.Width != expectW || t.Height != expectH || t.MultiSampleType != D3DMULTISAMPLE_NONE) {
+			if (!VmRefusedLogged) { VmRefusedLogged = true; Logger::Log("UNOFFICIAL RT path trace: the first-person model draws into a %ux%u target (msaa %u), the G-buffer is %ux%u: its colour and normals are not captured, it keeps the game's own pixels (logged once)", t.Width, t.Height, (unsigned)t.MultiSampleType, expectW, expectH); }
 			rt0->Release();
 			return;
 		}
@@ -2138,9 +2212,9 @@ namespace CapturedNormals {
 				VmClearedW = VmClearedH = 0;
 			}
 			if (VmSkinSurface) {
-				const UINT vmW = RenderRect::Active() ? RenderRect::Width(t.Width) : t.Width;
-				const UINT vmH = RenderRect::Active() ? RenderRect::Height(t.Height) : t.Height;
-				const bool vmForceFull = VmClearedW == 0 || vmW < VmClearedW || vmH < VmClearedH;
+				const UINT vmW = !VmNativeSwapped && RenderRect::Active() ? RenderRect::Width(t.Width) : t.Width;
+				const UINT vmH = !VmNativeSwapped && RenderRect::Active() ? RenderRect::Height(t.Height) : t.Height;
+				const bool vmForceFull = VmNativeSwapped || VmClearedW == 0 || vmW < VmClearedW || vmH < VmClearedH;
 				VmClearedW = vmW; VmClearedH = vmH;
 				ClearSurface(d, VmSkinSurface, t.Width, t.Height, D3DCOLOR_ARGB(0, 0, 0, 0), vmForceFull);
 			}

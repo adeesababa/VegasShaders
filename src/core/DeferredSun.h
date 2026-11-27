@@ -365,7 +365,7 @@ namespace DeferredSun {
 	inline void BeginFrame() {
 		FdTestFault::BeginFrame();	// (2026-11-16 fd-batchB, test only: DebugVar4)
 		Live = Wanted() && CapturedNormals::AlbedoCompiledIn() && CapturedNormals::MaterialCompiledIn() && !CapturedNormals::Failed;
-		SunFadeDeferred::PassLive = Live && PassFade;	// (2026-11-15 fd-smoothsun: the sun steps by half a degree while this pass draws it)
+		SunFadeDeferred::PassLive = Live && (PassFade || (DxvkCompute::Available() && !ComputeFailed && SyncSettings().nvrDxvkDeferred != 0));	// (2026-11-15 fd-smoothsun: the sun steps by half a degree while this pass draws it)
 		if (!WantedAtStartup()) return;
 		if (HandlesFrom != LightFreeRecords::Records.size()) {	// records are made as the game's shaders load
 			Handles.clear();
@@ -388,7 +388,7 @@ namespace DeferredSun {
 		LandLight::ReadColor = SettingForce::Mode() >= 2 || cfg.enabled;
 		if (LinearScene::DrawWatch == &LandDrawWatch || LinearScene::DrawWatch == &ObjectDrawWatch) LinearScene::DrawWatch = nullptr;	// (no watch across frames)
 		DebugView = cfg.debugView;
-		DeferredDistant::ComputeHandlesStoredCurve = Live && DebugView == 0 && !ComputeFailed && !SunFadeDeferred::Fading && !SkylightingMode1 &&
+		DeferredDistant::ComputeHandlesStoredCurve = Live && DebugView == 0 && !ComputeFailed && !SkylightingMode1 &&
 			DxvkCompute::PassesOnRect() && DxvkCompute::Available() && !DxvkCompute::KeptOnD3D9("DeferredSun") &&
 			cfg.nvrDxvkDeferred != 0;
 		Shadows = cfg.shadows;
@@ -475,7 +475,7 @@ namespace DeferredSun {
 	// Eliminates saving/restoring 224 pixel constants, 208 sampler states, 15 render states, DeferredFog::FrameCopy,
 	// and DEPTH output while supporting both full resolution and RenderScale < 1.0 natively.
 	inline bool TryApplyCompute(IDirect3DDevice9* d, IDirect3DSurface9* target, const D3DSURFACE_DESC& t, bool linearDepth, const NiDirectionalLight* sun) {
-		if (ComputeFailed || Vm.on || SunFadeDeferred::Fading || SkylightingMode1 || (!LinearScene::Linear && DebugView != 0)) return false;
+		if (ComputeFailed || Vm.on || SkylightingMode1 || (!LinearScene::Linear && DebugView != 0)) return false;
 		if (!DxvkCompute::PassesOnRect() || !DxvkCompute::Available() || DxvkCompute::KeptOnD3D9("DeferredSun")) return false;
 		const CachedSettings& cfg = SyncSettings();
 		if (cfg.nvrDxvkDeferred == 0) return false;
@@ -537,8 +537,18 @@ namespace DeferredSun {
 			float rtSunRowW[4];              // 70
 			float rtSunData[4];              // 71
 			float dsSheen[4];                // 72
+			float shadowOldNear[16];         // 73..76
+			float shadowOldMiddle[16];       // 77..80
+			float shadowOldFar[16];          // 81..84
+			float shadowOldLod[16];          // 85..88
+			float shadowOldNearCenter[4];    // 89
+			float shadowOldMiddleCenter[4];  // 90
+			float shadowOldFarCenter[4];     // 91
+			float shadowOldLodCenter[4];     // 92
+			float shadowCrossFade[4];        // 93
+			float shadowDynamicData[4];      // 94
 		};
-		static_assert(sizeof(ComputeConstants) == 73 * 16, "DeferredSun ComputeConstants layout mismatch");
+		static_assert(sizeof(ComputeConstants) == 95 * 16, "DeferredSun ComputeConstants layout mismatch");
 
 		auto copyBytes = [](void* dst, const char* name, size_t bytes) {
 			auto found = TheShaderManager->ConstantsTable.find(name);
@@ -564,6 +574,8 @@ namespace DeferredSun {
 				{ 1, 8, NVR_EXT_BIND_STORAGE_IMAGE,  8, NVR_EXT_VIEW_2D, TRUE,  0 }, // i_scene
 				{ 1, 9, NVR_EXT_BIND_STORAGE_IMAGE,  9, NVR_EXT_VIEW_2D, TRUE,  0 }, // i_skinSpec
 				{ 1, 10, NVR_EXT_BIND_SAMPLED_IMAGE, 10, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_sssMask
+				{ 1, 11, NVR_EXT_BIND_SAMPLED_IMAGE, 11, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_shadowAtlasOld
+				{ 1, 12, NVR_EXT_BIND_SAMPLED_IMAGE, 12, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_shadowDynamic
 				{ 2, 0, NVR_EXT_BIND_UNIFORM_BUFFER, 0, NVR_EXT_VIEW_2D, FALSE, 0 }, // Constants
 				{ 0, 0, NVR_EXT_BIND_SAMPLER,        0, NVR_EXT_VIEW_2D, FALSE, 0 }, // linearSampler
 				{ 0, 0, NVR_EXT_BIND_SAMPLER,        1, NVR_EXT_VIEW_2D, FALSE, 4 }, // pointSampler
@@ -652,6 +664,21 @@ namespace DeferredSun {
 		IDirect3DBaseTexture9* charTex = CharMapCompiled ? namedTex("TESR_CharShadowMap") : nullptr;
 		IDirect3DBaseTexture9* cloudTex = (ForwardShadowsCompiled && ForwardCloudShadows::Active) ? namedTex("TESR_CloudShadow") : nullptr;
 		IDirect3DBaseTexture9* rtSunTex = RtSunCompiled ? namedTex("TESR_RtSunForward") : nullptr;
+		IDirect3DBaseTexture9* oldAtlasTex = SunFadeDeferred::Fading ? namedTex("TESR_ShadowAtlasOld") : nullptr;
+		IDirect3DBaseTexture9* dynTex = SunFadeDeferred::Fading ? namedTex("TESR_ShadowDynamic") : nullptr;
+		const bool crossFadeActive = SunFadeDeferred::Fading && ForwardShadowsCompiled && oldAtlasTex != nullptr;
+		if (crossFadeActive) {
+			copyBytes(cb.shadowOldNear, "TESR_ShadowOldCameraToLightTransformNear", 64);
+			copyBytes(cb.shadowOldMiddle, "TESR_ShadowOldCameraToLightTransformMiddle", 64);
+			copyBytes(cb.shadowOldFar, "TESR_ShadowOldCameraToLightTransformFar", 64);
+			copyBytes(cb.shadowOldLod, "TESR_ShadowOldCameraToLightTransformLod", 64);
+			copyBytes(cb.shadowOldNearCenter, "TESR_ShadowOldNearCenter", 16);
+			copyBytes(cb.shadowOldMiddleCenter, "TESR_ShadowOldMiddleCenter", 16);
+			copyBytes(cb.shadowOldFarCenter, "TESR_ShadowOldFarCenter", 16);
+			copyBytes(cb.shadowOldLodCenter, "TESR_ShadowOldLodCenter", 16);
+			copyBytes(cb.shadowCrossFade, "TESR_ShadowCrossFade", 16);
+			if (dynTex) copyBytes(cb.shadowDynamicData, "TESR_ShadowDynamicData", 16);
+		}
 
 		if (cloudTex) {
 			memcpy(cb.cloudSun, ForwardCloudShadows::Data, 16);
@@ -725,6 +752,7 @@ namespace DeferredSun {
 			if (sssMode >= 1 && sssMode <= 3) flags |= 1u << 20u; // UNOFFICIAL 2026-11-25 MaterialSSS Phase 2
 			if (TheShaderManager && TheShaderManager->GameState.isExterior) flags |= 1u << 21u;
 			if (sssOn) flags |= 1u << 22u; // UNOFFICIAL 2026-11-26 Bottled Shaders Screen-Space Shadows
+			if (crossFadeActive) flags |= 1u << 23u; // UNOFFICIAL 2026-11-27 SunFadeDeferred in compute
 		}
 
 		ID3D9NvrExt* ext = DxvkCompute::Extension();
@@ -744,6 +772,8 @@ namespace DeferredSun {
 			{ 8, NVR_EXT_BIND_STORAGE_IMAGE,  target,                           0, 0, 0, FALSE },
 			{ 9, NVR_EXT_BIND_STORAGE_IMAGE,  skinSpecTarget,                   0, 0, 0, FALSE },
 			{ 10, NVR_EXT_BIND_SAMPLED_IMAGE, (sssOn && ScreenSpaceShadows::Texture) ? static_cast<IDirect3DBaseTexture9*>(ScreenSpaceShadows::Texture) : depthTex, 0, 0, 0, FALSE },
+			{ 11, NVR_EXT_BIND_SAMPLED_IMAGE, crossFadeActive ? oldAtlasTex : depthTex, 0, 0, 0, FALSE },
+			{ 12, NVR_EXT_BIND_SAMPLED_IMAGE, (crossFadeActive && dynTex) ? dynTex : depthTex, 0, 0, 0, FALSE },
 			{ 0, NVR_EXT_BIND_UNIFORM_BUFFER, ComputeUbo,                       0, 0, sizeof(cb), FALSE },
 			{ 0, NVR_EXT_BIND_SAMPLER,        DxvkCompute::LinearClamp(),       0, 0, 0, FALSE },
 			{ 1, NVR_EXT_BIND_SAMPLER,        DxvkCompute::PointClamp(),        0, 0, 0, FALSE },

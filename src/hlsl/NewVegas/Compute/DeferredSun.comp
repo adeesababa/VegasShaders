@@ -1,7 +1,7 @@
 // UNOFFICIAL 2026-11-21 (Phase 2): Vulkan Compute DeferredSun pass (Compute\DeferredSun.spv).
 // Replaces the D3D9 DeferredSun pixel shader pass + 224-constant/208-sampler save/restore + DeferredFog::FrameCopy
 // StretchRect + DEPTH output (which disables Early-Z). Runs natively at full resolution and RenderScale < 1.0 over
-// [viewport.xy, viewport.xy + viewport.zw). Fallback: Vm.on (DeferredFirstPerson), SunFadeDeferred::Fading,
+// [viewport.xy, viewport.xy + viewport.zw). Fallback: Vm.on (DeferredFirstPerson),
 // non-PCF shadow modes, and SkylightingMode 1 remain on the D3D9 pass.
 // Compile: glslangValidator -V --target-env vulkan1.1 -o DeferredSun.spv DeferredSun.comp
 #version 450
@@ -22,6 +22,8 @@ layout(set = 1, binding = 7) uniform texture2D t_rtSunForward;  // TESR_RtSunFor
 layout(set = 1, binding = 8, rgba16f) uniform image2D i_scene;    // Scene HDR RT0 (unbound from RT0 during dispatch)
 layout(set = 1, binding = 9, rgba16f) uniform image2D i_skinSpec; // DeferredSkin::Spec (or 1x1 dummy when inactive)
 layout(set = 1, binding = 10) uniform texture2D t_sssMask;        // TESR_ScreenSpaceShadows (stand-in t_depth if inactive)
+layout(set = 1, binding = 11) uniform texture2D t_shadowAtlasOld; // TESR_ShadowAtlasOld (stand-in t_depth if inactive)
+layout(set = 1, binding = 12) uniform texture2D t_shadowDynamic;  // TESR_ShadowDynamic (stand-in t_depth if inactive)
 
 layout(push_constant) uniform Push {
     uint linearSampler;   // 0: LINEAR, CLAMP (cloud shadow)
@@ -76,6 +78,16 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4  rtSunRowW;              // 70: TESR_RtSunRowW
     vec4  rtSunData;              // 71: TESR_RtSunData
     vec4  dsSheen;                // 72: DS_Sheen (strength, roughness, 0, 0)
+    mat4  shadowOldNear;          // 73..76: TESR_ShadowOldCameraToLightTransformNear
+    mat4  shadowOldMiddle;        // 77..80: TESR_ShadowOldCameraToLightTransformMiddle
+    mat4  shadowOldFar;           // 81..84: TESR_ShadowOldCameraToLightTransformFar
+    mat4  shadowOldLod;           // 85..88: TESR_ShadowOldCameraToLightTransformLod
+    vec4  shadowOldNearCenter;    // 89: TESR_ShadowOldNearCenter
+    vec4  shadowOldMiddleCenter;  // 90: TESR_ShadowOldMiddleCenter
+    vec4  shadowOldFarCenter;     // 91: TESR_ShadowOldFarCenter
+    vec4  shadowOldLodCenter;     // 92: TESR_ShadowOldLodCenter
+    vec4  shadowCrossFade;        // 93: TESR_ShadowCrossFade (x blend 0..1, yzw old sun dir)
+    vec4  shadowDynamicData;      // 94: TESR_ShadowDynamicData (x 1/dynSize, 0 = inactive)
 } cb;
 
 // Flag bits (must match DeferredSun.h)
@@ -102,6 +114,7 @@ const uint kFlagSceneIsLinear    = 1u << 19u;
 const uint kFlagMaterialSSS      = 1u << 20u;
 const uint kFlagIsExterior       = 1u << 21u;
 const uint kFlagSSShadows        = 1u << 22u;
+const uint kFlagSunCrossFade     = 1u << 23u;
 
 bool HasFlag(uint bit) { return (pc.flags & bit) != 0u; }
 
@@ -679,7 +692,11 @@ vec3 ShadowAtlasPoint(vec4 clipL, vec2 quad) {
 float ShadowSlack(float n, float slopeBias, float slackCap, bool useCap) {
     return useCap ? min(n * slopeBias, slackCap) : (n * slopeBias);
 }
-float ShadowPCF3x3(vec2 uv, float depth, vec2 quad, float slopeBias, float slackCap, bool useCap) {
+float FetchShadowAtlas(bool oldAtlas, vec2 uv) {
+    if (oldAtlas) return textureLod(sampler2D(t_shadowAtlasOld, NVR_SAMPLER(pc.pointSampler)), uv, 0.0).x;
+    return textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), uv, 0.0).x;
+}
+float ShadowPCF3x3(bool oldAtlas, vec2 uv, float depth, vec2 quad, float slopeBias, float slackCap, bool useCap) {
     const float texW = cb.shadowBlur.x;
     const vec2 uvLo = quad + texW * 0.5;
     const vec2 uvHi = quad + 0.5 - texW * 0.5;
@@ -695,7 +712,7 @@ float ShadowPCF3x3(vec2 uv, float depth, vec2 quad, float slopeBias, float slack
         for (int cyi = 0; cyi < 4; cyi++) {
             for (int cxi = 0; cxi < 4; cxi++) {
                 vec2 tapUV = clamp((b + vec2(float(cxi - 1), float(cyi - 1)) + 0.5) * texW, uvLo, uvHi);
-                cubic += (cubicDepth <= textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), tapUV, 0.0).x ? 1.0 : 0.0) * cx[cxi] * cy[cyi];
+                cubic += (cubicDepth <= FetchShadowAtlas(oldAtlas, tapUV) ? 1.0 : 0.0) * cx[cxi] * cy[cyi];
             }
         }
         return cubic;
@@ -709,34 +726,34 @@ float ShadowPCF3x3(vec2 uv, float depth, vec2 quad, float slopeBias, float slack
     for (int y = 0; y < 3; y++) {
         for (int x = 0; x < 3; x++) {
             vec2 tapUV = clamp((c + vec2(float(x - 1), float(y - 1)) + 0.5) * texW, uvLo, uvHi);
-            lit += (depth <= textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), tapUV, 0.0).x ? 1.0 : 0.0) * wx[x] * wy[y];
+            lit += (depth <= FetchShadowAtlas(oldAtlas, tapUV) ? 1.0 : 0.0) * wx[x] * wy[y];
         }
     }
     return lit;
 }
-float ShadowPCF2x2Clamped(vec2 uv, float depth, vec2 uvLo, vec2 uvHi) {
+float ShadowPCF2x2Clamped(bool oldAtlas, vec2 uv, float depth, vec2 uvLo, vec2 uvHi) {
     const float texW = cb.shadowBlur.x;
     vec2 p = uv / texW - 0.5;
     vec2 base = floor(p);
     vec2 f = p - base;
     vec2 uv0 = (base + 0.5) * texW;
     vec4 d = vec4(
-        textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), clamp(uv0, uvLo, uvHi), 0.0).x,
-        textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), clamp(uv0 + vec2(texW, 0.0), uvLo, uvHi), 0.0).x,
-        textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), clamp(uv0 + vec2(0.0, texW), uvLo, uvHi), 0.0).x,
-        textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), clamp(uv0 + texW, uvLo, uvHi), 0.0).x
+        FetchShadowAtlas(oldAtlas, clamp(uv0, uvLo, uvHi)),
+        FetchShadowAtlas(oldAtlas, clamp(uv0 + vec2(texW, 0.0), uvLo, uvHi)),
+        FetchShadowAtlas(oldAtlas, clamp(uv0 + vec2(0.0, texW), uvLo, uvHi)),
+        FetchShadowAtlas(oldAtlas, clamp(uv0 + texW, uvLo, uvHi))
     );
     vec4 lit = vec4(lessThanEqual(vec4(depth), d));
     return mix(mix(lit.x, lit.y, f.x), mix(lit.z, lit.w, f.x), f.y);
 }
-float SampleShadowAtlasPCSS(vec3 position, mat4 lightTransform, vec2 quad, float bias, bool contact,
+float SampleShadowAtlasPCSS(bool oldAtlas, vec3 position, mat4 lightTransform, vec2 quad, float bias, bool contact,
                             float slopeBias, float slackCap, bool useCap, float softnessCap, float minPenumbra) {
     vec4 lightSpace = lightTransform * vec4(position, 1.0);
     lightSpace.xyz /= lightSpace.w;
     vec2 uv = vec2(lightSpace.x * 0.5 + 0.5, lightSpace.y * -0.5 + 0.5) * 0.5 + quad;
     float depth = lightSpace.z - bias;
     if (!HasFlag(kFlagContactHardening)) {
-        return ShadowPCF3x3(uv, depth - ShadowSlack(1.5, slopeBias, slackCap, useCap), quad, slopeBias, slackCap, useCap);
+        return ShadowPCF3x3(oldAtlas, uv, depth - ShadowSlack(1.5, slopeBias, slackCap, useCap), quad, slopeBias, slackCap, useCap);
     }
     float worldPerDepth = 1.0 / length(vec3(lightTransform[0][2], lightTransform[1][2], lightTransform[2][2]));
     float uvPerWorld = 0.25 * length(vec3(lightTransform[0][0], lightTransform[1][0], lightTransform[2][0]));
@@ -749,7 +766,7 @@ float SampleShadowAtlasPCSS(vec3 position, mat4 lightTransform, vec2 quad, float
         float casterSum = 0.0, casters = 0.0;
         float searchDepth = depth - ShadowSlack(0.73 * cb.contactHardeningData.y * softnessCap + 1.0, slopeBias, slackCap, useCap);
         for (int s = 0; s < 5; s++) {
-            float d = textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), clamp(uv + kContactSearch[s] * maxRadius, uvLo, uvHi), 0.0).x;
+            float d = FetchShadowAtlas(oldAtlas, clamp(uv + kContactSearch[s] * maxRadius, uvLo, uvHi));
             float blocks = d < searchDepth ? 1.0 : 0.0;
             casterSum += d * blocks;
             casters += blocks;
@@ -762,7 +779,7 @@ float SampleShadowAtlasPCSS(vec3 position, mat4 lightTransform, vec2 quad, float
     }
     float w3 = cb.contactHardeningData.z > 0.0 ? saturate(2.0 - radius / texW) : (radius <= texW ? 1.0 : 0.0);
     float lit = 0.0;
-    if (w3 > 0.0) lit = w3 * ShadowPCF3x3(uv, depth - ShadowSlack(1.5, slopeBias, slackCap, useCap), quad, slopeBias, slackCap, useCap);
+    if (w3 > 0.0) lit = w3 * ShadowPCF3x3(oldAtlas, uv, depth - ShadowSlack(1.5, slopeBias, slackCap, useCap), quad, slopeBias, slackCap, useCap);
     if (w3 < 1.0) {
         float discDepth = depth - ShadowSlack(radius / texW + 1.0, slopeBias, slackCap, useCap);
         vec2 turn = vec2(1.0, 0.0);
@@ -770,22 +787,24 @@ float SampleShadowAtlasPCSS(vec3 position, mat4 lightTransform, vec2 quad, float
             float ang = 6.2831853 * fract(52.9829189 * fract(dot(floor(uv / texW * 3.0), vec2(0.06711056, 0.00583715))));
             turn = vec2(cos(ang), sin(ang));
         }
-        float disc = ShadowPCF2x2Clamped(uv, discDepth, uvLo, uvHi);
+        float disc = ShadowPCF2x2Clamped(oldAtlas, uv, discDepth, uvLo, uvHi);
         for (int i = 0; i < 8; i++) {
             vec2 o = kContactDisc8[i];
-            disc += ShadowPCF2x2Clamped(uv + vec2(o.x * turn.x - o.y * turn.y, o.x * turn.y + o.y * turn.x) * radius, discDepth, uvLo, uvHi);
+            disc += ShadowPCF2x2Clamped(oldAtlas, uv + vec2(o.x * turn.x - o.y * turn.y, o.x * turn.y + o.y * turn.x) * radius, discDepth, uvLo, uvHi);
         }
         lit += (1.0 - w3) * disc / 9.0;
     }
     return lit;
 }
-float SunCascadeTap(float c, vec3 worldPos, vec3 worldNormal, float offset, float bias,
+float SunCascadeTap(bool oldAtlas, float c, vec3 worldPos, vec3 worldNormal, float offset, float bias,
                     float slopeBias, float slackCap, bool useCap, float softnessCap, float minPenumbra) {
-    mat4 lightTransform = c < 0.5 ? cb.shadowNear : c < 1.5 ? cb.shadowMiddle : c < 2.5 ? cb.shadowFar : cb.shadowLod;
+    mat4 lightTransform = oldAtlas
+        ? (c < 0.5 ? cb.shadowOldNear : c < 1.5 ? cb.shadowOldMiddle : c < 2.5 ? cb.shadowOldFar : cb.shadowOldLod)
+        : (c < 0.5 ? cb.shadowNear    : c < 1.5 ? cb.shadowMiddle    : c < 2.5 ? cb.shadowFar    : cb.shadowLod);
     vec2 quadrant = c < 0.5 ? vec2(0.0, 0.0) : c < 1.5 ? vec2(0.5, 0.0) : c < 2.5 ? vec2(0.0, 0.5) : vec2(0.5, 0.5);
     vec3 position = worldPos + offset * worldNormal;
     bool doContact = HasFlag(kFlagContactHardening) && (c < 1.5) && (cb.contactHardeningData.x > 0.0 || minPenumbra > 0.0);
-    return SampleShadowAtlasPCSS(position, lightTransform, quadrant, bias, doContact, slopeBias, slackCap, useCap, softnessCap, minPenumbra);
+    return SampleShadowAtlasPCSS(oldAtlas, position, lightTransform, quadrant, bias, doContact, slopeBias, slackCap, useCap, softnessCap, minPenumbra);
 }
 float CharacterMapShadow(vec3 worldPos, vec3 worldNormal, float NdotL, float cascadeShadow) {
     float texel = max(cb.charShadowData.x, 1.0 / 16384.0);
@@ -845,6 +864,98 @@ float DSCloudSunAt(vec3 P, float strength) {
     float inside = saturate(min(edge.x, edge.y) * 10.0);
     return mix(1.0, textureLod(sampler2D(t_cloudShadow, NVR_SAMPLER(pc.linearSampler)), suv, 0.0).r, inside * strength);
 }
+float GetOldSunShadowPass(vec3 P, vec3 Nw, bool skinPx, out float covered) {
+    float nDL = dot(Nw, cb.shadowCrossFade.yzw);
+    float offS = saturate(1.0 - nDL);
+    vec4 rad = vec4(cb.shadowOldNearCenter.w, cb.shadowOldMiddleCenter.w, cb.shadowOldFarCenter.w, cb.shadowOldLodCenter.w);
+    vec4 tw = 4.0 * rad * max(cb.shadowBlur.x, 1.0 / 16384.0);
+    vec4 offD = offS * 1.5 * tw;
+    float slopeBias = 2.0 * cb.shadowBlur.x * min(sqrt(saturate(1.0 - nDL * nDL)) / max(nDL, 0.05), 5.0);
+    float charReach = (HasFlag(kFlagSlackCapAll) ? cb.shadowBlur.w : (HasFlag(kFlagSkinEnabled) && skinPx ? cb.shadowBlur.w : 0.0));
+    bool useCap = charReach > 0.0;
+    float slackCap = 1.0e9;
+    if (useCap) {
+        offD = min(offD, charReach * rad / max(rad.x, 0.001));
+        slackCap = charReach / (2.0 * max(rad.x, 0.001) * max(nDL, 0.2));
+    }
+    float minPenumbra = (HasFlag(kFlagSkinEnabled) && skinPx) ? cb.shadowForwardData.z : 0.0;
+    float bi = 0.0002 * (1.0 + offS);
+    vec4 st = rad - ShadowCascadeBands(rad);
+    vec4 dst;
+    dst.x = length(P - cb.shadowOldNearCenter.xyz);
+    dst.y = length(P - cb.shadowOldMiddleCenter.xyz);
+    dst.z = length(P - cb.shadowOldFarCenter.xyz);
+    dst.w = length(P - cb.shadowOldLodCenter.xyz);
+
+    float cascade = -1.0, fade = 0.0;
+    if (dst.x < rad.x) { cascade = 0.0; fade = smoothstep(st.x, rad.x, dst.x); }
+    else if (dst.y < rad.y) { cascade = 1.0; fade = smoothstep(st.y, rad.y, dst.y); }
+    else if (dst.z < rad.z) { cascade = 2.0; fade = smoothstep(st.z, rad.z, dst.z); }
+    else if (dst.w < rad.w) { cascade = 3.0; fade = smoothstep(st.w, rad.w, dst.w); }
+    covered = cascade >= 0.0 ? 1.0 : 0.0;
+    float offsetHere = cascade < 0.5 ? mix(offD.x, offD.y, fade) : cascade < 1.5 ? mix(offD.y, offD.z, fade) :
+                       cascade < 2.5 ? mix(offD.z, offD.w, fade) : offD.w;
+    float slackScale = cascade < 0.5 ? mix(rad.x / max(rad.y, 0.001), 1.0, fade) : 1.0;
+
+    float sh = 1.0;
+    if (cascade >= 0.0 && cascade < 3.5) {
+        sh = SunCascadeTap(true, cascade, P, Nw, offsetHere, bi, slopeBias, slackCap, useCap, 1.0, minPenumbra);
+        if (fade > 0.0) {
+            float next = 1.0;
+            if (cascade < 2.5) {
+                next = SunCascadeTap(true, cascade + 1.0, P, Nw, offsetHere, bi, slopeBias * slackScale, slackCap, useCap, slackScale, minPenumbra);
+            }
+            sh = mix(sh, next, fade);
+        }
+    }
+    return saturate(sh);
+}
+float GetDynamicSunShadowPass(vec3 P, vec3 Nw, float slopeBias, float slackCap, bool useCap) {
+    float d0 = length(P - cb.shadowNearCenter.xyz);
+    float d1 = length(P - cb.shadowMiddleCenter.xyz);
+    float d2 = length(P - cb.shadowFarCenter.xyz);
+    float radC;
+    mat4 lightTransform;
+    vec2 quad;
+    if (d0 < cb.shadowNearCenter.w) {
+        radC = cb.shadowNearCenter.w;
+        lightTransform = cb.shadowNear;
+        quad = vec2(0.0, 0.0);
+    } else if (d1 < cb.shadowMiddleCenter.w) {
+        radC = cb.shadowMiddleCenter.w;
+        lightTransform = cb.shadowMiddle;
+        quad = vec2(0.5, 0.0);
+    } else if (d2 < cb.shadowFarCenter.w) {
+        radC = cb.shadowFarCenter.w;
+        lightTransform = cb.shadowFar;
+        quad = vec2(0.0, 0.5);
+    } else {
+        return 1.0;
+    }
+    float dynTexW = cb.shadowDynamicData.x;
+    float tw = 4.0 * radC * dynTexW;
+    float nDL = dot(Nw, cb.smoothedSunDir.xyz);
+    float offS = saturate(1.0 - nDL);
+    float offset = offS * 1.5 * tw;
+    float bi = 0.0002 * (1.0 + offS);
+    vec3 at = ShadowAtlasPoint(lightTransform * vec4(P + offset * Nw, 1.0), quad);
+    float depth = at.z - bi - ShadowSlack(3.0, slopeBias, slackCap, useCap);
+    vec2 uvLo = quad + dynTexW * 0.5;
+    vec2 uvHi = quad + 0.5 - dynTexW * 0.5;
+    vec2 p = at.xy / dynTexW - 0.5;
+    vec2 c = floor(p + 0.5);
+    vec2 f = p - c;
+    vec3 wx = vec3(0.5 * (0.5 - f.x) * (0.5 - f.x), 0.75 - f.x * f.x, 0.5 * (0.5 + f.x) * (0.5 + f.x));
+    vec3 wy = vec3(0.5 * (0.5 - f.y) * (0.5 - f.y), 0.75 - f.y * f.y, 0.5 * (0.5 + f.y) * (0.5 + f.y));
+    float lit = 0.0;
+    for (int y = 0; y < 3; y++) {
+        for (int x = 0; x < 3; x++) {
+            vec2 tapUV = clamp((c + vec2(float(x - 1), float(y - 1)) + 0.5) * dynTexW, uvLo, uvHi);
+            lit += (depth <= textureLod(sampler2D(t_shadowDynamic, NVR_SAMPLER(pc.pointSampler)), tapUV, 0.0).x ? 1.0 : 0.0) * wx[x] * wy[y];
+        }
+    }
+    return saturate(lit);
+}
 float GetSunShadowMaps(vec3 P, vec3 Nw, bool skinPx) {
     if (!HasFlag(kFlagForwardShadows) || cb.shadowForwardData.x != 0.0 || cb.shadowFormatData.z == 0.0 ||
         cb.shadowFade.y == 0.0 || cb.shadowFormatData.x != 3.0) {
@@ -884,16 +995,26 @@ float GetSunShadowMaps(vec3 P, vec3 Nw, bool skinPx) {
     // NVR_NO_SM3_LIMITS smooth handover blend (no temp register limit in Vulkan compute)
     float sh = 1.0;
     if (cascade >= 0.0 && cascade < 3.5) {
-        sh = SunCascadeTap(cascade, P, Nw, offsetHere, bi, slopeBias, slackCap, useCap, 1.0, minPenumbra);
+        sh = SunCascadeTap(false, cascade, P, Nw, offsetHere, bi, slopeBias, slackCap, useCap, 1.0, minPenumbra);
         if (fade > 0.0) {
             float next = 1.0;
             if (cascade < 2.5) {
-                next = SunCascadeTap(cascade + 1.0, P, Nw, offsetHere, bi, slopeBias * slackScale, slackCap, useCap, slackScale, minPenumbra);
+                next = SunCascadeTap(false, cascade + 1.0, P, Nw, offsetHere, bi, slopeBias * slackScale, slackCap, useCap, slackScale, minPenumbra);
             }
             sh = mix(sh, next, fade);
         }
     }
     sh = saturate(sh);
+    if (HasFlag(kFlagSunCrossFade) && cb.shadowCrossFade.x > 0.0) {
+        float covered = 0.0;
+        float oldShadow = GetOldSunShadowPass(P, Nw, skinPx, covered);
+        float blended = mix(sh, oldShadow, cb.shadowCrossFade.x * covered);
+        if (sh < 0.999 && oldShadow > sh + 0.001 && cb.shadowDynamicData.x > 0.0) {
+            float dynShadow = GetDynamicSunShadowPass(P, Nw, slopeBias, slackCap, useCap);
+            blended = min(blended, max(sh, dynShadow));
+        }
+        sh = blended;
+    }
     if (HasFlag(kFlagCharShadowMap) && cb.charShadowData.w > 0.0) {
         sh = CharacterMapShadow(P, Nw, nDL, sh);
     }

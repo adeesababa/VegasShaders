@@ -69,7 +69,7 @@ void main() {
                     bool usable = all(greaterThan(at, vec2(0.0))) && all(lessThan(at, cb.renderScale.xy)) && !IsWeapon(at) && readDepthLod(at) > 40.0;
                     vec3 c = linearize(textureLod(sampler2D(t_rendered, LINEAR_S), at, 0.0).rgb);
                     float brightest = max(c.r, max(c.g, c.b));
-                    sum += usable ? c * min(1.0, 32.0 / max(brightest, 1.0e-4)) : vec3(0.0);
+                    sum += usable ? c * min(1.0, 8.0 / max(brightest, 1.0e-4)) : vec3(0.0);
                     found += usable ? 1.0 : 0.0;
                 }
             }

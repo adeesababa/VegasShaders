@@ -141,11 +141,14 @@
     <ClCompile Include="..\src\core\RenderManager.cpp" />
     <ClCompile Include="..\src\core\RenderPass.cpp" />
     <ClCompile Include="..\src\core\SettingManager.cpp" />
+    <ClCompile Include="..\src\core\SettingMigrations.cpp" />
     <ClCompile Include="..\src\core\ShaderCollection.cpp" />
     <ClCompile Include="..\src\core\ShaderManager.cpp" />
     <ClCompile Include="..\src\core\EffectChain.cpp" />
     <ClCompile Include="..\src\core\ShaderRecord.cpp" />
     <ClCompile Include="..\src\core\ShadowManager.cpp" />
+    <ClCompile Include="..\src\core\ShadowSunCascades.cpp" />
+    <ClCompile Include="..\src\core\ShadowCharacterAndRefl.cpp" />
     <ClCompile Include="..\src\core\TextureManager.cpp" />
     <ClCompile Include="..\src\core\TextureRecord.cpp" />
     <ClCompile Include="..\src\effects\AmbientOcclusion\AmbientOcclusion.cpp" />
@@ -299,6 +302,7 @@
     <ClInclude Include="..\src\core\Device\Device.h" />
     <ClInclude Include="..\src\core\Device\Hook.h" />
     <ClInclude Include="..\src\core\EffectRecord.h" />
+    <ClInclude Include="..\src\core\ShadowManagerInternal.h" />
     <ClInclude Include="..\src\core\ReShadeIntegration.h" />
     <ClInclude Include="..\src\core\FrameRateManager.h" />
     <ClInclude Include="..\src\core\GameEventManager.h" />

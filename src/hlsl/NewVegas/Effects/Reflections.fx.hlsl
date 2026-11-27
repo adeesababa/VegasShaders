@@ -551,7 +551,7 @@ float4 CapturePS(VSOUT IN, float2 vpos : VPOS) : COLOR0 {
 					bool usable = all(at > 0.0) && all(at < TESR_RenderScale.xy) && !IsWeapon(at) && readDepthLod(at) > 40.0;
 					float3 c = linearize(tex2Dlod(TESR_RenderedBuffer, float4(at, 0, 0)).rgb);
 					float brightest = max(c.r, max(c.g, c.b));
-					sum += usable ? c * min(1.0, 32.0 / max(brightest, 1.0e-4)) : 0.0;
+					sum += usable ? c * min(1.0, 8.0 / max(brightest, 1.0e-4)) : 0.0;
 					found += usable ? 1.0 : 0.0;
 				}
 			}

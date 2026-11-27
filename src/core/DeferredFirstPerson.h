@@ -65,12 +65,14 @@ namespace DeferredFirstPerson {
 
 	inline bool Decided = false;		// this frame's Begin passed its checks (the span may still refuse: Open says)
 	inline bool Open = false;			// the view-model G-buffer span is open (DeferredRenderer::ViewModelRoot set)
+	inline bool NativeLayerActive = false;	// FirstPersonNativeScale swapped full-size G-buffer targets into CapturedNormals
 	inline const char* LastWhy = nullptr;
 	inline unsigned WhyLines = 0;
 	inline D3DXVECTOR3 Eye(0.0f, 0.0f, 0.0f), Offset(0.0f, 0.0f, 0.0f);
 	inline NiCamera* Camera = nullptr;
 	inline bool MapMade = false;		// ViewModelShadows drew the map this frame (Render.cpp)
 	inline float EyeOff = 0.0f, Turn = 1.0f;	// (the diagnostic line) the eye's distance from the world eye + offset, the cameras' forward cosine
+	inline double AimHoldUntil = 0.0;		// real-time hold past IsAiming() dropping during firing or ADS zoom-out interpolation
 	inline unsigned DiagLines = 0;
 	inline D3DXVECTOR4 Frame[6] = {};	// the first-person camera in Includes/DeferredDepth.hlsl's DD layout (End)
 	inline IDirect3DTexture9* LightTex = nullptr;  inline IDirect3DSurface9* LightSurf = nullptr;
@@ -154,6 +156,7 @@ namespace DeferredFirstPerson {
 
 	// Once a frame (Render.cpp, after DeferredSun::BeginFrame).
 	inline void BeginFrame() {
+		if (NativeLayerActive) { CapturedNormals::PopVmNativeGBuffer(); NativeLayerActive = false; }
 		Decided = false;
 		GearWeather::BeginFrame(WantedAtStartup() && !Failed && DeferredRenderer::Live);
 		if (!WantedAtStartup() || !GpuTimer::Enabled) { StatFrames = 0; return; }
@@ -190,19 +193,29 @@ namespace DeferredFirstPerson {
 	// RenderScale < 1 and FSR / DLSS): the view model draws into that full-size layer, composited after the upscale, not into the world's
 	// G-buffer at the world's size, so this frame's view model stays forward (FirstPersonNativeScale wins: it is a player setting).
 	inline void Begin(IDirect3DDevice9* d, NiCamera* camera, bool viewModelMap, bool nativeLayer = false) {
+		if (NativeLayerActive) { CapturedNormals::PopVmNativeGBuffer(); NativeLayerActive = false; }
 		Decided = Open = false;
 		CapturedNormals::VmDeferred = false;
 		MapMade = viewModelMap;
 		if (!WantedAtStartup() || Failed || !DeferredRenderer::Live || !d) return;
 		const auto& gs = TheShaderManager->GameState;
 		const char* why = nullptr;
+		D3DSURFACE_DESC rtDesc = {};
 		if (!Player || !Player->IsDrawnFirstPerson() || !Player->firstPersonNiNode || !camera) why = "third person (or no first-person model)";
-		else if (nativeLayer) why = "FirstPersonNativeScale draws the view model into its own full-size layer (RenderScale below 1 with FSR / DLSS)";
+		else if (nativeLayer) {
+			IDirect3DSurface9* rt0 = nullptr;
+			if (FAILED(d->GetRenderTarget(0, &rt0)) || !rt0) why = "FirstPersonNativeScale render target unavailable";
+			else {
+				if (FAILED(rt0->GetDesc(&rtDesc))) why = "FirstPersonNativeScale render target desc unavailable";
+				else if (rtDesc.MultiSampleType != D3DMULTISAMPLE_NONE) why = "FirstPersonNativeScale with MSAA (set FirstPersonNativeSamples = 0 for deferred first person)";
+				rt0->Release();
+			}
+		}
 		// (2026-11-25 fd-complete, both tried and kept forward: the Pip-Boy open draws no world behind it, so there is no G-buffer, lamp table
 		// or sun this frame to light the arm from (bench 20261125-085930-slotA: with this check off, first person fell back on "the world's
 		// G-buffer was not captured this frame"); VATS targeting and its kill camera draw no view model at all (20261125-090315-slotA: no
 		// view-model span after VATS opened), so there is nothing for the deferred passes to light)
-		else if (InterfaceManager->IsPipBoyOpen() || gs.PipBoyIsOn) why = "the Pip-Boy is open";
+		if (!why && (InterfaceManager->IsPipBoyOpen() || gs.PipBoyIsOn)) why = "the Pip-Boy is open";
 		else if (gs.VATSIsOn) why = "VATS";
 		// (2026-11-24 fd-complete batch 2: Bodycam no longer sends first person forward: it only widens the world camera's field of view, which
 		// FrustumWhy / MakeFrame's tangent rescale already handle; [Main.Main.Quality] DeferredFirstPersonBodycam false = forward under it, as before)
@@ -227,9 +240,13 @@ namespace DeferredFirstPerson {
 			const float dx = eye.x - offset.x - world.x, dy = eye.y - offset.y - world.y, dz = eye.z - offset.z - world.z;
 			const NiMatrix33& r = camera->m_worldTransform.rot;
 			const float turn = r.data[0][0] * TheRenderManager->CameraForward.x + r.data[1][0] * TheRenderManager->CameraForward.y + r.data[2][0] * TheRenderManager->CameraForward.z;
-			const bool aiming = Player->process && Player->IsAiming();
+			const double now = TheFrameRateManager ? TheFrameRateManager->Time : 0.0;
+			if (now < AimHoldUntil - 5.0) AimHoldUntil = 0.0;
+			const bool rawAiming = Player->process && Player->IsAiming();
+			if (rawAiming) AimHoldUntil = now + 0.45;
+			const bool aiming = rawAiming || now < AimHoldUntil;
 			const float maxEyeOffSq = aiming ? 4096.0f : 4.0f;	// iron sights / red dot / optics move the first-person eye onto the sight
-			const float minTurn = aiming ? 0.99f : 0.9999f;
+			const float minTurn = aiming ? 0.90f : 0.9999f;
 			if (!_finite(dx) || dx * dx + dy * dy + dz * dz > maxEyeOffSq) why = aiming
 				? "the first-person eye sits more than 64 units off the world eye while aiming"
 				: "the first-person eye sits more than 2 units off the world eye (a sight, a scope or a camera mod)";
@@ -244,6 +261,14 @@ namespace DeferredFirstPerson {
 		}
 		if (!why && ((DeferredRenderer::Mode() >= 2 && !DeferredSun::Pass) || !DeferredLamps::Pass)) why = "a light pass did not load";
 		if (why) { StatForward++; Note(why); return; }
+		if (nativeLayer) {
+			if (!CapturedNormals::PushVmNativeGBuffer(d, rtDesc.Width, rtDesc.Height)) {
+				StatForward++;
+				Note("FirstPersonNativeScale G-buffer could not be made");
+				return;
+			}
+			NativeLayerActive = true;
+		}
 		Camera = camera;
 		Decided = true;
 		CapturedNormals::VmDeferred = true;	// (BeginViewModelSpan opens the span for it)
@@ -389,6 +414,14 @@ namespace DeferredFirstPerson {
 
 	// Render.cpp, right after CapturedNormals::EndViewModelSpan (the G-buffer unbound), before the view model's shadow constants are put back.
 	inline void End(IDirect3DDevice9* d) {
+		struct NativePopGuard {
+			~NativePopGuard() {
+				if (NativeLayerActive) {
+					CapturedNormals::PopVmNativeGBuffer();
+					NativeLayerActive = false;
+				}
+			}
+		} nativePopGuard;
 		GearWeather::EndTagging();
 		CapturedNormals::VmDeferred = false;
 		if (!Open) return;

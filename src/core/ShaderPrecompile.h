@@ -338,10 +338,19 @@ namespace ShaderPrecompile {
 			for (const auto& [Name, Template] : Collection->Templates()) {
 				const std::string name(Name);
 				templated.insert(name);
-				Add(name.c_str(), NULL, NULL, Template, NULL);
-				if (name.size() > 4 && name.compare(name.size() - 4, 4, ".pso") == 0) addTerrainLamps(name.c_str(), Template);
-				if (interiorShadows && name.size() > 4 && name.compare(name.size() - 4, 4, ".pso") == 0 && PointShadowForward::Eligible(name.c_str(), Template))
-					addInterior(name, Template);
+				if (DeferredSkin::IsOpaqueDeferredManaged(name.c_str(), Template)) {
+					Add(name.c_str(), NULL, "Deferred\\Fallback\\", Template, DeferredSkin::LeanFallbackOverrides());
+					if (glass && PointShadowForward::Eligible(name.c_str(), Template) && DeferredTransparents::Eligible(name.c_str(), Template)) {
+						Add(name.c_str(), NULL, "Deferred\\GlassExterior\\", Template, glassOut);
+						Add(name.c_str(), NULL, DeferredTransparents::kCache, Template, glassIn);
+					}
+				}
+				else {
+					Add(name.c_str(), NULL, NULL, Template, NULL);
+					if (name.size() > 4 && name.compare(name.size() - 4, 4, ".pso") == 0) addTerrainLamps(name.c_str(), Template);
+					if (interiorShadows && name.size() > 4 && name.compare(name.size() - 4, 4, ".pso") == 0 && PointShadowForward::Eligible(name.c_str(), Template))
+						addInterior(name, Template);
+				}
 				if (lightFree && LightFreeRecords::Eligible(name.c_str(), Template)) Add(name.c_str(), NULL, LightFreeRecords::kCache, Template, LightFreeRecords::Overrides());
 				if (DeferredSkin::WantedAtStartup() && DeferredSkin::Eligible(name.c_str(), Template))
 					Add(name.c_str(), NULL, DeferredSkin::kCache, Template, DeferredRenderer::Mode() >= 2 ? skinDeferred : skinDeferred1);

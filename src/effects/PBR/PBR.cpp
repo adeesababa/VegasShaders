@@ -34,6 +34,11 @@ void PBRShaders::RegisterConstants() {
 // The first-person model's metal strength and grey parts' metal (GreyMetal) for its pass; the world's (World, WorldGreyMetal)
 // after it. Shaders upload their constants when bound, so the one still bound from the world pass gets it directly (c34:
 // TESR_PBRMetal in Object.hlsl).
+static bool IsEnvTemplateBound() {
+	const char* name = ShaderRecordPixel::Current ? ShaderRecordPixel::Current->Name : nullptr;
+	return name && (!strcmp(name, "SLS2057.pso") || !strcmp(name, "SLS2058.pso"));
+}
+
 void PBRShaders::BeginFirstPerson(IDirect3DDevice9* Device) {
 	FirstPersonActive = true;
 	FirstPersonWeapon = false;
@@ -43,7 +48,7 @@ void PBRShaders::BeginFirstPerson(IDirect3DDevice9* Device) {
 	Constants.MetalLook.z = MetalSettings.Reflections * reflectivity;
 	if (Device) {
 		Device->SetPixelShaderConstantF(34, (const float*)&Constants.Metal, 1);
-		Device->SetPixelShaderConstantF(36, (const float*)&Constants.MetalLook, 1);
+		if (!IsEnvTemplateBound()) Device->SetPixelShaderConstantF(36, (const float*)&Constants.MetalLook, 1);
 	}
 }
 
@@ -64,7 +69,7 @@ void PBRShaders::SetFirstPersonWeapon(IDirect3DDevice9* Device, bool isWeapon) {
 	}
 	if (Device) {
 		Device->SetPixelShaderConstantF(34, (const float*)&Constants.Metal, 1);
-		Device->SetPixelShaderConstantF(36, (const float*)&Constants.MetalLook, 1);
+		if (!IsEnvTemplateBound()) Device->SetPixelShaderConstantF(36, (const float*)&Constants.MetalLook, 1);
 	}
 }
 
@@ -77,7 +82,7 @@ void PBRShaders::EndFirstPerson(IDirect3DDevice9* Device) {
 	Constants.MetalLook.z = MetalSettings.Reflections * reflectivity;
 	if (Device) {
 		Device->SetPixelShaderConstantF(34, (const float*)&Constants.Metal, 1);
-		Device->SetPixelShaderConstantF(36, (const float*)&Constants.MetalLook, 1);
+		if (!IsEnvTemplateBound()) Device->SetPixelShaderConstantF(36, (const float*)&Constants.MetalLook, 1);
 	}
 }
 

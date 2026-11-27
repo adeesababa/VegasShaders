@@ -45,8 +45,57 @@
 #include "ShelvedEffects.h"	// UNOFFICIAL 2026-11-16 BloodFlow and DustMotes are left out of release builds
 #include "ShaderPrecompile.h"	// UNOFFICIAL 2026-11-16 fast-restart (LateInteriors: the workers' jobs still running)
 #include "LateInteriors.h"	// UNOFFICIAL 2026-11-16 fast-restart
+#include "Branding.h"
+#include <fstream>
 #include <unordered_map>	// UNOFFICIAL 2026-10-27 RenderScale v2 (RenderRect::RescaleRegistered)
 extern D3DXVECTOR4 NvrGameMultisample;	// UNOFFICIAL 2026-11-04 Hooks/Settings.cpp (TESR_GameMultisample)
+extern "C" IMAGE_DOS_HEADER __ImageBase;
+
+// Clears live shader/effect Cache directories once when a new VegasShaders.dll build runs,
+// leaving CacheShipped\ untouched so prebuilt default shaders remain ready.
+static void AutoClearStaleShaderCache() {
+	const auto* base = reinterpret_cast<const unsigned char*>(&__ImageBase);
+	const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + __ImageBase.e_lfanew);
+	char stamp[96];
+	snprintf(stamp, sizeof(stamp), "%s_%08X_%08X",
+		Branding::Version,
+		static_cast<unsigned>(nt->FileHeader.TimeDateStamp),
+		static_cast<unsigned>(nt->OptionalHeader.SizeOfImage));
+
+	const std::string cacheDirs[2] = {
+		std::string(ShadersPath) + "Cache",
+		std::string(EffectsPath) + "Cache",
+	};
+	for (const std::string& cacheDir : cacheDirs) {
+		const std::string stampPath = cacheDir + "\\.vs-build-stamp";
+		std::string prev;
+		{
+			std::ifstream in(stampPath, std::ios::in | std::ios::binary);
+			if (in.is_open()) {
+				prev.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+				while (!prev.empty() && (prev.back() == '\r' || prev.back() == '\n')) prev.pop_back();
+			}
+		}
+		if (prev == stamp) continue;
+
+		std::error_code ec;
+		size_t cleared = 0;
+		if (std::filesystem::exists(cacheDir, ec)) {
+			for (std::filesystem::directory_iterator it(cacheDir, ec), end; !ec && it != end; it.increment(ec)) {
+				std::error_code rmEc;
+				const auto n = std::filesystem::remove_all(it->path(), rmEc);
+				if (!rmEc && n > 0) cleared += static_cast<size_t>(n);
+			}
+		}
+		if (cleared > 0) {
+			Logger::Log("Shader cache: new build detected (%s -> %s); cleared %zu stale entr%s in %s",
+				prev.empty() ? "none" : prev.c_str(), stamp, cleared, cleared == 1 ? "y" : "ies", cacheDir.c_str());
+		}
+		std::filesystem::create_directories(cacheDir, ec);
+		std::ofstream out(stampPath, std::ios::out | std::ios::binary | std::ios::trunc);
+		if (out.is_open()) out.write(stamp, strlen(stamp));
+	}
+}
 
 /**
 * Initializes the Shader Manager Singleton.
@@ -80,6 +129,8 @@ void ShaderManager::Initialize() {
 
 	sm->PreviousCell = nullptr;
 	sm->IsMenuSwitch = false;
+
+	AutoClearStaleShaderCache();
 
 	// Cache folders the shader and effect code writes into, created in this order; a failure is logged and skipped.
 	// The folders are Paths.h's (Data\Shaders\VegasShaders, Data\Textures\VegasShaders, or the old ones of an older install).
@@ -1586,77 +1637,100 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 	const bool familyOn = family->Enabled;
 	ShaderTemplate tmpl = family->GetTemplate(pixel->Name);
 
-	// generic, exterior, interior: each where its file exists
-	static const char* const variantFolders[3] = { NULL, "Exteriors\\", "Interiors\\" };
-	// 2026-11-12 Puddles (combined puddles + sun-GI test): with puddles AND the albedo buffer compiled in, SLS2027's main record ran out of
-	// temp registers in game (it fits offline) and did not load at all: its objects fell back to the game's shader. A main record that
-	// does not load with puddles compiled in is made again with the lean puddle path (PUDDLES_LEAN, Cache\PuddlesLean); its copy, newer than
-	// the full one and than the sources, says the full one failed last time (the failed compile is not cached): straight to it then.
-	static D3DXMACRO puddlesLean[3] = { { "PUDDLES_LEAN", "1" }, { "PUDDLES_NOMAP", "1" }, { NULL, NULL } };	// (map mode: the in-shader lean path for this record)
+	static const auto BaseInteriorOverrides = []() -> const D3DXMACRO* {
+		static D3DXMACRO overrides[7] = {
+			{ "INTERIOR_SHADOWS", "1" }, { "FORWARD_SHADOWS", "0" },
+			{ "SUN_CROSSFADE", "0" }, { "CONTACT_HARDENING", "0" },
+			{ NULL, NULL }, { NULL, NULL }
+		};
+		static const bool init = [] {
+			if (const char* value = PBRShaders::LampFalloffInteriorDefine()) overrides[4] = { "LAMP_FALLOFF_ON", value };
+			return true;
+		}();
+		(void)init;
+		return overrides;
+	};
+
 	const bool puddlesIn = TheSettingManager->GetSettingI("Shaders.Puddles.Status", "Enabled") && TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled");
-	bool leanFirst = false;
-	if (puddlesIn) {
-		const std::string cache = std::string(ShadersPath) + "Cache\\";
-		WIN32_FILE_ATTRIBUTE_DATA lean = {}, full = {};
-		const bool hasLean = GetFileAttributesExA((cache + "PuddlesLean\\" + pixel->Name).c_str(), GetFileExInfoStandard, &lean) != 0;
-		const bool hasFull = GetFileAttributesExA((cache + pixel->Name).c_str(), GetFileExInfoStandard, &full) != 0;
-		leanFirst = hasLean && (!hasFull || CompareFileTime(&lean.ftLastWriteTime, &full.ftLastWriteTime) > 0) &&
-			FallbackNewerThanSources(lean.ftLastWriteTime, tmpl.Name, "Includes\\Wetness.hlsl");
+	if (DeferredSkin::IsOpaqueDeferredManaged(pixel->Name, tmpl)) {
+		// DeferredRenderer 2 lights opaque world/skin pixels in deferred passes; compile only a lean fallback forward record (stripping
+		// heavy cascade/cloud/wetness bloat to avoid SM 3.0 X4505) plus Forward+ glass records when enabled.
+		pixel->ShaderProg[ShaderRecordType::Default] = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, NULL, tmpl, "Deferred\\Fallback\\", DeferredSkin::LeanFallbackOverrides());
+		if (TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Forward", "Enabled") && PointShadowForward::Eligible(pixel->Name, tmpl))
+			DeferredTransparents::Load(pixel, pixel->Name, tmpl, BaseInteriorOverrides());
 	}
-	for (int variant = ShaderRecordType::Default; variant <= ShaderRecordType::Interior; variant++)
-		pixel->ShaderProg[variant] = variant == ShaderRecordType::Default && leanFirst ? nullptr :
-			(ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, variantFolders[variant], tmpl);
-	if (!pixel->ShaderProg[ShaderRecordType::Default] && puddlesIn) {
-		pixel->ShaderProg[ShaderRecordType::Default] = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, NULL, tmpl, "PuddlesLean\\", puddlesLean);
-		if (pixel->ShaderProg[ShaderRecordType::Default]) {
-			if (!leanFirst) TouchCacheCopy("PuddlesLean\\", pixel->Name);
-			Logger::Log("UNOFFICIAL Puddles: %s's main record did not fit with the full puddles: made with the lean path (PUDDLES_LEAN).", pixel->Name);
+	else {
+		// generic, exterior, interior: each where its file exists
+		static const char* const variantFolders[3] = { NULL, "Exteriors\\", "Interiors\\" };
+		// 2026-11-12 Puddles (combined puddles + sun-GI test): with puddles AND the albedo buffer compiled in, SLS2027's main record ran out of
+		// temp registers in game (it fits offline) and did not load at all: its objects fell back to the game's shader. A main record that
+		// does not load with puddles compiled in is made again with the lean puddle path (PUDDLES_LEAN, Cache\PuddlesLean); its copy, newer than
+		// the full one and than the sources, says the full one failed last time (the failed compile is not cached): straight to it then.
+		static D3DXMACRO puddlesLean[3] = { { "PUDDLES_LEAN", "1" }, { "PUDDLES_NOMAP", "1" }, { NULL, NULL } };	// (map mode: the in-shader lean path for this record)
+		bool leanFirst = false;
+		if (puddlesIn) {
+			const std::string cache = std::string(ShadersPath) + "Cache\\";
+			WIN32_FILE_ATTRIBUTE_DATA lean = {}, full = {};
+			const bool hasLean = GetFileAttributesExA((cache + "PuddlesLean\\" + pixel->Name).c_str(), GetFileExInfoStandard, &lean) != 0;
+			const bool hasFull = GetFileAttributesExA((cache + pixel->Name).c_str(), GetFileExInfoStandard, &full) != 0;
+			leanFirst = hasLean && (!hasFull || CompareFileTime(&lean.ftLastWriteTime, &full.ftLastWriteTime) > 0) &&
+				FallbackNewerThanSources(lean.ftLastWriteTime, tmpl.Name, "Includes\\Wetness.hlsl");
 		}
-	}
-	// UNOFFICIAL 2026-11-16 fast-restart (LateInteriors below): while the start's shaders load, the lamp-shadow records wait for LateInteriors'
-	// attach (their compiles run on the worker threads after everything the start needs); any other time, and with ParallelShaderCompile
-	// off or DeferredRenderer 1, right here as before.
-	if (!LateInteriors::Defer(pixel, tmpl)) LoadLampShadowRecords(pixel, tmpl);
-	// UNOFFICIAL 2026-10-30 RT lamp shadows ExteriorForward on the land: the land shaders with lamps (TerrainTemplate, NUM_PT_LIGHTS) get an
-	// outdoor record with TERRAIN_LAMP_RT (their lamps matched by position to the traced entries). Only with terrain blending off: its
-	// depth takes s15, the one stage the land has left (register audit 2026-10-30).
-	if (pixel->ShaderProg[ShaderRecordType::Default] && tmpl.Name && !strcmp(tmpl.Name, "TerrainTemplate") &&
-		TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.RT", "Enabled") && TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.RT", "ExteriorForward")) {
-		bool lamps = false;
-		for (const D3DXMACRO& d : tmpl.Defines) if (d.Name && !strcmp(d.Name, "NUM_PT_LIGHTS")) lamps = true;
-		if (lamps && TheSettingManager->GetSettingI("Shaders.Terrain.Blending", "Enabled")) {
-			static bool told = false;
-			if (!told) { told = true; Logger::Log("UNOFFICIAL RT lamp shadows: the land gets no outdoor lamp shadows: Terrain Blending is on (it takes s15, the land's last free stage)."); }
+		for (int variant = ShaderRecordType::Default; variant <= ShaderRecordType::Interior; variant++)
+			pixel->ShaderProg[variant] = variant == ShaderRecordType::Default && leanFirst ? nullptr :
+				(ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, variantFolders[variant], tmpl);
+		if (!pixel->ShaderProg[ShaderRecordType::Default] && puddlesIn) {
+			pixel->ShaderProg[ShaderRecordType::Default] = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, NULL, tmpl, "PuddlesLean\\", puddlesLean);
+			if (pixel->ShaderProg[ShaderRecordType::Default]) {
+				if (!leanFirst) TouchCacheCopy("PuddlesLean\\", pixel->Name);
+				Logger::Log("UNOFFICIAL Puddles: %s's main record did not fit with the full puddles: made with the lean path (PUDDLES_LEAN).", pixel->Name);
+			}
 		}
-		else if (lamps) {
-			static D3DXMACRO terrainLamps[2] = { { "TERRAIN_LAMP_RT", "1" }, { NULL, NULL } };
-			// 2026-11-12: a dry copy newer than the fitted one and than the sources = it did not fit last time (a failed compile is not
-			// cached; each retry cost seconds at every start): straight to the dry one
-			bool skipWet = false;
-			const bool landWet = TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled") && TheSettingManager->GetSettingI("Shaders.Puddles.Status", "Enabled");	// (2026-11-13 fork port: Puddles only)
-			if (landWet) {
-				const std::string cache = std::string(ShadersPath) + "Cache\\";
-				WIN32_FILE_ATTRIBUTE_DATA dry = {}, wet = {};
-				const bool hasDry = GetFileAttributesExA((cache + "ExteriorLampsDry\\" + pixel->Name).c_str(), GetFileExInfoStandard, &dry) != 0;
-				const bool hasWet = GetFileAttributesExA((cache + "ExteriorLamps\\" + pixel->Name).c_str(), GetFileExInfoStandard, &wet) != 0;
-				skipWet = hasDry && (!hasWet || CompareFileTime(&dry.ftLastWriteTime, &wet.ftLastWriteTime) > 0) &&
-					FallbackNewerThanSources(dry.ftLastWriteTime, tmpl.Name, "Includes\\Wetness.hlsl");
+		// UNOFFICIAL 2026-11-16 fast-restart (LateInteriors below): while the start's shaders load, the lamp-shadow records wait for LateInteriors'
+		// attach (their compiles run on the worker threads after everything the start needs); any other time, and with ParallelShaderCompile
+		// off or DeferredRenderer 1, right here as before.
+		if (!LateInteriors::Defer(pixel, tmpl)) LoadLampShadowRecords(pixel, tmpl);
+		// UNOFFICIAL 2026-10-30 RT lamp shadows ExteriorForward on the land: the land shaders with lamps (TerrainTemplate, NUM_PT_LIGHTS) get an
+		// outdoor record with TERRAIN_LAMP_RT (their lamps matched by position to the traced entries). Only with terrain blending off: its
+		// depth takes s15, the one stage the land has left (register audit 2026-10-30).
+		if (pixel->ShaderProg[ShaderRecordType::Default] && tmpl.Name && !strcmp(tmpl.Name, "TerrainTemplate") &&
+			TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.RT", "Enabled") && TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.RT", "ExteriorForward")) {
+			bool lamps = false;
+			for (const D3DXMACRO& d : tmpl.Defines) if (d.Name && !strcmp(d.Name, "NUM_PT_LIGHTS")) lamps = true;
+			if (lamps && TheSettingManager->GetSettingI("Shaders.Terrain.Blending", "Enabled")) {
+				static bool told = false;
+				if (!told) { told = true; Logger::Log("UNOFFICIAL RT lamp shadows: the land gets no outdoor lamp shadows: Terrain Blending is on (it takes s15, the land's last free stage)."); }
 			}
-			ShaderRecordPixel* record = skipWet ? nullptr : (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, NULL, tmpl, "ExteriorLamps\\", terrainLamps);
-			// 2026-11-09 Puddles: the land's lamp record carries the water layer on its own registers (TerrainTemplate WETNESS_ALT_REGS); if that
-			// does not fit, the record is made again without it rather than losing the lamp shadows (as the objects' above).
-			if (!record && landWet) {
-				static D3DXMACRO terrainLampsDry[3] = { { "TERRAIN_LAMP_RT", "1" }, { "WETNESS_OFF", "1" }, { NULL, NULL } };
-				record = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, NULL, tmpl, "ExteriorLampsDry\\", terrainLampsDry);
-				if (record && !skipWet) TouchCacheCopy("ExteriorLampsDry\\", pixel->Name);	// 2026-11-12: the note that the wet one failed
-				if (record) Logger::Log("UNOFFICIAL RT lamp shadows: %s (land)'s outdoor lamp-shadow record did not fit with the water layer: made without it.", pixel->Name);
+			else if (lamps) {
+				static D3DXMACRO terrainLamps[2] = { { "TERRAIN_LAMP_RT", "1" }, { NULL, NULL } };
+				// 2026-11-12: a dry copy newer than the fitted one and than the sources = it did not fit last time (a failed compile is not
+				// cached; each retry cost seconds at every start): straight to the dry one
+				bool skipWet = false;
+				const bool landWet = TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled") && TheSettingManager->GetSettingI("Shaders.Puddles.Status", "Enabled");	// (2026-11-13 fork port: Puddles only)
+				if (landWet) {
+					const std::string cache = std::string(ShadersPath) + "Cache\\";
+					WIN32_FILE_ATTRIBUTE_DATA dry = {}, wet = {};
+					const bool hasDry = GetFileAttributesExA((cache + "ExteriorLampsDry\\" + pixel->Name).c_str(), GetFileExInfoStandard, &dry) != 0;
+					const bool hasWet = GetFileAttributesExA((cache + "ExteriorLamps\\" + pixel->Name).c_str(), GetFileExInfoStandard, &wet) != 0;
+					skipWet = hasDry && (!hasWet || CompareFileTime(&dry.ftLastWriteTime, &wet.ftLastWriteTime) > 0) &&
+						FallbackNewerThanSources(dry.ftLastWriteTime, tmpl.Name, "Includes\\Wetness.hlsl");
+				}
+				ShaderRecordPixel* record = skipWet ? nullptr : (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, NULL, tmpl, "ExteriorLamps\\", terrainLamps);
+				// 2026-11-09 Puddles: the land's lamp record carries the water layer on its own registers (TerrainTemplate WETNESS_ALT_REGS); if that
+				// does not fit, the record is made again without it rather than losing the lamp shadows (as the objects' above).
+				if (!record && landWet) {
+					static D3DXMACRO terrainLampsDry[3] = { { "TERRAIN_LAMP_RT", "1" }, { "WETNESS_OFF", "1" }, { NULL, NULL } };
+					record = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, NULL, tmpl, "ExteriorLampsDry\\", terrainLampsDry);
+					if (record && !skipWet) TouchCacheCopy("ExteriorLampsDry\\", pixel->Name);	// 2026-11-12: the note that the wet one failed
+					if (record) Logger::Log("UNOFFICIAL RT lamp shadows: %s (land)'s outdoor lamp-shadow record did not fit with the water layer: made without it.", pixel->Name);
+				}
+				if (record) {
+					PointShadowForward::ExteriorRecords[pixel] = record;
+					PointShadowForward::TerrainRecords.insert(pixel);
+					Logger::Log("UNOFFICIAL RT lamp shadows: %s (land) has an outdoor lamp-shadow record (ExteriorForward).", pixel->Name);
+				}
+				else Logger::Log("[ERROR] UNOFFICIAL RT lamp shadows: %s (land) with outdoor lamp shadows did not load (ExteriorForward).", pixel->Name);
 			}
-			if (record) {
-				PointShadowForward::ExteriorRecords[pixel] = record;
-				PointShadowForward::TerrainRecords.insert(pixel);
-				Logger::Log("UNOFFICIAL RT lamp shadows: %s (land) has an outdoor lamp-shadow record (ExteriorForward).", pixel->Name);
-			}
-			else Logger::Log("[ERROR] UNOFFICIAL RT lamp shadows: %s (land) with outdoor lamp shadows did not load (ExteriorForward).", pixel->Name);
 		}
 	}
 	{	// UNOFFICIAL 2026-11-14 full deferred renderer phase 0 (mode 2's lighting-free records)
@@ -1686,7 +1760,7 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 		family->PixelShaderList.push_back(pixel);
 		Logger::Log("Loaded %s Pixel Shader %s", family->Name, pixel->Name);
 	}
-	else if (DeferredRenderer::Records.count(pixel)) {	// (2026-11-18 DeferredStandalone: its deferred record only; listed so a reload or a family switch reaches it)
+	else if (DeferredRenderer::Records.count(pixel) || DeferredSkin::Records.count(pixel)) {	// (2026-11-18 DeferredStandalone: its deferred record only; listed so a reload or a family switch reaches it)
 		family->PixelShaderList.push_back(pixel);
 		Logger::Log("Loaded %s Pixel Shader %s (deferred record only: its forward record did not load)", family->Name, pixel->Name);
 	}

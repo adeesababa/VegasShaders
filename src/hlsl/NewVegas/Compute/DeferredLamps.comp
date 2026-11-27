@@ -353,7 +353,7 @@ vec3 EvalLampMaterialSSS(float model, float rough, float metal, vec3 albedo, vec
     return outSss;
 }
 
-vec3 PBRFull(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 radiance, float diffKeep, bool allowSmith, float clearcoat, float pearl) {
+vec3 PBRFull(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 radiance, float diffKeep, bool allowSmith, float clearcoat, float pearl, float specF0Diel) {
     const float rawNdotL = shades(N, L);
     const float NdotL = max(rawNdotL, 0.00001);
     const float NdotV = max(shades(N, V), 0.00001);
@@ -362,10 +362,16 @@ vec3 PBRFull(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 
     const float LdotH = shades(L, halfV);
     const vec3 metalCol = ApplyPearlescence(baseColor, NdotV, pearl, metal);
     const vec3 pearlF90Tint = PearlF90Tint(metalCol, pearl, metal);
-    const vec3 f0Base = ReflectivityF0(mix(vec3(0.04), metalCol, metal));
+    const float dielDiff = min(specF0Diel, 0.04);
+    const vec3 f0Base = ReflectivityF0(mix(vec3(dielDiff), metalCol, metal));
     const vec3 fres = Fresnel(f0Base, max(RoughReflectivityF90(f0Base, r, metal) * pearlF90Tint, f0Base), LdotH);
     const vec3 diff = (1.0 - metal) * (1.0 - fres) * baseColor * diffKeep;
-    vec3 specOut = BRDFPi(r, fres, NdotV, NdotL, NdotH, allowSmith) * MultiScatterMetalBoost(f0Base, r, NdotV, metal);
+    vec3 fresSpec = fres;
+    if (specF0Diel != dielDiff) {
+        const vec3 f0Spec = ReflectivityF0(mix(vec3(specF0Diel), metalCol, metal));
+        fresSpec = Fresnel(f0Spec, max(RoughReflectivityF90(f0Spec, r, metal) * pearlF90Tint, f0Spec), LdotH);
+    }
+    vec3 specOut = BRDFPi(r, fresSpec, NdotV, NdotL, NdotH, allowSmith) * MultiScatterMetalBoost(f0Base, r, NdotV, metal);
     if (clearcoat > 0.001 && metal > 0.05) {
         specOut *= CandyCoatAbsorption(metalCol, NdotV, clearcoat, metal);
     }
@@ -1064,6 +1070,9 @@ void main() {
     const bool isLand = HasFlag(kFlagLandEnabled) && cb.dlLand.x > 0.5 && abs(floor(mat4v.r + 0.01) - 20.0) < 0.5;
     const bool isDiffuseOnly = v2 && !isDeferredSkin && !isLand && floor(mat4v.r + 0.01) < 15.5;
     const float diffKeep = (!isDeferredSkin && !isLand) ? DiffuseEnergyKeep(max(shades(N, V), 0.00001), rough) : 1.0;
+    float dlSunVisDummy, dlSpecF0Decoded;
+    FDSunVisDecode(norm4.a, dlSunVisDummy, dlSpecF0Decoded);
+    const float dlSpecF0 = v2 ? dlSpecF0Decoded : 0.04;
 
     // Precompute skin parameters once per pixel if skin
     float skinMask = 0.0, skinThin = 0.0, skinSoft = 1.0, skinSpecScale = 0.0, skinCurv = 0.0, skinVMatch = 1.0;
@@ -1139,7 +1148,7 @@ void main() {
         } else if (isLand) {
             const vec3 rad = color * EvalLampAtt(att, fp.shaped, fp.expOther);
             vec3 lit;
-            if (cb.dlLand.y > 0.5) lit = max(vec3(0.0), PBRFull(cb.dlLand.z, rough < 0.0 ? 1.0 : rough, albedo4.rgb, N, V, L, rad * cb.dlLand.w, 1.0, false, 0.0, 0.0));
+            if (cb.dlLand.y > 0.5) lit = max(vec3(0.0), PBRFull(cb.dlLand.z, rough < 0.0 ? 1.0 : rough, albedo4.rgb, N, V, L, rad * cb.dlLand.w, 1.0, false, 0.0, 0.0, 0.04));
             else lit = albedo4.rgb * (shades(N, L) * rad);
             light += lit * (sh * geomHorizon);
         } else if (isDiffuseOnly) {
@@ -1149,7 +1158,7 @@ void main() {
         } else {
             const float fAtt = EvalLampAtt(att, fp.shaped, fp.expObj);
             const vec3 rad = color * (linScaleLight * fAtt);
-            light += (PBRFull(metal, rough, gradedAlbedo, N, V, L, rad, diffKeep, true, clamp(cb.spare.x, 0.0, 1.0), clamp(cb.spare.y, 0.0, 1.0)) + EvalLampMaterialSSS(FDModel(mat4v.r), rough, metal, gradedAlbedo, N, V, L, rad)) * (sh * geomHorizon);
+            light += (PBRFull(metal, rough, gradedAlbedo, N, V, L, rad, diffKeep, true, clamp(cb.spare.x, 0.0, 1.0), clamp(cb.spare.y, 0.0, 1.0), dlSpecF0) + EvalLampMaterialSSS(FDModel(mat4v.r), rough, metal, gradedAlbedo, N, V, L, rad)) * (sh * geomHorizon);
         }
     }
 
