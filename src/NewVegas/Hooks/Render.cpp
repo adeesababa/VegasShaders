@@ -6080,15 +6080,33 @@ void __fastcall RenderReflectionsHook(WaterManager* This, UInt32 edx, NiCamera* 
 	if (ReflectionsEffect* reflections = TheShaderManager->Effects.Reflections) {
 		if (reflections->WaterSkipsPlanar()) {
 			static UInt32 lastDrawn = 0, refreshFrame = 0xFFFFFFFFu;
-			static int refresh = 8;
+			static int refresh = 1;
+			static D3DXVECTOR3 lastCamPos(0.0f, 0.0f, 0.0f), lastCamFwd(0.0f, 0.0f, 0.0f);
+			static bool haveCam = false;
 			const UInt32 frame = TheFrameRateManager->FrameNumber;
 			if (refreshFrame != frame) { refreshFrame = frame; refresh = TheSettingManager->GetSettingI("Shaders.Reflections.RT", "WaterPlanarRefresh"); }
-			if (refresh <= 0 || frame - lastDrawn < (UInt32)refresh) {
+			bool moved = false;
+			if (refresh > 1 && TheRenderManager) {
+				const D3DXVECTOR3 camPos(TheRenderManager->CameraPosition.x, TheRenderManager->CameraPosition.y, TheRenderManager->CameraPosition.z);
+				const D3DXVECTOR3 camFwd(TheRenderManager->CameraForward.x, TheRenderManager->CameraForward.y, TheRenderManager->CameraForward.z);
+				if (!haveCam) moved = true;
+				else {
+					const D3DXVECTOR3 d = camPos - lastCamPos;
+					const float dotFwd = camFwd.x * lastCamFwd.x + camFwd.y * lastCamFwd.y + camFwd.z * lastCamFwd.z;
+					moved = (d.x * d.x + d.y * d.y + d.z * d.z > 16.0f) || (dotFwd < 0.999996f);	// > 4 units or > ~0.16 deg turn
+				}
+			}
+			if (refresh <= 0 || (!moved && frame - lastDrawn < (UInt32)refresh)) {
 				static bool logged = false;
 				if (!logged) { logged = true; Logger::Log("UNOFFICIAL Reflections: RT water: the planar water reflection pass is skipped while RT holds the water (drawn every %d frames for the water's other maps).", refresh); }
 				return;
 			}
 			lastDrawn = frame;
+			if (TheRenderManager) {
+				lastCamPos = D3DXVECTOR3(TheRenderManager->CameraPosition.x, TheRenderManager->CameraPosition.y, TheRenderManager->CameraPosition.z);
+				lastCamFwd = D3DXVECTOR3(TheRenderManager->CameraForward.x, TheRenderManager->CameraForward.y, TheRenderManager->CameraForward.z);
+				haveCam = true;
+			}
 		}
 	}
 	if (!TheSettingManager->SettingsMain.Main.ForceReflections) {

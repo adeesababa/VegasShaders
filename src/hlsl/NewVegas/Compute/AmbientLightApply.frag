@@ -97,7 +97,9 @@ vec4 Apply(vec2 uv, bool sky) {
     for (int y = 0; y < 2; y++) {
         for (int x = 0; x < 2; x++) {
             vec2 tapUV = clamp((base + vec2(float(x), float(y)) + 0.5) * cb.alLayout.zw, 0.5 * cb.alLayout.zw, maxHalfUV);
-            float tapDepth = readDepthLod(t_depth, tapUV - 0.5 * max(cb.alLayout.zw - cb.reciprocalResolution.xy, vec2(0.0)));
+            vec2 tapDepthUV = tapUV - 0.5 * max(cb.alLayout.zw - cb.reciprocalResolution.xy, vec2(0.0));
+            if (!viewModel && IsViewModel(t_viewModel, tapDepthUV)) continue;
+            float tapDepth = readDepthLod(t_depth, tapDepthUV);
             float weight = (x != 0 ? fraction.x : 1.0 - fraction.x) * (y != 0 ? fraction.y : 1.0 - fraction.y);
             float closeness = abs(tapDepth - depth) / tolerance;
             weight *= mix(1.0 / (1.0 + closeness), saturate(1.0 - closeness), edgeReject);
@@ -111,7 +113,7 @@ vec4 Apply(vec2 uv, bool sky) {
         }
     }
     vec4 ambient = sum / weights;
-    if (edgeReject > 0.5 && weights < 0.01) ambient = nearestValue;
+    if (edgeReject > 0.5 && weights < 0.01) ambient = nearestCloseness < 1.0e8 ? nearestValue : vec4(0.0, 0.0, 0.0, 1.0);
 
     vec3 lin = linearize(color.rgb);
     float shadedLuma = luma(lin);

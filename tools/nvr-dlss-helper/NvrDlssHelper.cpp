@@ -1222,24 +1222,36 @@ namespace {
 			Log("--inputs exact: off for this start; DLSS reads the render rectangle of the shared images (--inputs subrect)");
 			return false;
 		}
-		for (uint32_t k = 0; k < ExactCount(h); k++) {
+		const uint32_t count = ExactCount(h);
+		VkImageMemoryBarrier pre[8] = {};
+		VkImageMemoryBarrier post[8] = {};
+		for (uint32_t k = 0; k < count; k++) {
 			const SharedImage& s = Shared(h, kExactInputs[k]);
 			const SharedImage& e = h.exact[k];
-			Barrier(cmd, s.image, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
-				VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-			// (UNDEFINED: the copy rewrites the whole image; the stage mask orders it after last frame's reads)
-			Barrier(cmd, e.image, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-				VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+			pre[2 * k] = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, nullptr, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+				VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+				s.image, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+			pre[2 * k + 1] = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, nullptr, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+				VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+				e.image, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+			post[2 * k] = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, nullptr, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT,
+				VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+				e.image, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+			post[2 * k + 1] = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, nullptr, VK_ACCESS_TRANSFER_READ_BIT, 0,
+				VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+				s.image, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+		}
+		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2 * count, pre);
+		for (uint32_t k = 0; k < count; k++) {
+			const SharedImage& s = Shared(h, kExactInputs[k]);
+			const SharedImage& e = h.exact[k];
 			VkImageCopy region = {};
 			region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
 			region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
 			region.extent = { rw, rh, 1 };
 			vkCmdCopyImage(cmd, s.image, VK_IMAGE_LAYOUT_GENERAL, e.image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
-			Barrier(cmd, e.image, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
-				VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
-			Barrier(cmd, s.image, VK_ACCESS_TRANSFER_READ_BIT, 0, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
-				VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
 		}
+		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 2 * count, post);
 		return true;
 	}
 

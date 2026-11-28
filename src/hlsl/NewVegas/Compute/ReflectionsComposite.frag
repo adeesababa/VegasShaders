@@ -242,7 +242,9 @@ void main() {
             weight *= exp(-zDiff / tolerance);
             if (zDiff > tolerance * 4.0) weight *= 1.0e-4;
             if (WeaponAt(tapPixelUV) != pixelWeapon) weight *= 1.0e-4;
-            reflection += textureLod(sampler2D(t_buffer, POINT_S), at, 0.0) * weight;
+            vec4 tap = textureLod(sampler2D(t_buffer, POINT_S), at, 0.0);
+            if (tap.a < 0.0) continue;
+            reflection += tap * weight;
             weights += weight;
         }
     }

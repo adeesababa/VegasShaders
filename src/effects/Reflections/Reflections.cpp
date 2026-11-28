@@ -140,12 +140,35 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.RtRayReuse = TheSettingManager->GetSettingI(rt, "RayReuse") != 0;	// UNOFFICIAL 2026-10-31
 	Settings.RtReuseRoughness = std::clamp(TheSettingManager->GetSettingF(rt, "ReuseRoughness"), 0.0f, 1.0f);
 	Settings.RtShadeOffscreen = TheSettingManager->GetSettingI(rt, "ShadeOffscreen") != 0;	// UNOFFICIAL 2026-11-05
-	Settings.RtWeapon = std::clamp(TheSettingManager->GetSettingF(rt, "Weapon"), 0.0f, 2.0f);	// UNOFFICIAL 2026-10-30
+	const float rawRtWeapon = TheSettingManager->GetSettingF(rt, "Weapon");
+	Settings.RtWeapon = std::clamp(rawRtWeapon, 0.0f, 1.0f);	// UNOFFICIAL 2026-10-30 (clamped <= 1.0 to avoid blown-out 1-spp chrome flashes)
+	if (rawRtWeapon > 1.0f) {
+		static bool warnedWeapon = false;
+		if (!warnedWeapon) {
+			warnedWeapon = true;
+			Logger::Log("[WARNING] Reflections.RT.Weapon=%.2f > 1.0 amplifies 1-spp reflections into chrome flashes; clamped to 1.0.", rawRtWeapon);
+		}
+	}
 	Settings.RtWater = TheSettingManager->GetSettingI(rt, "Water") != 0;	// UNOFFICIAL 2026-10-31
 	Settings.RtSkyPanorama = TheSettingManager->GetSettingI(rt, "SkyPanorama") != 0;	// UNOFFICIAL 2026-10-31
 	Settings.RtWaterSkipPlanar = TheSettingManager->GetSettingI(rt, "WaterSkipPlanar") != 0;
 	Settings.RtWaterRoughness = std::clamp(TheSettingManager->GetSettingF(rt, "WaterRoughness"), 0.0f, 0.5f);
-	Settings.RtWeaponRoughness = std::clamp(TheSettingManager->GetSettingF(rt, "WeaponRoughness"), 0.02f, 1.0f);
+	const float rawWeaponRoughness = std::clamp(TheSettingManager->GetSettingF(rt, "WeaponRoughness"), 0.02f, 1.0f);
+	Settings.RtWeaponRoughness = (std::min)(rawWeaponRoughness, Settings.RtMaxRoughness);
+	if (rawWeaponRoughness > Settings.RtMaxRoughness) {
+		static bool warnedRough = false;
+		if (!warnedRough) {
+			warnedRough = true;
+			Logger::Log("[WARNING] Reflections.RT.WeaponRoughness=%.2f > MaxRoughness=%.2f; clamped to %.2f.", rawWeaponRoughness, Settings.RtMaxRoughness, Settings.RtWeaponRoughness);
+		}
+	}
+	if (Settings.RtEnabled && Settings.RtWeapon > 0.0f && !Settings.ReplaceForward) {
+		static bool warnedReplace = false;
+		if (!warnedReplace) {
+			warnedReplace = true;
+			Logger::Log("[WARNING] Reflections.Main.ReplaceForward=false with RT Weapon reflections on double-stacks vanilla forward env-maps over RT weapon reflections and can flicker.");
+		}
+	}
 	Settings.RtWeaponMetal = std::clamp(TheSettingManager->GetSettingF(rt, "WeaponMetal"), 0.0f, 1.0f);
 	// UNOFFICIAL 2026-11-09 WeaponHands (a key missing from an older settings file reads 0: the weapon's own pixels only)
 	Settings.RtWeaponHands = TheSettingManager->GetSettingI(rt, "WeaponHands") != 0;
@@ -380,9 +403,9 @@ static void LogReflShaderFiles() {
 	// (2026-11-24) written by tools\nvr-dxvk\refl-hashes.py, which compile-compute.sh runs after every build: by hand it went stale (1.1.3 and
 	// 1.1.4 shipped 10 of these 11 old, so every log called the build's own files OLD and Install check showed 1 to fix). Edit the names only.
 	static const Want wants[] = {
-		{ "ReflectionsComposite", 0xD2CD1B1Fu }, { "ReflectionsRTResolve", 0x75BDE07Au }, { "ReflectionsRayGen", 0xE74CC8A9u }, { "ReflectionsTemporal", 0xD8130F68u },
+		{ "ReflectionsComposite", 0x60EADC97u }, { "ReflectionsRTResolve", 0x161D0CEFu }, { "ReflectionsRayGen", 0x1158B7FDu }, { "ReflectionsTemporal", 0xEA763966u },
 		{ "ReflectionsCapture", 0x1548A0C3u }, { "ReflectionsFilter", 0x891F85DAu },
-		{ "RtReflDenoiseOursReproject", 0x7955BB76u }, { "Rt\\ReflectionsRT", 0x5DB278C7u },
+		{ "RtReflDenoiseOursReproject", 0x68822988u }, { "Rt\\ReflectionsRT", 0x5DB278C7u },
 		{ "Rt\\ReflectionsRTAlpha", 0xDE40151Fu }, { "Rt\\ReflectionsRTTex", 0x5B941841u }, { "Rt\\ReflectionsRTTexGlow", 0xCADF2215u },
 		{ "Rt\\ReflectionsRTAlphaTex", 0xC3195738u }, { "Rt\\ReflectionsRTAlphaTexGlow", 0x77E8EF1Bu },
 	};
@@ -893,16 +916,17 @@ bool ReflectionsEffect::ShouldRender() {
 	// dry ground with GroundSheen 0 (nothing else on screen reflects) it was skipped with it. RT Weapon above 0 keeps the pass on while
 	// the weapon rays can run (2026-11-19: supported in RenderRect sub-rect frames too).
 	const bool weapon = WeaponReflectionsActive();
+	const bool water = Settings.RtWater && RtWanted();
 	nothingReflects = !surfaces;
 	if (!surfaces && Settings.RtEnabled) {
 		static bool told = false;
 		if (!told) {
 			told = true;
 			Logger::Log("UNOFFICIAL Reflections: RT reflections are on but nothing on screen reflects here (GroundSheen / InteriorFloors 0, "
-				"dry, no material reflections)%s", weapon ? "; the pass runs for weapon reflections" : ": the pass is skipped");
+				"dry, no material reflections)%s", (weapon || water) ? "; the pass runs for weapon/water reflections" : ": the pass is skipped");
 		}
 	}
-	return !TheShaderManager->GameState.isUnderwater && normals && normals->Enabled && (surfaces || weapon) &&
+	return !TheShaderManager->GameState.isUnderwater && normals && normals->Enabled && (surfaces || weapon || water) &&
 		Textures.TraceSurface && Textures.BufferSurface && Textures.TempSurface && Textures.HistorySurface;
 }
 

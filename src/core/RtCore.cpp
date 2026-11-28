@@ -4407,8 +4407,13 @@ void RtCore::Frame(IDirect3DDevice9* Device) {
 		if (cellChanged || scaleChanged) c.overlapLast.clear();
 		if (c.overlapCamKnown && !TheShaderManager->GameState.isCameraCut && !cellChanged && !scaleChanged) {
 			const D3DXMATRIX& o = c.overlapCamView;
-			const float maxDeg = c.overlapMode == 3 ? Core::kMotionDegrees : Core::kStillDegrees;
-			const float maxUnits = c.overlapMode == 3 ? Core::kMotionUnits : Core::kStillUnits;
+			bool reflRiding = false;
+			if (c.overlapMode == 3) {
+				for (const User& user : c.users)
+					if (user.Point == 0 && user.Name && strstr(user.Name, "reflections") && !c.Out(user) && user.Wants && user.Wants()) { reflRiding = true; break; }
+			}
+			const float maxDeg = (c.overlapMode == 3 && !reflRiding) ? Core::kMotionDegrees : Core::kStillDegrees;
+			const float maxUnits = (c.overlapMode == 3 && !reflRiding) ? Core::kMotionUnits : Core::kStillUnits;
 			const float cosLimit = cosf(D3DXToRadian(maxDeg));
 			float minDot = 1.0f;
 			for (int k = 0; k < 3; k++)

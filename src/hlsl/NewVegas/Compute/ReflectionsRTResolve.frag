@@ -256,7 +256,9 @@ void main() {
     // reaches the far shore and the LOD land; before, the far cliffs of og-lake came out as the sky panorama (they are past Distance).
     // (2026-11-05 rtfull-lake2: not with WaterSkipPlanar: the planar map is not drawn then and the water shader paints the horizon
     // colour there, so every missed ray (the sky, the far cliffs) turned the whole lake one flat pale colour: a miss takes the sky)
-    bool waterMiss = WaterRtOn && !WaterPlanarSkipped && rtOpen && abs(cb.cameraPosition.z + surfaceW.z - cb.waterSettings.x) < max(2.0, ray.x * 0.002);
+    bool isWaterPx = WaterRtOn && !weaponRay && ViewToWorldDir(ViewNormal(pixelUV)).z > 0.75 &&
+        abs(cb.cameraPosition.z + surfaceW.z - cb.waterSettings.x) < max(2.0, ray.x * 0.002);
+    bool waterMiss = isWaterPx && !WaterPlanarSkipped && rtOpen;
     vec4 grid = vec4(0.0), env = vec4(0.0);
     // UNOFFICIAL 2026-10-31 SkyPanorama: a ray that met nothing on its way out is the sky (or something past Distance in the haze):
     // the panorama as seen, all of the missing share, no horizon fade; not the cube (seen from the camera, it holds whatever lay
@@ -336,7 +338,8 @@ void main() {
     // Fireflies: a lower cap on rough surfaces; everything after this pass averages in the compressed space (Tame).
     float brightest = max(colour.r, max(colour.g, colour.b));
     colour *= min(1.0, mix(BrightestReflection, 3.0, saturate(roughness * 2.0)) / max(brightest, 1.0e-4));
-    o_color = vec4(Tame(colour) * confidence, confidence);
+    float outAlpha = isWaterPx ? -(1.0 + confidence) : confidence;
+    o_color = vec4(Tame(colour) * confidence, outAlpha);
     // UNOFFICIAL 2026-10-30: never hand a non-finite value on (the temporal history would keep it: the weapon's history is screen-locked).
     if (any(isnan(o_color)) || any(isinf(o_color))) o_color = vec4(0.0);
 }

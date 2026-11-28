@@ -23,9 +23,13 @@ void main() {
     float roughness;
     float amount = Reflectivity(pixelUV, depth, N, roughness);
     if (amount <= 0.0) { o_color = vec4(0.0); o_dir = vec4(0.0); o_ray = vec4(0.0); return; }
+    if (SurfaceWater) {
+        N = normalize(WorldToViewDir(vec3(0.0, 0.0, 1.0)));
+        roughness = RtMirrorJitterRoughness;
+    }
     // UNOFFICIAL 2026-11-08 (perf-reflfix4) MirrorJitter: a mirror pixel's ray leaves from this frame's point of the texel (RtMirrorJitter.glsl;
     // the helper and Resolve move the same point), where that point is the same reflecting surface (else the centre, as before)
-    if (RtOn && rtc.rt5.w > 0.5 && !ViewModelAt(pixelUV)) {   // (2026-11-09: ViewModelAt, any first-person pixel: its depth is not the world's)
+    if (RtOn && rtc.rt5.w > 0.5 && !ViewModelAt(pixelUV) && !SurfaceWater) {   // (2026-11-09: ViewModelAt, any first-person pixel: its depth is not the world's)
         const vec2 j = RtMirrorJitter(rtc.rt5.w, roughness);
         if (j != vec2(0.0)) {
             const vec2 at = pixelUV + j * LowTexel;
@@ -80,11 +84,11 @@ void main() {
     }
     // (2026-11-06) a mirror (roughness under 0.03) traces the exact mirror ray, the same every frame (no spread, a fixed march offset
     // below): no noise to average, so ReflectionsTemporal keeps no history there (the history smeared what mirrors show)
-    const bool mirrorPixel = roughness < 0.03;
+    const bool mirrorPixel = roughness <= 0.0305;
     if (mirrorPixel) H = N;
     vec3 R = reflect(V, H);
     if (dot(R, N) <= 0.0) R = reflect(V, N);   // spread below the surface: the plain mirror direction
-    if (!weapon) R = AboveSurface(pixelUV, position, R);   // (2026-11-05/21) never under world surfaces; skip on weapons (depth finite differences scatter across curved folds)
+    if (!weapon && !SurfaceWater) R = AboveSurface(pixelUV, position, R);   // (2026-11-05/21) never under world surfaces; skip on weapons/flat water
 
     // March: steps that grow along the ray (fine near the surface, coarse far off), the first one shifted by the noise.
     float jitter = mirrorPixel ? 0.5 : GradientNoise(vpos + vec2(11.0, 71.0));

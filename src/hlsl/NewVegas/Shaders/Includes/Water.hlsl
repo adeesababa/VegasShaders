@@ -111,18 +111,69 @@ float4 refractionLookup(float4 pos, float4 renderScale, float4 reciprocalResolut
 // the planar map, or the horizon colour while the planar pass is skipped (TESR_RTWaterData.y).
 float4 getRTWaterReflection(PS_INPUT IN, float3 surfaceNormal, float refractionCoeff, float4 planar, float4 horizon) {
     [branch] if (TESR_RTWaterData.x < 0.5) return planar;
-    float3 p = IN.LTEXCOORD_0.xyz;   // camera-relative world (the vertex shader's WorldMat)
+    float edge = TESR_RTWaterData.w > 0.0 ? TESR_RTWaterData.w : 1.0;
+    float uvLo = 0.002;
+    float uvHi = max(edge - 0.002, uvLo);
+
+    float3 pBase = IN.LTEXCOORD_0.xyz;   // camera-relative world (the vertex shader's WorldMat)
+    float4 clipBase = mul(float4(pBase, 1.0), TESR_RTWaterReproject);
+    float2 uvBase = clipBase.xy / max(clipBase.w, 1.0e-4) * float2(0.5, -0.5) + 0.5;
+    float3 p = pBase;
     p.xy += refractionCoeff * surfaceNormal.xy;
     float4 clip = mul(float4(p, 1.0), TESR_RTWaterReproject);
     float2 uv = clip.xy / max(clip.w, 1.0e-4) * float2(0.5, -0.5) + 0.5;
-    // UNOFFICIAL 2026-11-03 RenderScale < 1: a rect frame traced the water into Buffer's top-left part; TESR_RTWaterReproject comes
-    // pre-scaled into it (Reflections.cpp UpdateWaterConstants) and .w is that frame's scale (1 native; 0 from an older DLL: 1).
-    float edge = TESR_RTWaterData.w > 0.0 ? TESR_RTWaterData.w : 1.0;
-    float inside = (clip.w > 0.0 && uv.x > 0.0 && uv.y > 0.0 && uv.x < edge && uv.y < edge) ? 1.0 : 0.0;
-    float4 s = tex2Dlod(TESR_ReflectionsBuffer, float4(uv, 0.0, 0.0));
-    float share = saturate(s.a) * inside * TESR_RTWaterData.z;
-    float3 t = s.rgb / max(s.a, 1.0e-4);
-    float3 traced = t / max(1.0 - dot(t, float3(0.2126, 0.7152, 0.0722)), 1.0e-3);   // Untame (Compute/Reflections.glsl)
+
+    float fadeW = max(0.035 * edge, 1.0e-4);
+    float edgeFade = (clip.w > 0.0 ? 1.0 : 0.0)
+        * smoothstep(0.0, fadeW, uv.x) * smoothstep(0.0, fadeW, edge - uv.x)
+        * smoothstep(0.0, fadeW, uv.y) * smoothstep(0.0, fadeW, edge - uv.y);
+
+    const float validWaterMax = -0.95;
+    float2 uvC = clamp(uv, uvLo, uvHi);
+    float2 uvBaseC = clamp(uvBase, uvLo, uvHi);
+    float2 chosenUV = uvC;
+    float4 s = tex2Dlod(TESR_ReflectionsBuffer, float4(chosenUV, 0.0, 0.0));
+    [branch] if (s.a > validWaterMax) {
+        float2 uvMid = lerp(uvC, uvBaseC, 0.5);
+        float4 sMid = tex2Dlod(TESR_ReflectionsBuffer, float4(uvMid, 0.0, 0.0));
+        if (sMid.a <= validWaterMax) { chosenUV = uvMid; s = sMid; }
+        else {
+            float4 sBase = tex2Dlod(TESR_ReflectionsBuffer, float4(uvBaseC, 0.0, 0.0));
+            if (sBase.a <= validWaterMax) { chosenUV = uvBaseC; s = sBase; }
+        }
+    }
+
+    // 4-neighbor bilinear fringe guard + nearest symmetric ring valid-water occluder fill
+    const float2 fringeStep = float2(0.0025, 0.0025);
+    bool needFill = (s.a > validWaterMax)
+        || (tex2Dlod(TESR_ReflectionsBuffer, float4(clamp(chosenUV + float2( fringeStep.x, 0.0), uvLo, uvHi), 0.0, 0.0)).a > validWaterMax)
+        || (tex2Dlod(TESR_ReflectionsBuffer, float4(clamp(chosenUV + float2(-fringeStep.x, 0.0), uvLo, uvHi), 0.0, 0.0)).a > validWaterMax)
+        || (tex2Dlod(TESR_ReflectionsBuffer, float4(clamp(chosenUV + float2(0.0,  fringeStep.y), uvLo, uvHi), 0.0, 0.0)).a > validWaterMax)
+        || (tex2Dlod(TESR_ReflectionsBuffer, float4(clamp(chosenUV + float2(0.0, -fringeStep.y), uvLo, uvHi), 0.0, 0.0)).a > validWaterMax);
+    [branch] if (needFill) {
+        static const float kRings[4] = { 0.006, 0.016, 0.034, 0.062 };
+        static const float2 kDirs[8] = {
+            float2(1.0, 0.0), float2(-1.0, 0.0), float2(0.0, 1.0), float2(0.0, -1.0),
+            float2(0.7071, 0.7071), float2(-0.7071, 0.7071), float2(0.7071, -0.7071), float2(-0.7071, -0.7071)
+        };
+        [loop] for (int ri = 0; ri < 4; ri++) {
+            float r = kRings[ri];
+            float4 rSum = 0.0;
+            float rCount = 0.0;
+            [unroll] for (int di = 0; di < 8; di++) {
+                float2 q = clamp(chosenUV + kDirs[di] * r, uvLo, uvHi);
+                float4 tap = tex2Dlod(TESR_ReflectionsBuffer, float4(q, 0.0, 0.0));
+                if (tap.a <= validWaterMax) { rSum += tap; rCount += 1.0; }
+            }
+            if (rCount > 0.5) { s = rSum / rCount; break; }
+        }
+    }
+
+    float conf = (s.a <= validWaterMax) ? saturate(-s.a - 1.0) : 0.0;
+    float share = conf * edgeFade * TESR_RTWaterData.z;
+    float3 t = conf > 1.0e-4 ? max(s.rgb / conf, 0.0) : 0.0;
+    float tLuma = min(dot(t, float3(0.2126, 0.7152, 0.0722)), 0.94);
+    float3 traced = t / max(1.0 - tLuma, 0.06);   // firefly-clamped Untame
     float3 otherwise = TESR_RTWaterData.y > 0.5 ? horizon.rgb : planar.rgb;
     return float4(lerp(otherwise, traced, share), planar.a);
 }

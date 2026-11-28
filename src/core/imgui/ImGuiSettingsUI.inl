@@ -195,7 +195,6 @@ static const RestartSetting kRestartSettings[] = {
 	{ "Shaders.ShadowsExteriors.SunSmoothing","CrossFade",          RestartRule::Changed },
 	{ "Shaders.ShadowsExteriors.SunSmoothing","DeferredFade",       RestartRule::TurnOn },	// UNOFFICIAL 2026-11-15 fd-smoothsun (compiled into the deferred sun pass at startup)
 	{ "Shaders.ContactHardening.Status",      "Enabled",            RestartRule::TurnOn },
-	{ "Shaders.ShadowsInteriors.Forward",     "Enabled",            RestartRule::TurnOn },	// hooks + shader overrides at start
 	{ "Shaders.ShadowsInteriors.Forward",     "SmoothEdges",        RestartRule::Changed },
 	{ "Shaders.ShadowsInteriors.Forward",     "EvenTaps",           RestartRule::Changed },	// POINT_SHADOW_EVEN (deep/lampedge)
 	{ "Shaders.ShadowsInteriors.Forward",     "MagnifiedSoftness",  RestartRule::TurnOn },	// POINT_SHADOW_MAG when above 0 at start; 0 is live
@@ -221,7 +220,6 @@ static const RestartSetting kRestartSettings[] = {
 	{ "Shaders.Reflections.Main",             "CubeResolution",     RestartRule::Changed },	// live cube textures made at start (Reflections.cpp)
 	{ "Shaders.Reflections.Main",             "ReflectAdd",         RestartRule::TurnOn },	// REFL_ADD_ON (Reflections.fx.hlsl)
 	{ "Shaders.Reflections.Main",             "SpecularOcclusion",  RestartRule::TurnOn },	// REFL_SPECOCC_ON (Reflections.fx.hlsl)
-	{ "Shaders.PBR.Linear",                   "Enabled",            RestartRule::TurnOn },	// off at runtime = Gamma 1
 	{ "Shaders.PBR.Linear",                   "PreDecode",          RestartRule::Changed },
 	{ "Shaders.Sky.Physical",                 "Enabled",            RestartRule::TurnOn },
 	{ "Shaders.Terrain.Blending",             "Enabled",            RestartRule::TurnOn },
@@ -427,9 +425,7 @@ static const char* InactiveReason(const char* section, const char* key) {
 		return "Only used with ForwardShadows on (Shadows Exteriors > Main).";
 
 	// Lamp shadows indoors (PointShadowForward, ShadowsExteriorEffect::UpdateSettings, ShaderManager's darkening pass).
-	if (sec == "Shaders.ShadowsInteriors.Forward" && !is({ "Enabled", "ScopeFix" })) {
-		if (NumericSetting(section, "Enabled") == 0.0f)
-			return "Only used with Forward Enabled on (the first switch in this section); with it off the old screen-space lamp shadows are used.";
+	if (sec == "Shaders.ShadowsInteriors.Forward" && !is({ "ScopeFix" })) {
 		if (is({ "Quality", "ContactHardening", "ContactHardeningStrength", "ContactHardeningMinSoftness", "LampSize", "MaxSoftness", "InvisibleLightSize" }) && NumericSetting(section, "Softness") <= 0.0f)
 			return "Only used when Softness is above 0: sharp lamp shadows (Softness 0) take a single lookup.";
 		if (is({ "ContactHardeningStrength", "ContactHardeningMinSoftness" }) && NumericSetting(section, "ContactHardening") == 0.0f)
@@ -536,7 +532,7 @@ static const char* InactiveReason(const char* section, const char* key) {
 	if (sec == "Shaders.ShadowsExteriors.Main" && is({ "Darkness" }) && NumericSetting(section, "ForwardShadows") != 0.0f)
 		return "Not used while ForwardShadows is on: shadows block the sun's light directly instead of darkening the screen.";
 	if (sec == "Shaders.ShadowsInteriors.Main" && is({ "Darkness" }) &&
-		NumericSetting("Shaders.ShadowsInteriors.Forward", "Enabled") != 0.0f && NumericSetting("Shaders.ShadowsInteriors.Forward", "KeepDarkening") == 0.0f)
+		NumericSetting("Shaders.ShadowsInteriors.Forward", "KeepDarkening") == 0.0f)
 		return "Not used while Forward lamp shadows are on with KeepDarkening off: lamps shadow their own light directly.";
 	if (sec == "Shaders.ShadowsInteriors.Forward" && is({ "ShadowContrast" }))
 		return "Not used while the deferred renderer is active (deferred lighting computes physical lamp shadows directly).";
@@ -1375,7 +1371,6 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.PBR.MicroShadow", "Enabled", "Deeper cracks and crevices", nullptr, "Bumps in surfaces shadow themselves, so cracks look deep instead of painted on. Needs material maps." },
 	{ "Shaders.PBR.MicroShadow", "Strength", "Strength", nullptr, "How deep cracks and crevices look." },
 	// PBR (Linear)
-	{ "Shaders.PBR.Linear", "Enabled", "Realistic light blending (linear lighting)", nullptr, "Blends light the way real light adds up: smoother falloff into shade and better lamp mixing." },
 	{ "Shaders.PBR.Linear", "Gamma", "Light blending curve (gamma)", nullptr, "How light is blended. Leave at the standard value unless things look too dark or flat." },
 	// PBR (LampFalloff)
 	{ "Shaders.PBR.LampFalloff", "Exterior", "Realistic lamp falloff outdoors", nullptr, "Outdoor lamps and fires fade smoothly with distance instead of lighting an even disc." },
@@ -1465,7 +1460,6 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.ShadowsInteriors.Main", "DrawDistance", "Lamp shadow distance", nullptr, "How far from you lamps still cast shadows." },
 	{ "Shaders.ShadowsInteriors.Main", "ContactShadows", "Lamp contact shadows (where props meet floors)", nullptr, "Adds small dark lines where props meet the floor or tables meet a wall. Off at zero." },
 	// Lamp shadows (Per-object shadows)
-	{ "Shaders.ShadowsInteriors.Forward", "Enabled", "Lamp shadows on each object", nullptr, "Each lamp shadows only its own light, so rooms keep their colours. Off gives the older flat darkening." },
 	{ "Shaders.ShadowsInteriors.Forward", "Strength", "Lamp shadow strength", nullptr, "How dark a lamp shadow is. At full strength it blocks all of that lamp's light." },
 	{ "Shaders.ShadowsInteriors.Forward", "Softness", "Lamp shadow softness", nullptr, "Zero gives hard edges and costs least. Higher gives softer edges and costs frame rate in busy rooms." },
 	{ "Shaders.ShadowsInteriors.Forward", nullptr, "Lamp shadow edge quality",

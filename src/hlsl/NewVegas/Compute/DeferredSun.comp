@@ -785,31 +785,76 @@ float GetSunShadowMaps(vec3 P, vec3 Nw, bool skinPx) {
     sh = mix(sh, 1.0, saturate(cb.shadowFade.x));
     return sh;
 }
+void RtSunForwardLookup(vec3 P, out float tracedVis, out float weight, out bool rawSeen) {
+    tracedVis = 1.0;
+    weight = 0.0;
+    rawSeen = false;
+    vec4 Q = vec4(P, 1.0);
+    float w = dot(Q, cb.rtSunRowW);
+    if (w <= 1.0) return;
+    vec2 uv = vec2(dot(Q, cb.rtSunRowX), dot(Q, cb.rtSunRowY)) / w;
+    vec2 rectMax = max(cb.rtSunData.zw, vec2(1.0e-3));
+    bool inBounds = uv.x >= 0.0 && uv.y >= 0.0 && uv.x <= rectMax.x && uv.y <= rectMax.y;
+    float tol = abs(cb.rtSunData.y) * w + 1.0;
+    vec2 texel = textureLod(sampler2D(t_rtSunForward, NVR_SAMPLER(pc.pointSampler)), uv, 0.0).rg;
+    rawSeen = inBounds && abs(texel.g - w) <= tol;
+    float rangeFade = saturate((cb.rtSunData.x - w) / (0.15 * cb.rtSunData.x));
+    if (cb.rtSunData.y < 0.0 || rangeFade <= 0.0) {
+        tracedVis = saturate(texel.r);
+        weight = rawSeen ? rangeFade : 0.0;
+        return;
+    }
+    if (rawSeen) {
+        tracedVis = saturate(texel.r);
+        weight = rangeFade;
+        return;
+    }
+    vec2 uvLo = vec2(0.001);
+    vec2 uvHi = max(rectMax - vec2(0.001), uvLo);
+    if (inBounds && texel.g > 0.0 && texel.g < w - tol) {
+        // Behind-weapon / behind-actor disocclusion: recover from nearest background neighbor inside t_rtSunForward
+        const vec2 kProbe[8] = vec2[8](
+            vec2( 0.008, 0.0), vec2(-0.008, 0.0), vec2(0.0,  0.008), vec2(0.0, -0.008),
+            vec2( 0.022, 0.0), vec2(-0.022, 0.0), vec2(0.0,  0.022), vec2(0.0, -0.022)
+        );
+        float visSum = 0.0, visCount = 0.0;
+        for (int i = 0; i < 8; i++) {
+            vec2 n = textureLod(sampler2D(t_rtSunForward, NVR_SAMPLER(pc.pointSampler)), clamp(uv + kProbe[i], uvLo, uvHi), 0.0).rg;
+            if (n.g > 1.0 && abs(n.g - w) <= tol) { visSum += saturate(n.r); visCount += 1.0; }
+        }
+        if (visCount > 0.5) {
+            tracedVis = visSum / visCount;
+            weight = rangeFade;
+        }
+    } else if (!inBounds) {
+        // Leading screen-edge fast-pan feather: extend border visibility up to 8% UV if depth matches
+        vec2 uvC = clamp(uv, uvLo, uvHi);
+        float edgeDist = length(uv - uvC);
+        if (edgeDist < 0.08) {
+            vec2 e = textureLod(sampler2D(t_rtSunForward, NVR_SAMPLER(pc.pointSampler)), uvC, 0.0).rg;
+            if (e.g > 1.0 && abs(e.g - w) <= 0.12 * w + 16.0) {
+                tracedVis = saturate(e.r);
+                weight = rangeFade * (1.0 - smoothstep(0.0, 0.08, edgeDist));
+            }
+        }
+    }
+}
+
 float GetSunShadow(vec3 P, vec3 Nw, bool skinPx) {
     if (HasFlag(kFlagRtSunLookup) && HasFlag(kFlagRtSunFirst)) {
         if (cb.rtSunData.x > 0.0 && cb.shadowForwardData.x == 0.0 && cb.rtSunData.y >= 0.0) {
-            vec4 Q = vec4(P, 1.0);
-            float w = dot(Q, cb.rtSunRowW);
-            vec2 uv = vec2(dot(Q, cb.rtSunRowX), dot(Q, cb.rtSunRowY)) / max(w, 1.0);
-            vec2 texel = textureLod(sampler2D(t_rtSunForward, NVR_SAMPLER(pc.pointSampler)), uv, 0.0).rg;
-            bool seen = w > 1.0 && uv.x >= 0.0 && uv.y >= 0.0 && uv.x <= cb.rtSunData.z && uv.y <= cb.rtSunData.w &&
-                        abs(texel.g - w) <= abs(cb.rtSunData.y) * w + 1.0;
-            float weight = seen ? saturate((cb.rtSunData.x - w) / (0.15 * cb.rtSunData.x)) : 0.0;
-            if (weight >= 1.0) return mix(saturate(texel.r), 1.0, saturate(cb.shadowFade.x));
+            float tracedVis, weight; bool rawSeen;
+            RtSunForwardLookup(P, tracedVis, weight, rawSeen);
+            if (weight >= 1.0) return mix(tracedVis, 1.0, saturate(cb.shadowFade.x));
         }
     }
     float sh = GetSunShadowMaps(P, Nw, skinPx);
     if (HasFlag(kFlagRtSunLookup) && cb.rtSunData.x > 0.0 && cb.shadowForwardData.x == 0.0) {
-        vec4 Q = vec4(P, 1.0);
-        float w = dot(Q, cb.rtSunRowW);
-        vec2 uv = vec2(dot(Q, cb.rtSunRowX), dot(Q, cb.rtSunRowY)) / max(w, 1.0);
-        vec2 texel = textureLod(sampler2D(t_rtSunForward, NVR_SAMPLER(pc.pointSampler)), uv, 0.0).rg;
-        bool seen = w > 1.0 && uv.x >= 0.0 && uv.y >= 0.0 && uv.x <= cb.rtSunData.z && uv.y <= cb.rtSunData.w &&
-                    abs(texel.g - w) <= abs(cb.rtSunData.y) * w + 1.0;
-        float weight = seen ? saturate((cb.rtSunData.x - w) / (0.15 * cb.rtSunData.x)) : 0.0;
-        float traced = mix(saturate(texel.r), 1.0, saturate(cb.shadowFade.x));
+        float tracedVis, weight; bool rawSeen;
+        RtSunForwardLookup(P, tracedVis, weight, rawSeen);
+        float traced = mix(tracedVis, 1.0, saturate(cb.shadowFade.x));
         sh = mix(sh, traced, weight);
-        if (cb.rtSunData.y < 0.0) sh = weight;
+        if (cb.rtSunData.y < 0.0) sh = rawSeen ? saturate((cb.rtSunData.x - dot(vec4(P, 1.0), cb.rtSunRowW)) / (0.15 * cb.rtSunData.x)) : 0.0;
     }
     return sh;
 }

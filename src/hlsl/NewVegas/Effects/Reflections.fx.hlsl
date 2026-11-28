@@ -843,7 +843,9 @@ float4 CompositePS(VSOUT IN) : COLOR0 {
 			float weight = (x ? fraction.x : 1 - fraction.x) * (y ? fraction.y : 1 - fraction.y);
 			weight /= 1.0 + abs(tapDepth - depth) / tolerance;
 			if (IsWeapon(tapPixelUV) != pixelWeapon) weight *= 1.0e-4;
-			reflection += tex2Dlod(TESR_ReflectionsBuffer, float4(at, 0, 0)) * weight;
+			float4 tap = tex2Dlod(TESR_ReflectionsBuffer, float4(at, 0, 0));
+			if (tap.a < 0.0) continue;
+			reflection += tap * weight;
 			weights += weight;
 		}
 	}

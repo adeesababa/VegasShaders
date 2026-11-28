@@ -68,12 +68,19 @@ void TAAEffect::UpdateSettings() {
 	{ SettingManager::Configuration::ConfigNode node; Settings.BackboneReset = !TheSettingManager->Config.FillNode(&node, "Shaders.TAA.Main", "BackboneReset") || node.BoolValue; }
 	// UNOFFICIAL 2026-11-21: 1st-person viewmodel sub-pixel jitter + per-pixel motion vectors (default on; missing key reads as on).
 	{ SettingManager::Configuration::ConfigNode node; Settings.WeaponAA = !TheSettingManager->Config.FillNode(&node, "Shaders.TAA.Main", "WeaponAA") || node.BoolValue; }
+	const bool dlss = TheSettingManager->GetSettingI("Shaders.TAA.DLSS", "Enabled") != 0;
+	if (dlss && !Settings.WeaponAA) {
+		static bool warnedWeaponAa = false;
+		if (!warnedWeaponAa) {
+			warnedWeaponAa = true;
+			Logger::Log("[WARNING] TAA.Main.WeaponAA=false with DLSS enabled disables 1st-person weapon motion vectors/AA and can cause metallic weapon flicker.");
+		}
+	}
 
 	// UNOFFICIAL 2026-10-26 (NVR DXVK): FSR 2 as the resolve. All three read as 0 (off) when missing.
 	// UNOFFICIAL 2026-10-27 (user: "give dlss its own tab like fsr does ... toggling one disables the other"): [Shaders.TAA.DLSS]
 	// Enabled runs the same upscaler stage with DLSS; FSR and DLSS are either/or (the menu switches the other off; a file with both
 	// on gets DLSS).
-	const bool dlss = TheSettingManager->GetSettingI("Shaders.TAA.DLSS", "Enabled") != 0;
 	FSRSettings.Enabled = dlss || TheSettingManager->GetSettingI("Shaders.TAA.FSR", "Enabled") != 0;
 	FSRSettings.Sharpness = std::clamp(TheSettingManager->GetSettingF("Shaders.TAA.FSR", "Sharpness"), 0.0f, 1.0f);
 	FSRSettings.WeaponReactive = std::clamp(TheSettingManager->GetSettingF("Shaders.TAA.FSR", "WeaponReactive"), 0.0f, 1.0f);

@@ -67,14 +67,7 @@ vec4 Estimate(vec2 uv) {
     vec4 center = pointLod(t_prep, uv);
     vec3 origin = PositionFromViewZ(uv, center.x);
     float fade = smoothstep(NearFade, NearFade * 2.0, origin.z) * (1.0 - smoothstep(DrawDistance * 0.7, DrawDistance, origin.z));
-#ifndef NVR_GI
-    if (fade <= 0.0) {
-        vec3 vmBounce = (origin.z >= 9.0e5 && (pc.variant & 0x100u) != 0u) ? pointLod(t_rtgi, uv).rgb : vec3(0.0);
-        return vec4(vmBounce, 1.0);
-    }
-#else
     if (fade <= 0.0) return vec4(0.0, 0.0, 0.0, 1.0);
-#endif
 
     vec3 normal = OctDecode(Unpack2(center.y));
     vec3 viewVec = normalize(-origin);

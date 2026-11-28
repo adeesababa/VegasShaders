@@ -658,4 +658,42 @@ namespace DxvkLoader {
 		Logger::Log("DxvkLoader: DXVK shader compiler threads capped to %d to prevent 32-bit startup saturation (DXVK_CONFIG \"%s\"; [Main.Main.Misc] DxvkCompilerThreads)",
 			threads, value.c_str());
 	}
+
+	// UNOFFICIAL 2026-11-27 DxvkPresentInterval ([Main.Main.Misc], default -1 = leave to game/dxvk.conf): sets d3d9.presentInterval
+	// via DXVK_CONFIG before Direct3D initializes (e.g. 0 to bypass high-refresh VSync cadence quantization), unless set in dxvk.conf.
+	inline void SetPresentInterval(int interval) {
+		if (interval < 0) return;
+		if (interval > 4) interval = 4;
+		static const char* kKey = "d3d9.presentInterval";
+		char runtime[MAX_PATH] = {};
+		HMODULE d3d9 = GetModuleHandleA("d3d9.dll");
+		if (!Loaded && !(d3d9 && GetModuleFileNameA(d3d9, runtime, MAX_PATH) && IsDxvk(runtime))) return;
+
+		char file[MAX_PATH] = {};
+		if (!GetEnvironmentVariableA("DXVK_CONFIG_FILE", file, MAX_PATH)) strcpy_s(file, "dxvk.conf");
+		std::string conf;
+		if (FILE* f = nullptr; !fopen_s(&f, file, "rb") && f) {
+			char buffer[4096]; size_t n;
+			while ((n = fread(buffer, 1, sizeof(buffer), f)) > 0) conf.append(buffer, n);
+			fclose(f);
+		}
+		char line[2048] = {};
+		const DWORD have = GetEnvironmentVariableA("DXVK_CONFIG", line, sizeof(line));
+		if (have >= sizeof(line)) {
+			Logger::Log("[WARNING] DxvkLoader: DXVK_CONFIG is too long to add to: %s left to DXVK", kKey);
+			return;
+		}
+		if (ConfigSetsKey(conf, kKey) || ConfigSetsKey(line, kKey)) {
+			Logger::Log("DxvkLoader: %s is set in %s: left as the player set it", kKey, ConfigSetsKey(conf, kKey) ? file : "DXVK_CONFIG");
+			return;
+		}
+
+		char entry[64];
+		sprintf_s(entry, "%s = %d", kKey, interval);
+		std::string value = line;
+		if (!value.empty()) value += ";";
+		value += entry;
+		SetEnvironmentVariableA("DXVK_CONFIG", value.c_str());
+		Logger::Log("DxvkLoader: %s set to %d (DXVK_CONFIG \"%s\"; [Main.Main.Misc] DxvkPresentInterval)", kKey, interval, value.c_str());
+	}
 }

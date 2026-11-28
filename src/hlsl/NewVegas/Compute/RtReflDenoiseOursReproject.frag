@@ -45,7 +45,7 @@ History Gather(vec2 rectUv, bool inFrustum, Surface s, float expectedZ, float zT
         if (virtualTest) same = same && abs(m.z - hit) < 0.25 * hit + 10.0;   // the same reflected thing (its hit distance)
         if (!same) continue;
         vec4 v = Fetch(t_in0, q);
-        if (!Finite(v)) continue;
+        if (!Finite(v) || v.a < 0.0) continue;
         h.value += v * w; h.moments += m * w; h.weight += w;
     }
     if (h.weight > 1.0e-4) { h.value /= h.weight; h.moments /= h.weight; }
@@ -77,6 +77,7 @@ void main() {
     float rawHit = max(Fetch(t_hitDist, px).y, 0.0);
     o_moments = vec4(rawHit, 1.0, max(hit, 0.0), 0.0);
     if (s.z <= 0.0) { o_guide = vec4(0.0); o_accum = vec4(0.0); o_average = vec4(0.0); o_moments = vec4(0.0); return; }
+    if (signal.a < 0.0) return;   // un-jittered flat water skips temporal accumulation
     if (IsMirror(s.roughness)) return;
 
     // 3x3 same-surface neighborhood (un-premultiplied Tame color + alpha) for firefly clamping, anti-lag, and variance clip
@@ -97,7 +98,7 @@ void main() {
             StripRoughness(rq.y, qw);
             if (qw != s.weapon) continue;
             vec4 v = Fetch(t_signal, q);
-            if (!Finite(v)) continue;
+            if (!Finite(v) || v.a < 0.0) continue;
             aMin = min(aMin, v.a);
             aMax = max(aMax, v.a);
             if (x == 0 && y == 0) continue;
@@ -170,6 +171,7 @@ void main() {
     // virtual share: all of it on smooth surfaces, none past roughness 0.5 (a wide lobe's image moves more with the surface)
     float vShare = vOk * (sOk > 0.0 ? 1.0 - smoothstep(0.1, 0.5, s.roughness) : 1.0);
     if (sOk + vOk <= 0.0) return;   // disoccluded: this frame's sample alone
+    if (s.roughness < 0.08 && !s.weapon && vOk <= 0.0) return;   // reject surface-only fallback on smooth mirrors
     vec4 history = mix(hs.value, hv.value, vShare);
     vec4 hm = mix(hs.moments, hv.moments, vShare);
 

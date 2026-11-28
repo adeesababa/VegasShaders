@@ -160,7 +160,8 @@ public:
 		bool				RedrawActorsOnly;	// UNOFFICIAL (2026-10-08) [Shaders.ShadowsInteriors.Main] RedrawActorsOnly
 		float				PlayerLampMargin;	// [Shaders.ShadowsInteriors.Main] PlayerLampMargin (at least 1)
 		struct ForwardStruct {	// [Shaders.ShadowsInteriors.Forward]
-			bool Enabled, KeepDarkening, DarkeningBlur, FirstPerson, ScopeFix, LogLamps;
+			bool Enabled = true;
+			bool KeepDarkening, DarkeningBlur, FirstPerson, ScopeFix, LogLamps;
 			bool CameraIndependent;		// UNOFFICIAL (2026-10-08): lamps get shadows by where you are, not where you look
 			bool KeepLampsInView;		// UNOFFICIAL (2026-10-08): the game's lamp view test may not drop lamps that reach the view
 			int LampRanking, DebugView;

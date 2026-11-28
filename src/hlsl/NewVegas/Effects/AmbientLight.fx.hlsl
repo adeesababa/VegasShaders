@@ -1022,7 +1022,9 @@ float4 Apply(VSOUT IN, uniform bool sky) : COLOR0 {
 	[unroll] for (int y = 0; y < 2; y++) {
 		[unroll] for (int x = 0; x < 2; x++) {
 			float2 tapUV = clampToRectIfOn((base + float2(x, y) + 0.5f) * NVR_ALLayout.zw, NVR_ALLayout.zw);	// (RenderScale v2: no stale texels)
-			float tapDepth = readDepthLod(tapUV - 0.5f * max(NVR_ALLayout.zw - TESR_ReciprocalResolution.xy, 0.0f));
+			float2 tapDepthUV = tapUV - 0.5f * max(NVR_ALLayout.zw - TESR_ReciprocalResolution.xy, 0.0f);
+			if (!viewModel && IsViewModel(tapDepthUV)) continue;
+			float tapDepth = readDepthLod(tapDepthUV);
 			float weight = (x ? fraction.x : 1 - fraction.x) * (y ? fraction.y : 1 - fraction.y);
 			float closeness = abs(tapDepth - depth) / tolerance;
 			weight *= lerp(1.0f / (1.0f + closeness), saturate(1.0f - closeness), edgeReject);
@@ -1041,7 +1043,7 @@ float4 Apply(VSOUT IN, uniform bool sky) : COLOR0 {
 		}
 	}
 	float4 ambient = sum / weights;
-	ambient.a = edgeReject > 0.5f && weights < 0.01f ? nearestValue : ambient.a;	// (EdgeReject: no tap at this depth, the nearest)
+	ambient.a = edgeReject > 0.5f && weights < 0.01f ? (nearestCloseness < 1.0e8f ? nearestValue : 1.0f) : ambient.a;	// (EdgeReject: no tap at this depth, the nearest)
 
 	float3 lin = linearize(color.rgb);
 	float shadedLuma = luma(lin);

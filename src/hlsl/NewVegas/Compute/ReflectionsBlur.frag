@@ -21,7 +21,7 @@ void main() {
     float depth = readDepthLod(pixelUV);
     float roughness;
     float amount = Reflectivity(pixelUV, depth, ViewNormal(pixelUV), roughness);
-    if (amount <= 0.0) { o_color = centre; return; }
+    if (amount <= 0.0 || centre.a < 0.0) { o_color = centre; return; }
 
     // Wider on rough ground, narrow on wet ground, so puddles stay sharp.
     // (2026-11-06) mirrors get no blur: below roughness 0.03 none, full from 0.15 (a mirror needs no denoising: its rays do not scatter;
@@ -41,9 +41,10 @@ void main() {
         vec2 pa = ua - 0.5 * (LowTexel - cb.reciprocalResolution.xy);
         vec2 pb = ub - 0.5 * (LowTexel - cb.reciprocalResolution.xy);
         float da = readDepthLod(pa), db = readDepthLod(pb);
-        float wa = WeaponAt(pa) == centerWeapon ? gauss / (1.0 + abs(da - depth) / tolerance) : 0.0;
-        float wb = WeaponAt(pb) == centerWeapon ? gauss / (1.0 + abs(db - depth) / tolerance) : 0.0;
-        sum += Source(ua) * wa + Source(ub) * wb;
+        vec4 sa = Source(ua), sb = Source(ub);
+        float wa = (sa.a >= 0.0 && WeaponAt(pa) == centerWeapon) ? gauss / (1.0 + abs(da - depth) / tolerance) : 0.0;
+        float wb = (sb.a >= 0.0 && WeaponAt(pb) == centerWeapon) ? gauss / (1.0 + abs(db - depth) / tolerance) : 0.0;
+        sum += sa * wa + sb * wb;
         weights += wa + wb;
     }
     o_color = sum / weights;

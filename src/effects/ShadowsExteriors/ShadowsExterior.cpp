@@ -585,7 +585,7 @@ void ShadowsExteriorEffect::UpdateSettings() {
 	{	// UNOFFICIAL: [Shaders.ShadowsInteriors.Forward], read once per settings change
 		InteriorsStruct::ForwardStruct& forward = interiors.Forward;
 		const char* section = "Shaders.ShadowsInteriors.Forward";
-		forward.Enabled = ShadowSettingI(section, "Enabled") != 0;
+		forward.Enabled = true;	// Shaders.ShadowsInteriors.Forward.Enabled locked on for DeferredRenderer = 2
 		forward.KeepDarkening = ShadowSettingI(section, "KeepDarkening") != 0;
 		forward.DarkeningBlur = ShadowSettingI(section, "DarkeningBlur") != 0;
 		forward.FirstPerson = ShadowSettingI(section, "FirstPerson") != 0;

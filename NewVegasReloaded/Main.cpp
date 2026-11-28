@@ -271,6 +271,8 @@ extern "C" {
 			DxvkLoader::SkipUnusedVulkanIcds(!TheSettingManager->Config.FillNode(&node, "Main.Main.Misc", "DxvkSkipUnusedIcd") || node.BoolValue);
 			// UNOFFICIAL 2026-11-23 (DxvkLoader.h): cap dxvk.numCompilerThreads so DXVK + D3D compile workers do not saturate 32-bit startup
 			DxvkLoader::CapCompilerThreads(TheSettingManager->Config.FillNode(&node, "Main.Main.Misc", "DxvkCompilerThreads") ? node.IntValue : 3);
+			// UNOFFICIAL 2026-11-27 (DxvkLoader.h): optional d3d9.presentInterval override (-1 leaves to game/dxvk.conf)
+			DxvkLoader::SetPresentInterval(TheSettingManager->Config.FillNode(&node, "Main.Main.Misc", "DxvkPresentInterval") ? node.IntValue : -1);
 		}
 		LoadStep = "reading the presets";
 		PresetManager::Initialize();

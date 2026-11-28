@@ -25,7 +25,7 @@ void main() {
     o_blurred = centre;
     o_radius = vec4(0.0);
     vec4 g = Fetch(t_in2, px);
-    if (g.x == 0.0 || IsMirror(g.y)) return;
+    if (g.x == 0.0 || IsMirror(g.y) || centre.a < 0.0) return;
     vec4 m = Fetch(t_in0, px);
     float z = abs(g.x), r = g.y, hit = max(m.x, 0.0), n = max(m.y, 1.0);
     bool centerWeapon;
@@ -62,7 +62,7 @@ void main() {
                 * exp(-abs(gq.y - r) / (0.05 + 0.2 * r))
                 * exp(-abs(Fetch(t_in0, q).x - hit) / (0.3 * hit + 0.1 * z + 5.0));
         vec4 v = Fetch(t_in1, q);
-        if (!Finite(v) || w <= 0.0) continue;
+        if (!Finite(v) || v.a < 0.0 || w <= 0.0) continue;
         sum += v * w; weights += w;
     }
     o_blurred = sum / weights;

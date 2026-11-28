@@ -8,6 +8,7 @@ void main() {
     vec2 uv = (vpos + 0.5) * LowTexel;
     vec4 current = textureLod(sampler2D(t_trace, POINT_S), uv, 0.0);
     if (any(isnan(current)) || any(isinf(current))) current = vec4(0.0);   // (UNOFFICIAL 2026-10-30: no non-finite value into the history)
+    if (current.a < 0.0) { o_color = current; return; }
     vec2 pixelUV = uv - 0.5 * (LowTexel - cb.reciprocalResolution.xy);
     float depth = readDepthLod(pixelUV);
     bool centerWeapon = WeaponAt(pixelUV);
@@ -23,7 +24,7 @@ void main() {
             vec2 tapPixelUV = tapUV - 0.5 * (LowTexel - cb.reciprocalResolution.xy);
             if (WeaponAt(tapPixelUV) != centerWeapon) continue;
             vec4 tap = textureLod(sampler2D(t_trace, POINT_S), tapUV, 0.0);
-            if (any(isnan(tap)) || any(isinf(tap))) continue;   // (2026-10-30)
+            if (any(isnan(tap)) || any(isinf(tap)) || tap.a < 0.0) continue;   // (2026-10-30)
             lowA = min(lowA, tap.a); highA = max(highA, tap.a);
             if (tap.a > 1.0e-4) {
                 vec3 tc = max(tap.rgb / tap.a, vec3(0.0));

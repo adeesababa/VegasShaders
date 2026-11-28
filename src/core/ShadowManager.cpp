@@ -170,13 +170,25 @@ static bool RecentlyMoved(NiGeometry* geo, CasterMotion** out = nullptr) {
 	return motion.changed && SkinnedBoundFrame - motion.changed < MovingSettleFrames;
 }
 
+static bool IsWindClothCaster(NiGeometry* geo, NiShadeProperty* shade) {
+	if (!ClothWind::S.On || !ClothWind::Exterior || !geo || !shade) return false;
+	const UInt32 vtable = *(UInt32*)shade;
+	if (vtable != 0x10AE0D0 && vtable != 0x10B9910) return false;	// BSShaderPPLightingProperty, Lighting30ShaderProperty
+	NiSourceTexture** textures = ((BSShaderPPLightingProperty*)shade)->ppTextures[0];
+	const NiSourceTexture* diffuse = textures ? *textures : nullptr;
+	if (!diffuse || !diffuse->ddsPath1) return false;
+	auto it = ClothWind::ByTexture.find(diffuse);
+	if (it != ClothWind::ByTexture.end() && it->second.first == diffuse->ddsPath1) return it->second.second;
+	return ClothWind::IsClothTexture(diffuse->ddsPath1);
+}
+
 // A caster that moves: skinned geometry (people, creatures), controller-driven vertex animation (NiGeomMorpherController on
-// billowing tents/flags), wind-blown SpeedTree leaves (all move without their transform changing), and rigid geometry that moved
-// lately (RecentlyMoved). RedrawActorsOnly draws them apart from the rest (RenderShadowCubeMap).
+// billowing tents/flags), ClothWind static cloth (tents/flags/banners), wind-blown SpeedTree leaves (all move without their transform
+// changing), and rigid geometry that moved lately (RecentlyMoved). RedrawActorsOnly draws them apart from the rest (RenderShadowCubeMap).
 static bool IsMovingCaster(NiGeometry* geo, NiShadeProperty* shade, CasterMotion** motion = nullptr) {
 	if (motion) *motion = nullptr;
 	if (!geo) return false;
-	if (geo->skinInstance || geo->m_controller || (shade && shade->m_eShaderType == NiShadeProperty::kProp_SpeedTreeLeaf)) return true;
+	if (geo->skinInstance || geo->m_controller || IsWindClothCaster(geo, shade) || (shade && shade->m_eShaderType == NiShadeProperty::kProp_SpeedTreeLeaf)) return true;
 	return RecentlyMoved(geo, motion);
 }
 
@@ -232,7 +244,7 @@ static void PointShadowCasterState(ShadowSceneLight* light, UInt64& hash, bool& 
 		CasterMotion* motion = nullptr;
 		bool moving;
 		if (kept && geo) {	// CasterListCache: this lamp's entry for the caster at this place in its list, looked up only when it changed
-			const bool alwaysMoving = geo->skinInstance || geo->m_controller || (shade && shade->m_eShaderType == NiShadeProperty::kProp_SpeedTreeLeaf);	// as IsMovingCaster: no entry
+			const bool alwaysMoving = geo->skinInstance || geo->m_controller || IsWindClothCaster(geo, shade) || (shade && shade->m_eShaderType == NiShadeProperty::kProp_SpeedTreeLeaf);	// as IsMovingCaster: no entry
 			if (keptAt < kept->casters.size() && kept->casters[keptAt].first == geo) motion = kept->casters[keptAt].second;
 			else {
 				motion = alwaysMoving ? nullptr : &CasterMotions[geo];

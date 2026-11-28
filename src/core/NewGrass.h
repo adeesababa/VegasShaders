@@ -213,7 +213,43 @@ namespace NewGrass {
 			const NiPoint2* uv1 = gd->m_pkTexture + m.Total;
 			while (vpm < m.Total && uv1[vpm].x < 0.5f) vpm++;
 		}
-		if (vpm == 0 || vpm >= m.Total) vpm = (m.Total % kTufts == 0) ? m.Total / kTufts : m.Total;
+		if (vpm == 0 || vpm >= m.Total) {
+			const unsigned maxN = (std::min)((unsigned)kTufts, m.Total / 3);
+			// Tier 1: m_pkVertex tuft equality (slot 0 == slot 1 and slot N-1)
+			if (gd->m_pkVertex && maxN >= 2) {
+				const NiPoint3* pos = gd->m_pkVertex;
+				for (unsigned N = maxN; N >= 2; N--) {
+					if (m.Total % N != 0) continue;
+					const unsigned k = m.Total / N;
+					if (memcmp(pos, pos + k, k * sizeof(NiPoint3)) == 0 &&
+						memcmp(pos, pos + (N - 1) * k, k * sizeof(NiPoint3)) == 0) {
+						vpm = k;
+						break;
+					}
+				}
+			}
+			// Tier 2: CPU index buffer stride check (handles strips and lists)
+			if ((vpm == 0 || vpm >= m.Total) && maxN >= 2 && gd->m_pkBuffData &&
+				gd->m_pkBuffData->IndexArray && gd->m_pkBuffData->IndexCount > 0) {
+				const UInt16* indices = gd->m_pkBuffData->IndexArray;
+				const unsigned numIndices = gd->m_pkBuffData->IndexCount;
+				for (unsigned N = maxN; N >= 2; N--) {
+					if (m.Total % N != 0) continue;
+					const unsigned k = m.Total / N;
+					unsigned lead = 0;
+					while (lead < numIndices && indices[lead] < k) lead++;
+					if (lead >= 3 && lead < numIndices && indices[lead] == (unsigned)indices[0] + k) {
+						const int diff = (int)(lead * N) - (int)numIndices;
+						if (diff >= -4 * (int)N && diff <= 4 * (int)N) {
+							vpm = k;
+							break;
+						}
+					}
+				}
+			}
+			// Tier 3: legacy 228-slot divisor fallback
+			if (vpm == 0 || vpm >= m.Total) vpm = (m.Total % kTufts == 0) ? m.Total / kTufts : m.Total;
+		}
 		m.VertsPerModel = vpm;
 		m.Capacity = vpm ? m.Total / vpm : 0;
 		if (gd->m_pkVertex && vpm) {
