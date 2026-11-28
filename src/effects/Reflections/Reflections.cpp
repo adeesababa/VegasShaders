@@ -67,13 +67,32 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.CubeMap = TheSettingManager->GetSettingI(section, "CubeMap") != 0;
 	{
 		SettingManager::Configuration::ConfigNode cubeNode;
-		Settings.CubeMode = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeMode") ? std::clamp(cubeNode.IntValue, 0, 2) : 0;	// a missing key defaults to 0 (legacy screen cube)
+		Settings.CubeMode = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeMode") ? std::clamp(cubeNode.IntValue, 0, 2) : 2;
 		const int rawRes = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeResolution") ? cubeNode.IntValue : 128;
 		Settings.CubeResolution = rawRes < 96 ? 64 : (rawRes >= 192 ? 256 : 128);
 		Settings.CubeDistance = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeDistance") ? std::clamp(cubeNode.FloatValue, 1024.0f, 16384.0f) : 4096.0f;
+		// UNOFFICIAL 2026-11-27 cheaper world cube (missing keys: as upstream draws it, a face every frame with everything in it)
+		Settings.CubeFaceInterval = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeFaceInterval") ? std::clamp(cubeNode.IntValue, 1, 8) : 1;
+		Settings.CubeMoveThreshold = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeMoveThreshold") ? std::clamp(cubeNode.FloatValue, 0.0f, 1000.0f) : 0.0f;
+		Settings.CubeRefreshSeconds = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeRefreshSeconds") ? std::clamp(cubeNode.FloatValue, 0.0f, 600.0f) : 0.0f;
+		Settings.CubeLean = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeLean") && cubeNode.BoolValue;
+		// (review) what the faces hold changed: every face is redrawn in turn. Only on a real change of these two (a settings reload
+		// happens for any key, and the bench reloads them at every shot).
+		static bool lastLean = Settings.CubeLean;
+		static float lastDistance = Settings.CubeDistance;
+		if (lastLean != Settings.CubeLean || lastDistance != Settings.CubeDistance) worldCubeStale = 0x3Fu;
+		lastLean = Settings.CubeLean;
+		lastDistance = Settings.CubeDistance;
 	}
 	Settings.CubeCapture = std::clamp(TheSettingManager->GetSettingF(section, "CubeCapture"), 0.02f, 1.0f);
 	Settings.CubeFade = std::clamp(TheSettingManager->GetSettingF(section, "CubeFade"), 0.0f, 0.2f);
+	// UNOFFICIAL 2026-11-27 cube-visible (owner: the surroundings cube must show clearly): ONE strength for every reader of the cube
+	// (Reflections.glsl / .fx EnvAlong, LiveCube.hlsl for metal and the env maps through PBR.cpp's TESR_EnvCube). Live. A missing key
+	// is 1, the look before the key.
+	{
+		SettingManager::Configuration::ConfigNode strengthNode;
+		Settings.CubeStrength = TheSettingManager->Config.FillNode(&strengthNode, section, "CubeStrength") ? std::clamp(strengthNode.FloatValue, 0.0f, 2.0f) : 1.0f;
+	}
 	Settings.DebugView = std::clamp(TheSettingManager->GetSettingI(section, "DebugView"), 0, 11);	// 11: UNOFFICIAL 2026-11-09 the weapon mask (ReflectionsComposite.frag)	// 9, 10: UNOFFICIAL 2026-10-26 the Hi-Z walk's end rule / skips (HiZ)	// 8: SpecularOcclusion (diagnostic)	// 4: UNOFFICIAL 2026-10-19 the rain's wet mask; 5, 6 the light grid; 7 the material buffer
 	Settings.GridFallback = TheSettingManager->GetSettingI(section, "GridFallback") != 0;
 	Settings.GridBrightness = std::clamp(TheSettingManager->GetSettingF(section, "GridBrightness"), 0.0f, 4.0f);
@@ -361,8 +380,8 @@ static void LogReflShaderFiles() {
 	// (2026-11-24) written by tools\nvr-dxvk\refl-hashes.py, which compile-compute.sh runs after every build: by hand it went stale (1.1.3 and
 	// 1.1.4 shipped 10 of these 11 old, so every log called the build's own files OLD and Install check showed 1 to fix). Edit the names only.
 	static const Want wants[] = {
-		{ "ReflectionsComposite", 0x7E8A6B60u }, { "ReflectionsRTResolve", 0xC2FCA565u }, { "ReflectionsRayGen", 0x17052A1Cu }, { "ReflectionsTemporal", 0xA4622658u },
-		{ "ReflectionsCapture", 0x1F7468EFu }, { "ReflectionsFilter", 0x6CEFCC49u },
+		{ "ReflectionsComposite", 0xD2CD1B1Fu }, { "ReflectionsRTResolve", 0x75BDE07Au }, { "ReflectionsRayGen", 0xE74CC8A9u }, { "ReflectionsTemporal", 0xD8130F68u },
+		{ "ReflectionsCapture", 0x1548A0C3u }, { "ReflectionsFilter", 0x891F85DAu },
 		{ "RtReflDenoiseOursReproject", 0x7955BB76u }, { "Rt\\ReflectionsRT", 0x5DB278C7u },
 		{ "Rt\\ReflectionsRTAlpha", 0xDE40151Fu }, { "Rt\\ReflectionsRTTex", 0x5B941841u }, { "Rt\\ReflectionsRTTexGlow", 0xCADF2215u },
 		{ "Rt\\ReflectionsRTAlphaTex", 0xC3195738u }, { "Rt\\ReflectionsRTAlphaTexGlow", 0x77E8EF1Bu },
@@ -739,7 +758,7 @@ void ReflectionsEffect::GridStep() {
 	}
 	GridLightSlot = light;
 	GridColorSlot = colour;
-	Constants.Grid2 = D3DXVECTOR4(use ? 1.0f : 0.0f, Settings.GridBrightness, colour ? 1.0f : 0.0f, 0.0f);
+	Constants.Grid2 = D3DXVECTOR4(use ? 1.0f : 0.0f, Settings.GridBrightness, colour ? 1.0f : 0.0f, Settings.CubeStrength);	// w: CubeStrength (EnvAlong; a lane nothing else reads)
 	if (!use) return;
 	const NiPoint3 camera = WorldSceneGraph->camera->m_worldTransform.pos;
 	Constants.Grid = D3DXVECTOR4((float)(ambient->gridOrigin[0] - camera.x), (float)(ambient->gridOrigin[1] - camera.y),
@@ -803,7 +822,7 @@ void ReflectionsEffect::UpdateConstants() {
 }
 
 bool ReflectionsEffect::NonRtWeaponActive() const {
-	return !ExtFailed && DxvkCompute::PassesOn() && !DxvkCompute::KeptOnD3D9(Name) && !RenderRect::Active();
+	return !ExtFailed && DxvkCompute::PassesOnRect() && !DxvkCompute::KeptOnD3D9(Name);
 }
 
 bool ReflectionsEffect::WeaponReflectionsActive() const {
@@ -1032,18 +1051,20 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 	const bool denoised = rtDenoiseFrame && rtResolved &&
 		RunRtDenoiser(Device, temporal ? Textures.TraceTexture : Textures.TempTexture, denoiseHistory ? &reprojectDenoise : nullptr);
 	if (!denoised) RtDenoiseIdle();
+	const RECT halfRect = { 0, 0, (LONG)RenderRect::Width(RtWidth()), (LONG)RenderRect::Height(RtHeight()) };
+	const RECT* halfClip = RenderRect::Active() ? &halfRect : nullptr;
 	if (!denoised && temporal) {
 		// UNOFFICIAL 2026-10-29 ObjectMotion: its buffer on stage 11 for Temporal only (the ortho map's stage; the trace above has read it,
 		// and the composite's SetCT binds the ortho map again). TemporalPS reads it while TESR_ObjectMotionData.x is 1.
 		if (ObjectMotion::Data.x > 0.0f && ObjectMotion::Texture) SetPassTexture(11, ObjectMotion::Texture);
 		pass(Textures.TempSurface, 3);
-		Device->StretchRect(Textures.TempSurface, NULL, Textures.HistorySurface, NULL, D3DTEXF_NONE);
+		Device->StretchRect(Textures.TempSurface, halfClip, Textures.HistorySurface, halfClip, D3DTEXF_NONE);
 	}
 	if (denoised) {}
 	else if (rrRaw && rtResolved) {
 		// UNOFFICIAL 2026-10-30 DLSS RR (above): the resolve (in Temp, as with Temporal 0) copied into Buffer, what the composite reads.
 		// (Resolve cannot draw into Buffer itself: every pass binds Buffer as an input.)
-		Device->StretchRect(Textures.TempSurface, NULL, Textures.BufferSurface, NULL, D3DTEXF_NONE);
+		Device->StretchRect(Textures.TempSurface, halfClip, Textures.BufferSurface, halfClip, D3DTEXF_NONE);
 		static bool logged = false;
 		if (!logged) { logged = true; Logger::Log("UNOFFICIAL DLSS RR: Reflections: its own denoiser is skipped (RR denoises the raw signal)"); }
 	}
@@ -1236,8 +1257,28 @@ bool ReflectionsEffect::WorldCubeReady() const {
 	return Cubes.World && Settings.CubeMode >= 2 && (worldCubeMask == 0x3Fu);
 }
 
-int ReflectionsEffect::BeginWorldCubeFaces(int outFaces[2]) {
+// UNOFFICIAL 2026-11-27 cheaper world cube: a face shows the world around the camera point it was drawn at, axis-aligned (turning
+// never changes it), lit by that moment's sun, sky and lamps. It is stale when the camera has moved CubeMoveThreshold units since, when
+// that light changed (sun direction over ~2 degrees, a colour's brightness over 8 %, another set of lamps or their total over 15 %),
+// when it is older than CubeRefreshSeconds, or after a cell change. Standing still in a steady scene, no face is stale: nothing draws.
+bool ReflectionsEffect::WorldCubeFaceStale(int face, const D3DXVECTOR3& pos, const WorldCubeLight& now, DWORD tick) const {
+	if (worldCubeStale & (1u << face)) return true;
+	const WorldCubeFace& f = worldCubeFace[face];
+	const float move = Settings.CubeMoveThreshold;
+	if (move <= 0.0f) return true;	// as upstream: every face is redrawn in turn
+	const float dx = pos.x - f.pos.x, dy = pos.y - f.pos.y, dz = pos.z - f.pos.z;
+	if (dx * dx + dy * dy + dz * dz > move * move) return true;
+	if (Settings.CubeRefreshSeconds > 0.0f && tick - f.tick > (DWORD)(Settings.CubeRefreshSeconds * 1000.0f)) return true;
+	if (D3DXVec3Dot(&now.sunDir, &f.light.sunDir) < 0.99939f) return true;	// cos 2 degrees
+	auto changed = [](float a, float b, float share) { return fabsf(a - b) > share * (std::max)(a, b) + 0.002f; };
+	for (int i = 0; i < 4; i++) if (changed(now.lum[i], f.light.lum[i], 0.08f)) return true;
+	if (now.lampSet != f.light.lampSet || changed(now.lampLum, f.light.lampLum, 0.15f)) return true;
+	return false;
+}
+
+int ReflectionsEffect::BeginWorldCubeFaces(int outFaces[2], const WorldCubeLight& now) {
 	if (!WorldCubeWanted()) return 0;
+	worldCubeLightNow = now;
 	// (2026-11-24 review) Started over in another interior or worldspace, or after a jump: NOT at every exterior cell border (every 4096
 	// units outdoors), where the faces are still right and starting over dropped the world cube from the capture for 3+ frames.
 	TESObjectCELL* cell = Player ? Player->parentCell : nullptr;
@@ -1248,18 +1289,48 @@ int ReflectionsEffect::BeginWorldCubeFaces(int outFaces[2]) {
 		worldCubeMask = 0;
 		worldCubeNextFace = 0;
 		worldCubeSpace = space;
+		worldCubeStale = 0;
 	}
 	worldCubePos = pos;
-	const int count = (worldCubeMask != 0x3Fu) ? 2 : 1;
-	for (int i = 0; i < count; i++) {
-		outFaces[i] = worldCubeNextFace;
-		worldCubeNextFace = (worldCubeNextFace + 1) % 6;
+	// (2026-11-27) another exterior cell: every face is redrawn in turn (the old ones show until then; a new place resets above)
+	if (TheShaderManager->GameState.isCellChanged) worldCubeStale = 0x3Fu;
+	const UINT frame = TheFrameRateManager->FrameNumber;
+	if (++worldCubeLogFrames >= 600) {
+		Logger::Log("UNOFFICIAL Reflections world cube: %u faces drawn in the last 600 frames, %u frames with the cube complete and nothing stale (interval %d, move %.0f, refresh %.0f s, lean %d)",
+			worldCubeLogFaces, worldCubeLogIdle, Settings.CubeFaceInterval, Settings.CubeMoveThreshold, Settings.CubeRefreshSeconds, Settings.CubeLean ? 1 : 0);
+		worldCubeLogFrames = worldCubeLogFaces = worldCubeLogIdle = 0;
 	}
-	return count;
+	if (worldCubeMask != 0x3Fu) {	// filling (a new place): two faces a frame, as upstream, until all six are there
+		int count = 0;
+		for (int tries = 0; tries < 6 && count < 2; tries++) {
+			const int f = worldCubeNextFace;
+			worldCubeNextFace = (worldCubeNextFace + 1) % 6;
+			if (!(worldCubeMask & (1u << f))) outFaces[count++] = f;
+		}
+		worldCubeLastDraw = frame;
+		worldCubeLogFaces += count;
+		return count;
+	}
+	if (frame - worldCubeLastDraw < (UINT)Settings.CubeFaceInterval) return 0;
+	const DWORD tick = GetTickCount();
+	for (int tries = 0; tries < 6; tries++) {
+		const int f = worldCubeNextFace;
+		worldCubeNextFace = (worldCubeNextFace + 1) % 6;
+		if (!WorldCubeFaceStale(f, pos, now, tick)) continue;
+		outFaces[0] = f;
+		worldCubeLastDraw = frame;
+		worldCubeLogFaces++;
+		return 1;
+	}
+	worldCubeLogIdle++;
+	return 0;
 }
 
 void ReflectionsEffect::MarkWorldCubeFaceRendered(int face) {
-	if (face >= 0 && face < 6) worldCubeMask |= (1u << face);
+	if (face < 0 || face >= 6) return;
+	worldCubeMask |= (1u << face);
+	worldCubeStale &= ~(1u << face);
+	worldCubeFace[face] = { worldCubePos, worldCubeLightNow, GetTickCount() };	// (2026-11-27) what it was drawn with
 }
 
 bool ReflectionsEffect::CubeReady() const {
@@ -1285,9 +1356,10 @@ void ReflectionsEffect::CubeStep(IDirect3DDevice9* Device) {
 	const float cubeModeFlag = !cubeOn ? 0.0f : Settings.CubeMode == 0 ? 1.0f : (Settings.CubeMode >= 2 && WorldCubeReady()) ? 3.0f : 2.0f;
 	Constants.Cube2 = D3DXVECTOR4(Settings.CubeCapture, Settings.CubeFade, (float)(cubeLevels - 1), cubeModeFlag);
 	if (!cubeOn) { cubeValid = false; return; }
-	const D3DXMATRIX& invView = TheRenderManager->InvViewMatrix;
-	const double dx = (double)invView._41 - cubeInvView._41, dy = (double)invView._42 - cubeInvView._42,
-		dz = (double)invView._43 - cubeInvView._43;
+	// (2026-11-28 cube-keep-capture) the camera's world position: InvViewMatrix's translation is always 0 here (the view is camera
+	// relative; logged on the bench), so the jump test never fired and the distance moved was always 0.
+	const D3DXVECTOR4& camPos = TheRenderManager->CameraPosition;
+	const double dx = (double)camPos.x - cubeCamPos.x, dy = (double)camPos.y - cubeCamPos.y, dz = (double)camPos.z - cubeCamPos.z;
 	void* cell = Player ? Player->parentCell : nullptr;
 	const bool jumped = dx * dx + dy * dy + dz * dz > 1000.0 * 1000.0;
 	// UNOFFICIAL 2026-10-18: FrameNumber, not UpdateConstants calls: with those (two a frame) 'cubeFrame + 1 != frame' was true every
@@ -1300,17 +1372,41 @@ void ReflectionsEffect::CubeStep(IDirect3DDevice9* Device) {
 		SessionLog::Count.cubeRestarts++;
 		FRAME_JOURNAL("reflection cube restarted (%s)", cell != cubeCell ? "cell change" : jumped ? "camera jump" : "not stepped last frame");
 	}
-	RenderCube(Device, empty);
+	// (2026-11-27 cube-keep-capture, owner: "its gone as soon as i look away from the angle") CubeMode 2: what the screen showed stays in
+	// the cube out of view, fading at CubeFade as in CubeMode 1, until the camera MOVES: then it gives way to the world cube by the distance
+	// moved (about two thirds gone after 2 x CubeMoveThreshold units). Turning on the spot keeps it; the world cube fills what was never seen.
+	const float moved = empty ? 0.0f : (float)sqrt(dx * dx + dy * dy + dz * dz);
+	const float moveScale = 2.0f * (std::max)(Settings.CubeMoveThreshold, 16.0f);
+	float movedDecay = (std::min)(moved / moveScale, 1.0f);
+	// (2026-11-28, interiors on the bench) a restart (entering a cell, a load, a jump) also starts the world cube over at the new place, and
+	// it takes a few frames (two faces a frame) to draw its six faces: the capture restarted from the backdrop alone, and with the camera standing the world
+	// cube then seeped in at CubeFade (0.1 % a frame): the Saloon showed a blue haze, the ARK room nothing of the room behind. The first
+	// frame the world cube is complete after a restart, what is out of view takes it whole (on screen keeps the screen's picture). Given up
+	// after 120 frames (review: a world cube completed much later, say after a settings change, must not wipe what the capture holds).
+	const bool worldReady = Settings.CubeMode >= 2 && WorldCubeReady();
+	if (empty) {
+		cubeWorldPending = Settings.CubeMode >= 2 && !worldReady;
+		cubeWorldPendingFrame = now;
+		static UINT lastRestartLog = 0;	// (a log line per restart, at most one a second: menus restart it too)
+		if (Settings.CubeMode >= 2 && now - lastRestartLog > 60) { lastRestartLog = now; Logger::Log("UNOFFICIAL Reflections cube restarted (%s), world cube %s", cell != cubeCell ? "cell change" : jumped ? "camera jump" : "not stepped last frame", worldReady ? "complete" : "not complete yet: fills what is out of view once it is"); }
+	}
+	else if (cubeWorldPending && worldReady) {
+		movedDecay = 1.0f;
+		cubeWorldPending = false;
+		Logger::Log("UNOFFICIAL Reflections cube: the world cube filled what is out of view, %u frames after the restart", now - cubeWorldPendingFrame);
+	}
+	if (Settings.CubeMode < 2 || now - cubeWorldPendingFrame > 120) cubeWorldPending = false;
+	RenderCube(Device, empty, movedDecay);
 	cubeCell = cell;
 	cubeValid = true;
 	cubeFrame = now;
-	cubeInvView = invView;
+	cubeCamPos = D3DXVECTOR3(camPos.x, camPos.y, camPos.z);
 }
 
 // The surroundings cube (techniques 5 Capture, 6 Filter): each face of the new capture cube from last frame's and the
 // image; then every face of every mip of the reflection cube from the new capture. The techniques
 // unbind the cube they write (Texture[n] = NoTexture), so a cube is never read and written in the same pass.
-void ReflectionsEffect::RenderCube(IDirect3DDevice9* Device, bool reset) {
+void ReflectionsEffect::RenderCube(IDirect3DDevice9* Device, bool reset, float movedDecay) {
 	const int write = captureIndex ^ 1;
 	Cubes.CaptureLastSlot = Cubes.Capture[captureIndex];
 	Cubes.CaptureNewSlot = Cubes.Capture[write];
@@ -1321,7 +1417,9 @@ void ReflectionsEffect::RenderCube(IDirect3DDevice9* Device, bool reset) {
 	SetPassTexture(10, Cubes.World ? (IDirect3DBaseTexture9*)Cubes.World : (IDirect3DBaseTexture9*)Cubes.Capture[captureIndex]);
 	for (int f = 0; f < 6; f++) {
 		IDirect3DSurface9* face = Cubes.CaptureFace[write][f];
-		Constants.Cube = D3DXVECTOR4((float)f, (float)cubeSize, 0.0f, reset ? 1.0f : 0.0f);
+		// w: 1 = reset; otherwise minus the out-of-view decay toward the world cube for the distance moved this frame (0 standing still;
+		// Capture reads only w > 0 as a reset).
+		Constants.Cube = D3DXVECTOR4((float)f, (float)cubeSize, 0.0f, reset ? 1.0f : -movedDecay);
 		Device->SetRenderTarget(0, face);
 		Render(Device, face, face, 5, false, nullptr);
 	}
@@ -1413,20 +1511,6 @@ namespace {
 		auto found = TheShaderManager->ConstantsTable.find(name);
 		return found == TheShaderManager->ConstantsTable.end() ? nullptr : found->second;
 	}
-}
-
-void ReflectionsEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Target, IDirect3DSurface9* Rendered, UINT techniqueIndex, bool ClearTarget, IDirect3DSurface9* Source) {
-	// 2026-11-19 RenderScale < 1: allow Vulkan composite (technique 0) and surroundings cube (5, 6) when NvrDxvkPasses is on even in sub-rect frames
-	// (EffectRecord::ExtFullScreen sets the sub-rect viewport, and ReflectionsComposite.frag / Capture maps uv via screenToRect).
-	if ((techniqueIndex == 0 || techniqueIndex == 5 || techniqueIndex == 6) && RenderRect::Active()) {
-		if (!Enabled || !Effect || !ShouldRender()) { NoteSkip(); return; }
-		const bool extOk = techniqueIndex == 0 ? RtPassesWanted() : (DxvkCompute::PassesOnRect() && !DxvkCompute::KeptOnD3D9(Name));
-		if (!ExtFailed && extOk && !Sm6Covers(techniqueIndex) && ExtRender(Device, Target, Rendered, techniqueIndex, ClearTarget, Source)) {
-			ClearPassTextures();
-			return;
-		}
-	}
-	EffectRecord::Render(Device, Target, Rendered, techniqueIndex, ClearTarget, Source);
 }
 
 bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) {
@@ -1760,12 +1844,19 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 
 	if (techniqueIndex == 0)
 		return ExtFullScreen(Device, RenderTarget, RenderedSurface, SourceBuffer, pass.Pipeline, resources, resourceCount, &push, sizeof(push));
+	const RECT halfRect = { 0, 0, (LONG)RenderRect::Width(RtWidth()), (LONG)RenderRect::Height(RtHeight()) };
+	const RECT fullRect = { 0, 0, (LONG)RenderRect::Width(TheRenderManager->width), (LONG)RenderRect::Height(TheRenderManager->height) };
+	const RECT* viewport = !RenderRect::Active() ? nullptr :
+		(techniqueIndex == 7) ? &fullRect :
+		(techniqueIndex == 5 || techniqueIndex == 6 || techniqueIndex == 10) ? nullptr :
+		&halfRect;
+	const ExtUv uvMode = techniqueIndex == 10 ? ExtUv::ScreenQuad : ExtUv::TexelCentre;
 	// (RayGen: its three targets, RtTrace's own; RenderTarget is the first.)
 	IDirect3DSurface9* rayGenTargets[4] = { Rt.MarchSurface, Rt.DirSurface, Rt.RaySurface, Rt.MarchHitSurface };
 	IDirect3DSurface9* resolveTargets[2] = { RenderTarget, Rt.SpreadSurface };
-	const bool drawn = techniqueIndex == 8 ? ExtDrawTo(pass.Pipeline, rayGenTargets, 4, resources, resourceCount, &push, sizeof(push), nullptr, ExtUv::ScreenQuad) :
-		techniqueIndex == 9 ? ExtDrawTo(pass.Pipeline, resolveTargets, 2, resources, resourceCount, &push, sizeof(push), nullptr, ExtUv::ScreenQuad) :
-		ExtDrawTo(pass.Pipeline, &RenderTarget, 1, resources, resourceCount, &push, sizeof(push), nullptr, ExtUv::ScreenQuad);	// FrameVS into a smaller target
+	const bool drawn = techniqueIndex == 8 ? ExtDrawTo(pass.Pipeline, rayGenTargets, 4, resources, resourceCount, &push, sizeof(push), viewport, uvMode) :
+		techniqueIndex == 9 ? ExtDrawTo(pass.Pipeline, resolveTargets, 2, resources, resourceCount, &push, sizeof(push), viewport, uvMode) :
+		ExtDrawTo(pass.Pipeline, &RenderTarget, 1, resources, resourceCount, &push, sizeof(push), viewport, uvMode);
 	return drawn;
 }
 

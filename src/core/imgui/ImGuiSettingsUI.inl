@@ -188,7 +188,6 @@ static const RestartSetting kRestartSettings[] = {
 	{ "Main.Main.Misc",                       "MoreLampsPerObject", RestartRule::Changed },	// engine patch + SPECULAR_LAMPS6
 	{ "Main.Main.Misc",                       "LampReachMargin",    RestartRule::Changed },	// engine patch (Hooks.cpp)
 	{ "Main.Main.Performance",                "ParallelShaderCompile", RestartRule::Changed },
-	{ "Main.Main.Performance",                "ShaderWarmUp",       RestartRule::Changed },	// runs once, at the main menu
 	{ "Main.Main.Performance",                "SlimDepthBuffer",    RestartRule::Changed },	// depth texture format (CombineDepth)
 	{ "Shaders.ShadowsExteriors.Main",        "ForwardShadows",     RestartRule::TurnOn },
 	{ "Shaders.ShadowsExteriors.SSShadows",   "Enabled",            RestartRule::TurnOn },	// UNOFFICIAL 2026-11-26 Bottled Shaders / Bend SSS texture at start
@@ -248,7 +247,6 @@ static const RestartSetting kRestartSettings[] = {
 	{ "Main.Main.RayTracing",                 "PTDenoiseSplit",     RestartRule::TurnOn },
 	{ "Main.Main.RayTracing",                 "PTCacheEntriesLog2", RestartRule::Changed },
 	// Renderer, pipelines, hooks and scene setup read at start
-	{ "Main.Main.Quality",                    "DeferredRenderer",   RestartRule::Changed },
 	{ "Main.Main.Quality",                    "DeferredSkin",       RestartRule::Changed },
 	{ "Main.Main.Quality",                    "DeferredHair",       RestartRule::Changed },
 	{ "Main.Main.Quality",                    "DeferredTransparents", RestartRule::Changed },
@@ -257,7 +255,6 @@ static const RestartSetting kRestartSettings[] = {
 	{ "Main.Main.Quality",                    "DeferredRtSunFirst", RestartRule::Changed },
 	{ "Main.Main.Quality",                    "DeferredADFog",      RestartRule::Changed },
 	{ "Main.Main.Quality",                    "CapturedBumpNormals", RestartRule::Changed },
-	{ "Main.Main.Misc",                       "ForceMSAA",          RestartRule::Changed },
 	{ "Main.Main.Misc",                       "PresetOldDefaults",  RestartRule::Changed },
 	{ "Main.Main.Misc",                       "ReplaceIntro",       RestartRule::Changed },
 	{ "Shaders.WetnessEffects.Status",        "Enabled",            RestartRule::Changed },
@@ -493,37 +490,20 @@ static const char* InactiveReason(const char* section, const char* key) {
 			return "Needs the DXVK fork's d3d9.dll: not active on standard D3D9 or stock DXVK.";
 	}
 
-	// ForceMSAA disables deferred rendering and upscalers (FSR / DLSS)
-	if (NumericSetting("Main.Main.Misc", "ForceMSAA") != 0.0f) {
-		if ((sec == "Main.Main.Quality" && is({ "DeferredRenderer" })) ||
-			((sec == "Shaders.TAA.FSR" || sec == "Shaders.TAA.DLSS") && is({ "Enabled", "RenderScale" })))
-			return "Not used while ForceMSAA (Main > Misc) is on: MSAA disables deferred rendering and upscalers.";
-	}
-
 	// Deferred renderer sub-features & GearWeather
 	if (sec == "Main.Main.Quality") {
-		const bool defOff = NumericSetting("Main.Main.Quality", "DeferredRenderer") < 1.0f || NumericSetting("Main.Main.Misc", "ForceMSAA") != 0.0f;
-		if (is({ "DeferredSkin", "DeferredSkinSSS", "DeferredSkinBlur", "DeferredHair", "DeferredTransparents",
-			"DeferredBumpedNormals", "DeferredFirstPerson", "DeferredFoliageLamps", "DeferredReflections",
-			"DeferredALAlbedo", "DeferredALAlbedoGain", "DeferredRRGuides", "DeferredRtSunFirst",
-			"DeferredTiledLight", "DeferredADFog", "GBufferView" }) && defOff)
-			return "Only used while DeferredRenderer is on (and ForceMSAA is off).";
 		if (is({ "DeferredSkinSSS", "DeferredSkinBlur" }) && NumericSetting("Main.Main.Quality", "DeferredSkin") == 0.0f)
 			return "Only used while DeferredSkin is on.";
 		if (is({ "DeferredALAlbedoGain" }) && NumericSetting("Main.Main.Quality", "DeferredALAlbedo") == 0.0f)
 			return "Only used while DeferredALAlbedo is on.";
 		if (!strncmp(key, "GearWeather", 11)) {
-			if (defOff || NumericSetting("Main.Main.Quality", "DeferredFirstPerson") == 0.0f)
-				return "Requires DeferredRenderer and DeferredFirstPerson to be enabled (restart).";
+			if (NumericSetting("Main.Main.Quality", "DeferredFirstPerson") == 0.0f)
+				return "Requires DeferredFirstPerson to be enabled (restart).";
 			if (strcmp(key, "GearWeather") != 0 && NumericSetting("Main.Main.Quality", "GearWeather") == 0.0f)
 				return "Only used while GearWeather is on.";
 		}
 	}
 	if (sec.rfind("Shaders.WorldSurface.", 0) == 0) {
-		const bool defOff = NumericSetting("Main.Main.Quality", "DeferredRenderer") < 1.0f ||
-			NumericSetting("Main.Main.Misc", "ForceMSAA") != 0.0f;
-		if (defOff)
-			return "Requires DeferredRenderer to be enabled (and ForceMSAA off; restart).";
 		if (sec != "Shaders.WorldSurface.Status" && NumericSetting("Shaders.WorldSurface.Status", "Enabled") == 0.0f)
 			return "Only used while WorldSurface is enabled.";
 		if (sec != "Shaders.WorldSurface.Main" && sec != "Shaders.WorldSurface.Status" &&
@@ -558,12 +538,11 @@ static const char* InactiveReason(const char* section, const char* key) {
 	if (sec == "Shaders.ShadowsInteriors.Main" && is({ "Darkness" }) &&
 		NumericSetting("Shaders.ShadowsInteriors.Forward", "Enabled") != 0.0f && NumericSetting("Shaders.ShadowsInteriors.Forward", "KeepDarkening") == 0.0f)
 		return "Not used while Forward lamp shadows are on with KeepDarkening off: lamps shadow their own light directly.";
-	if (sec == "Shaders.ShadowsInteriors.Forward" && is({ "ShadowContrast" }) &&
-		(NumericSetting("Main.Main.Quality", "DeferredRenderer") >= 1.0f || NumericSetting("Main.Main.Quality", "GBufferV2") != 0.0f))
+	if (sec == "Shaders.ShadowsInteriors.Forward" && is({ "ShadowContrast" }))
 		return "Not used while the deferred renderer is active (deferred lighting computes physical lamp shadows directly).";
 
 	// PBR SmithCorrelated is not read by DeferredRenderer mode 2
-	if (sec == "Shaders.PBR.Main" && is({ "SmithCorrelated" }) && NumericSetting("Main.Main.Quality", "DeferredRenderer") >= 2.0f)
+	if (sec == "Shaders.PBR.Main" && is({ "SmithCorrelated" }))
 		return "Not used in DeferredRenderer mode 2 (the deferred pass uses its own specular term).";
 
 	// Exposure Mode 0 vs Mode 1 (Eye adaptation)
@@ -935,9 +914,7 @@ static const char* const kCascadeSizes[] = { "0 - 1024", "1 - 1536", "2 - 2048",
 static const char* const kOrthoSizes[] = { "0 - 128", "1 - 256", "2 - 512", "3 - 1024", "4 - 2048" };
 static const char* const kSmaaEdges[] = { "0 - Luma", "1 - Color", "2 - Depth", "3 - Luma + Depth" };
 static const char* const kOffOnRestart[] = { "0 - Off", "1 - On (needs a restart)" };	// fixes-a #11
-static const char* const kFsrVersions[] = { "0 - FSR 2.2.1", "1 - FSR 3.1" };	// UNOFFICIAL 2026-10-28 (core/UpscalerFsr31.cpp)
 static const char* const kPtLevels[] = { "0 - Quality", "1 - Balanced", "2 - Performance" };	// UNOFFICIAL 2026-11-11 PTRealtimeLevel
-static const char* const kDeferredModes[] = { "0 - Off (vanilla forward)", "1 - Indoors only", "2 - Full (outdoors + indoors)" };
 static const char* const kDeferredSkinSSSModes[] = { "0 - Off", "1 - Classic blur", "2 - Burley SSS (sharp highlights)" };
 static const char* const kMaterialSSSModes[] = { "0 - Off", "1 - In-pass scatter & transmission", "2 - In-pass + Burley screen scatter" };
 static const char* const kRealSunPathModes[] = { "0 - Vanilla overhead arc", "1 - Physical tilted arc", "2 - Seasonal calendar tilt" };
@@ -964,9 +941,7 @@ static const Choices* ChoicesFor(const char* section, const char* key) {
 		{ "Shaders.SMAA.Main.EdgeDetection", NAMES(kSmaaEdges) },
 		{ "Main.GunFX.Main.VolumetricSmokeTest", NAMES(kSmokeTests) },
 		{ "Shaders.PBR.Main.SmithCorrelated", NAMES(kOffOnRestart) },
-		{ "Shaders.TAA.FSR.Version", NAMES(kFsrVersions) },
 		{ "Main.Main.RayTracing.PTRealtimeLevel", NAMES(kPtLevels) },	// UNOFFICIAL 2026-11-11 (the Advanced view's row; the simple view: "Path tracing preset")
-		{ "Main.Main.Quality.DeferredRenderer", NAMES(kDeferredModes) },
 		{ "Main.Main.Quality.DeferredSkinSSS", NAMES(kDeferredSkinSSSModes) },
 		{ "Main.Main.Quality.MaterialSSS", NAMES(kMaterialSSSModes) },
 		{ "Shaders.ShadowsExteriors.Deferred.RealSunPath", NAMES(kRealSunPathModes) },
@@ -1337,7 +1312,7 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.PBR.Main", "ReflectivityExterior", "Shininess outdoors", nullptr, "How shiny and reflective surfaces look outdoors." },
 	{ "Shaders.PBR.Main", "ReflectivityInterior", "Shininess indoors", nullptr, "How shiny surfaces look indoors. Lower it if floors look too glossy." },
 	{ "Shaders.PBR.Main", "HairHighlight", "Hair shine", nullptr, "How bright the shine on hair is. 0 removes it." },
-	{ "Shaders.PBR.Main", "Roughness", "Surface roughness", nullptr, "Lower gives small bright highlights and clear reflections; higher gives a broad faint sheen." },
+	{ "Shaders.PBR.Main", "Roughness", "Surface roughness (non-RMAOS, day)", nullptr, "Scales roughness on non-_rmaos objects outdoors by day. _rmaos maps use RoughnessScale instead." },
 	{ "Shaders.PBR.Main", "AmbientScale", "Ambient light strength", nullptr, "How bright the general ambient light is on objects." },
 	{ "Shaders.PBR.Main", "LightingScale", "Sun and lamp light strength", nullptr, "How strong the sun and lamp light is on objects." },
 	{ "Shaders.PBR.Main", "Saturation", "Colour saturation", nullptr, "How vivid the colours of lit objects are." },
@@ -1367,15 +1342,15 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.PBR.NightRain", "SkylightingScale", "Sky colour in shade", nullptr, "Adds the colour of the sky to shaded areas. 0 turns it off." },
 	{ "Shaders.PBR.NightRain", "SkylightingSaturation", "Sky colour strength in shade", nullptr, "How vivid the sky colour in shaded areas is. 0 is grey, 1 matches the sky." },
 	// PBR (Interiors)
-	{ "Shaders.PBR.Interiors", "Roughness", "Surface roughness", nullptr, "Lower gives small bright highlights and clear reflections; higher gives a broad faint sheen." },
+	{ "Shaders.PBR.Interiors", "Roughness", "Surface roughness (non-RMAOS, indoors)", nullptr, "Scales roughness on non-_rmaos objects indoors. _rmaos maps use RoughnessScale instead." },
 	{ "Shaders.PBR.Interiors", "AmbientScale", "Ambient light strength", nullptr, "How bright the general ambient light is on objects." },
 	{ "Shaders.PBR.Interiors", "LightingScale", "Sun and lamp light strength", nullptr, "How strong the sun and lamp light is on objects." },
 	{ "Shaders.PBR.Interiors", "Saturation", "Colour saturation", nullptr, "How vivid the colours of lit objects are." },
 	// PBR (Metal)
-	{ "Shaders.PBR.Metal", "MetalOn", "Metal look", nullptr, "Gives metal objects a proper metal look, with reflections instead of plastic shine." },
-	{ "Shaders.PBR.Metal", "FirstPerson", "Metal on your weapon", nullptr, "How metal your weapon looks in first person." },
-	{ "Shaders.PBR.Metal", "World", "Metal look on the world", nullptr, "How metal things in the world look. Grey concrete or cloth can be mistaken for metal, so keep it moderate." },
-	{ "Shaders.PBR.Metal", "Roughness", "Metal finish (mirror to rough)", nullptr, "Finish of bare metal: low is a mirror, high is rough cast." },
+	{ "Shaders.PBR.Metal", "MetalOn", "Metal look", nullptr, "Enables metallic PBR shading (both _rmaos maps and non-_rmaos fallback heuristics)." },
+	{ "Shaders.PBR.Metal", "FirstPerson", "Metal on your weapon (fallback / gate)", nullptr, "Heuristic metal strength on non-_rmaos weapons. On _rmaos weapons with MetalFromMap on, acts as an on/off gate (>0)." },
+	{ "Shaders.PBR.Metal", "World", "Metal look on the world (fallback / gate)", nullptr, "Heuristic metal strength on non-_rmaos world objects. On _rmaos world objects with MetalFromMap on, acts as an on/off gate (>0)." },
+	{ "Shaders.PBR.Metal", "Roughness", "Fallback metal finish (non-RMAOS)", nullptr, "Finish of bare metal on objects without an _rmaos map (low = mirror, high = rough cast). Bypassed by _rmaos maps." },
 	{ "Shaders.PBR.Metal", "Reflections", "Metal reflection strength", nullptr, "How strongly metal reflects the sky and its surroundings." },
 	{ "Shaders.PBR.Metal", "CubeReflections", "Metal reflects its surroundings", nullptr, "Reflects what is really around it, such as the street, neon and lamps. Needs Reflections on." },
 	// PBR (EnvMaps)
@@ -1428,9 +1403,16 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.Reflections.Main", nullptr, "Quality",
 		"Low: Steps=12 | Medium: Steps=24 | High: Steps=40",
 		"Higher gives steadier reflections with fewer gaps, and costs more." },
-	{ "Shaders.Reflections.Main", "CubeMode", "Environment reflections mode", nullptr, "How the live surroundings cube fills: 0 (default) captures screen view only while Reflections is on, 1 keeps it updated for PBR metal/chrome too and fills unseen directions with sky and light grid, 2 also renders a staggered 3D world cubemap so weapons, metal, and glass reflect overhead and behind you." },
+	{ "Shaders.Reflections.Main", "CubeMode", "Environment reflections mode", nullptr, "How the live surroundings cube fills: 0 captures screen view only while Reflections is on, 1 keeps it updated for PBR metal/chrome too and fills unseen directions with sky and light grid, 2 (default) also renders a staggered 3D world cubemap so weapons, metal, and glass reflect overhead and behind you." },
+	// UNOFFICIAL 2026-11-27 cube-visible
+	{ "Shaders.Reflections.Main", "CubeStrength", "Environment reflections strength", nullptr, "How clearly the live surroundings cube shows in reflections: on your weapon, metal, chrome and glass, wet ground and puddles. 0 none, 1 as blurred as each surface's roughness, up to 2 sharper on smooth metal and mirrors. Never brighter than the surface's own reflectance, and dark where the surroundings are dark." },
 	{ "Shaders.Reflections.Main", "CubeResolution", "Environment cube resolution", nullptr, "Resolution per face for the live surroundings cubemap (64, 128, or 256). Higher gives sharper reflections on chrome and glossy surfaces. Needs a restart." },
 	{ "Shaders.Reflections.Main", "CubeDistance", "Environment cube distance", nullptr, "Maximum capture distance for 3D objects and point lamps in world-cubemap mode (mode 2)." },
+	// UNOFFICIAL 2026-11-27 cheaper world cube
+	{ "Shaders.Reflections.Main", "CubeFaceInterval", "Environment cube update interval", nullptr, "Frames between redraws of one face of the world cube (mode 2) once it is complete. Higher is cheaper while you move; reflections follow a little later." },
+	{ "Shaders.Reflections.Main", "CubeMoveThreshold", "Environment cube move distance", nullptr, "How far you move before the world cube (mode 2) is redrawn around you. Standing still in steady light it costs nothing. 0 redraws all the time." },
+	{ "Shaders.Reflections.Main", "CubeRefreshSeconds", "Environment cube refresh", nullptr, "Seconds after which a world-cube face is redrawn anyway, for doors and moving lamps. 0 never." },
+	{ "Shaders.Reflections.Main", "CubeLean", "Environment cube: big things only", nullptr, "Leaves people, creatures, clutter and small objects out of the world cube (mode 2). Cheaper; hardly visible in blurred reflections." },
 	// Sun shadows (Main)
 	{ "Shaders.ShadowsExteriors.Main", "Enabled", "Sun shadows", nullptr, "Turns the shadows cast by the sun on or off outdoors." },
 	{ "Shaders.ShadowsExteriors.Main", "Darkness", "Shadow darkness", nullptr, "How dark sun shadows are. Lower gives pale shadows, higher gives near-black ones." },
@@ -2062,9 +2044,6 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.TAA.Cutouts", "Enabled", "Smooth edges on leaves, grass and fences", nullptr, "Smooths the jagged edges of leaves, grass and fences. Needs a game restart." },
 	// TAA (FSR)
 	{ "Shaders.TAA.FSR", "Enabled", "FSR upscaler", nullptr, "AMD FSR upscaling and anti-aliasing. Needs the DXVK fork." },
-	{ "Shaders.TAA.FSR", nullptr, "FSR version",
-		"FSR 2.2: Version=0 | FSR 3.1: Version=1",
-		"FSR 3.1 is the newer version and usually looks cleaner." },
 	{ "Shaders.TAA.FSR", "RenderScale", "Upscaling quality", nullptr, "Draws the game at a lower resolution and scales it up. Lower runs faster but looks softer." },
 	{ "Shaders.TAA.FSR", "Sharpness", "Sharpness", nullptr, "Sharpens the upscaled picture. Zero is off." },
 	// TAA (DLSS)
@@ -2416,21 +2395,11 @@ struct SettingRow {
 	ImVec4 normalText;			// the style's text colour, for the tooltip
 	RestartNote restart;		// restart.text is null when there is no note
 	float controlW = 0.0f;		// the control's width (set by RenderSetting)
-	bool forced = false;		// the deferred renderer sets it to the value shown (SettingForce::Find): greyed, not editable
-	const char* note = nullptr;	// a hover note that does not grey the row (the deferred renderer's forced or floored value)
+	const char* note = nullptr;	// a hover note that does not grey the row (the linear gamma floor)
 };
 
-// UNOFFICIAL 2026-11-16 (owner: "grey out linear light when the deferred renderer is on"): what the deferred renderer does to a key
-// this session (core/SettingForce.h). Its Table keys read as a fixed value whatever the file says, so their rows show that value,
-// greyed; [Shaders.PBR.Linear] Gamma and NightGamma are only floored, so they stay editable with a note. The file is never written
-// with a forced value: the row draws a copy of the node, and a menu save writes the player's own values as before.
-static const char* const kForcedByRenderer = "Set by the deferred renderer ([Main.Main.Quality] DeferredRenderer) to the value shown. "
-	"Set that to 0 and restart to change this.";
-static bool ForcedByRenderer(const char* section, const char* key, int& value) {
-	return SettingForce::Mode() > 0 && SettingForce::Find(section, key, value);
-}
 static bool LinearGammaFloored(const char* section, const char* key, bool& night) {
-	if (SettingForce::Mode() <= 0 || strcmp(section, "Shaders.PBR.Linear")) return false;
+	if (strcmp(section, "Shaders.PBR.Linear")) return false;
 	night = !strcmp(key, "NightGamma");
 	return night || !strcmp(key, "Gamma");
 }
@@ -2631,25 +2600,14 @@ static void RenderSetting(SettingManager::Configuration::ConfigNode& stored, boo
 	// The session's first value and "changed" come from the player's own value (stored), never from a forced one.
 	const std::string& atOpen = SessionValue(stored.Section, stored.Key, stored.Value);
 	const bool changed = atOpen != stored.Value;
-	// UNOFFICIAL 2026-11-16: a key the deferred renderer keeps at a value is drawn from a copy holding that value (greyed below)
-	int forcedValue = 0;
-	const bool forced = ForcedByRenderer(stored.Section, stored.Key, forcedValue);
-	SettingManager::Configuration::ConfigNode shown;
-	if (forced) {
-		shown = stored;
-		if (stored.Type == NodeType::Float) sprintf_s(shown.Value, "%d.0", forcedValue);
-		else sprintf_s(shown.Value, "%d", forcedValue);
-	}
-	SettingManager::Configuration::ConfigNode& node = forced ? shown : stored;
+	SettingManager::Configuration::ConfigNode& node = stored;
 
 	const bool inert = IsInertSetting(node.Section, node.Key);
 	SettingRow row{ node, atOpen, changed, node.MaxQuality, inert,
-		inert || forced ? nullptr : InactiveReason(node.Section, node.Key), ImGui::GetStyleColorVec4(ImGuiCol_Text) };
+		inert ? nullptr : InactiveReason(node.Section, node.Key), ImGui::GetStyleColorVec4(ImGuiCol_Text) };
 	FindRestartNote(node.Section, node.Key, row.restart);
-	row.forced = forced;
 	bool night = false;
-	if (forced) row.note = kForcedByRenderer;
-	else if (LinearGammaFloored(node.Section, node.Key, night)) row.note = LinearGammaNote(night);
+	if (LinearGammaFloored(node.Section, node.Key, night)) row.note = LinearGammaNote(night);
 
 	if (row.inert) ImGui::BeginDisabled();
 	int tints = 0;
@@ -2657,14 +2615,14 @@ static void RenderSetting(SettingManager::Configuration::ConfigNode& stored, boo
 		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.45f, 1.0f));
 		tints++;
 	}
-	if (row.why || row.forced) {
+	if (row.why) {
 		ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
 		tints++;
 	}
 
 	row.controlW = MenuWidgets::RowBegin(labelOverride ? labelOverride : MenuKeyLabel(node.Section, node.Key), TrailingWidth(row, isShader),
 		UnsavedSettings::Key(stored.Section, stored.Key));	// 2026-11-25 (unsaved marks)
-	const bool controlDisabled = row.forced || (!strcmp(node.Section, "Shaders.VolumetricClouds.Main") && !strcmp(node.Key, "Shadows") && row.why != nullptr);
+	const bool controlDisabled = !strcmp(node.Section, "Shaders.VolumetricClouds.Main") && !strcmp(node.Key, "Shadows") && row.why != nullptr;
 	// A forced / overridden row is disabled after its name, so hovering the name still shows the note (ImGui does not hover disabled items)
 	if (controlDisabled) ImGui::BeginDisabled();
 	bool overControl;

@@ -1,5 +1,6 @@
 #include "WetWorld.h"
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
+#include "../../core/RenderRect.h"	// UNOFFICIAL 2026-11-27 RenderScale v2
 #include "../CoverMap/CoverMap.h"	// UNOFFICIAL 2026-10-27 Persistent wetness
 #include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-11-12 PuddlesLandOnly (TESR_MaterialBuffer's classes)
 #include "../../core/RainState.h"	// UNOFFICIAL 2026-11-12 RainStateGuard
@@ -110,37 +111,12 @@ void WetWorldEffect::RegisterTextures() {
 	TheTextureManager->InitTexture("NVR_WetWorldCover", &coverTexture, &coverSurface, 1, 1, D3DFMT_A8R8G8B8);
 }
 
-// UNOFFICIAL HudDrops: the cover test, once a frame while it rains outdoors (after the ortho map is drawn). The previous
-// test's answer is read first if it is in; a new one is issued only once it is.
-void WetWorldEffect::RenderCoverTest(IDirect3DDevice9* Device) {
-	if (!Enabled || !Effect || !coverSurface) return;
-	if (!coverQuery && FAILED(Device->CreateQuery(D3DQUERYTYPE_OCCLUSION, &coverQuery))) { coverQuery = nullptr; return; }
-	if (coverPending) {
-		DWORD pixels = 0;
-		if (coverQuery->GetData(&pixels, sizeof(pixels), 0) != S_OK) return;	// not in yet
-		covered = pixels > 0;
-		coverPending = false;
-	}
-	DWORD zEnable = 0, zWrite = 0;
-	Device->GetRenderState(D3DRS_ZENABLE, &zEnable);
-	Device->GetRenderState(D3DRS_ZWRITEENABLE, &zWrite);
-	Device->SetRenderState(D3DRS_ZENABLE, FALSE);
-	Device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
-	coverQuery->Issue(D3DISSUE_BEGIN);
-	Device->SetRenderTarget(0, coverSurface);
-	Render(Device, coverSurface, coverSurface, 1, false, nullptr);
-	coverQuery->Issue(D3DISSUE_END);
-	coverPending = true;
-	Device->SetRenderState(D3DRS_ZENABLE, zEnable);
-	Device->SetRenderState(D3DRS_ZWRITEENABLE, zWrite);
-}
-
 bool WetWorldEffect::ShouldRender() {
 	// UNOFFICIAL 2026-10-27 Persistent (CoverMap.h): also while the cover map may still hold wet spots (false with Persistent off)
 	return (Constants.Data.x || Constants.Data.z || (TheCoverMap && TheCoverMap->WetActive())) && TheShaderManager->GameState.isExterior && !TheShaderManager->GameState.isUnderwater;
 };
 
-// UNOFFICIAL 2026-10-25 (NVR DXVK): the constants block of WetWorldCommon.glsl (std140, 1376 bytes). Each member is the registers
+// UNOFFICIAL 2026-10-25 (NVR DXVK): the constants block of WetWorldCommon.glsl (std140, 1392 bytes). Each member is the registers
 // the D3D9 path uploads (a matrix is its four registers, the same bytes as the GLSL mat4's columns).
 struct WetWorldUniforms {
 	D3DXVECTOR4 shadowToLight[4];		// TESR_ShadowCameraToLightTransformOrtho
@@ -169,8 +145,9 @@ struct WetWorldUniforms {
 	D3DXVECTOR4 lightPosition[12];		// TESR_LightPosition
 	D3DXVECTOR4 shadowLightPosition[12];	// TESR_ShadowLightPosition
 	D3DXVECTOR4 lightColor[24];			// TESR_LightColor
+	D3DXVECTOR4 renderScale;			// TESR_RenderScale (xy = Scale, zw = 1 / Scale)
 };
-static_assert(sizeof(WetWorldUniforms) == 1376, "WetWorldUniforms must match the std140 block");
+static_assert(sizeof(WetWorldUniforms) == 1392, "WetWorldUniforms must match the std140 block");
 
 // The push block of both passes (32 bytes): the four sampler heap indices (filled in by the extension at offsets 0, 4, 8, 12), then
 // the mode: the map pass's passIndex (0 WetMap, 1 and 2 the blurs), or the wet pass's bits (1 fast, 2 fixTrace).
@@ -295,6 +272,9 @@ bool WetWorldEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 		&& WetCopyConstant(uniforms.shadowLightPosition, "TESR_ShadowLightPosition", 12)
 		&& WetCopyConstant(uniforms.lightColor, "TESR_LightColor", 24);
 	if (!copied) return false;
+	uniforms.renderScale = RenderRect::Active()
+		? D3DXVECTOR4(RenderRect::ScaleX, RenderRect::ScaleY, 1.0f / RenderRect::ScaleX, 1.0f / RenderRect::ScaleY)
+		: D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
 	// UNOFFICIAL 2026-11-12 PuddlesLandOnly: the D3D9 pass tests TESR_MaterialBufferData itself; here the mode (y, without
 	// WeaponRainHandOff's 4) is sent as 0 while the buffer holds nothing this frame, and the depth texture stands in for it (not read).
 	IDirect3DBaseTexture9* material = CapturedNormals::MaterialTexture;

@@ -219,28 +219,20 @@
 #if defined(LAMPS_DEFERRED) && LAMPS_DEFERRED
     #include "includes/DeferredPixel.hlsl"	// UNOFFICIAL 2026-11-14 DeferredSun: the deferred records' codes in COLOR1.a (values 1, 2, 3: see the outputs)
 #endif
-// UNOFFICIAL 2026-11-14 full deferred renderer, phase 2 (docs/next/FD-INTERIORS-RESULTS.md; [Main.Main.Quality] DeferredRenderer 1, core/
-// DeferredRenderer.h): LAMPS_DEFERRED 3 = the lamps-deferred record for EVERY lit family (not only the many-lamp one that value 1 serves):
-// every lamp of the draw compiled out (the slot colours a compile-time 0 and their shadow lookups gone), the sun / cell light slot kept.
-// With 2 and 3 the record feeds the light passes: COLOR1.a = 1 - fog and the deferred mark in COLOR2.g / .a (the recorded normal,
-// octahedral, a in 1.01..1.99: what Shaders/DeferredLamps.hlsl lights). Value 1 is unchanged (the DeferredLamps records). Without it (every
-// record today) nothing below changes.
-#if defined(LAMPS_DEFERRED) && (LAMPS_DEFERRED == 3 || LAMPS_DEFERRED == 4 || LAMPS_DEFERRED == 5)
-    #define NVR_LAMPS_OUT
-#endif
-#if defined(LAMPS_DEFERRED) && LAMPS_DEFERRED >= 2
-    #define NVR_NO_LAMPS		// no lamp in the record (2 and 3)
-    #define NVR_GBUFFER_LIT		// the light passes light this record's pixels (2 and 3; 4 / 5 write the same codes, read by nobody: no G-buffer is bound after the list)
-#endif
 // UNOFFICIAL 2026-11-15 DeferredTransparents (core/DeferredTransparents.h, Includes/ForwardPlus.hlsl): LAMPS_DEFERRED 4 = the forward+ record
-// of a blended draw (drawn after the main list, so no light pass reaches it): the game's lamps compiled out as in 3, the sun / cell light slot
+// of a blended draw (drawn after the main list, so no light pass reaches it): the game's lamps compiled out, the sun / cell light slot
 // kept, and every lamp of the pixel's froxel from the frame's lamp table added (FPLampSum), shadowed from the atlas; 5 = the same unshadowed.
-// No G-buffer mark (nothing lights it later). Without it (every record today) nothing below changes.
+// No G-buffer mark (nothing lights it later).
 #if defined(LAMPS_DEFERRED) && (LAMPS_DEFERRED == 4 || LAMPS_DEFERRED == 5)
+    #define NVR_LAMPS_OUT
     #define NVR_FORWARD_PLUS
     #ifndef POINT_SHADOW_ATLAS
         #define POINT_SHADOW_ATLAS 1	// the table lamps' shadows are atlas tiles (native's other records keep the cube maps)
     #endif
+#endif
+#if defined(LAMPS_DEFERRED) && LAMPS_DEFERRED >= 2
+    #define NVR_NO_LAMPS		// no lamp in the record (2 and 4/5)
+    #define NVR_GBUFFER_LIT		// the light passes light this record's pixels (2; 4 / 5 write the same codes, read by nobody: no G-buffer is bound after the list)
 #endif
 // The slots that hold the sun / cell light in this shader (kept by LAMPS_DEFERRED 3): none where light 0 is a lamp (the extra-lamp and point
 // passes, and the many-lamp OPT shaders, whose slot 0 is a lamp: Includes/ManyLightsDirect.hlsl).

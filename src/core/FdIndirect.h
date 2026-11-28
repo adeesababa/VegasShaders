@@ -17,15 +17,14 @@
 // The fourth phase-6 item (RT sun shadows as DeferredSun's visibility term) is a shader define of the sun pass: DeferredRtSunFirst
 // (core/DeferredSun.h, DeferredSun.hlsl DS_RT_SUN_FIRST).
 #include "CapturedNormals.h"
-#include "SettingForce.h"
 #include "FdIndirectShaders.h"
 #include "RtAmbient.h"
 
 namespace FdIndirect {
 	inline const char* kSection = "Main.Main.Quality";
 
-	// The renderer on at startup, G-buffer v2 compiled in, the captured targets alive.
-	inline bool Base() { return SettingForce::Mode() > 0 && CapturedNormals::V2CompiledIn() && !CapturedNormals::Failed; }
+	// G-buffer v2 compiled in, the captured targets alive.
+	inline bool Base() { return CapturedNormals::V2CompiledIn() && !CapturedNormals::Failed; }
 	inline bool Key(const char* key) { return TheSettingManager->GetSettingI(kSection, key) != 0; }
 	inline bool MaterialNow() { return CapturedNormals::MaterialTexture && CapturedNormals::MaterialData.x > 0.5f; }
 	inline bool ReflectionsOn() { return Base() && MaterialNow() && Key("DeferredReflections"); }

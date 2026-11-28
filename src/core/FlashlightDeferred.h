@@ -47,7 +47,7 @@ namespace FlashlightDeferred {
 		int next = 4;
 		if (LightFreeRecords::WantedAtStartup()) overrides[next++] = { "FD_LIGHT_FREE", "1" };
 		// UNOFFICIAL 2026-11-14 foliage (core/DeferredFoliage.h): a leaf / grass deferred record's COLOR2.b is its sun weight (2 + w): taken as rough
-		if (TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredFoliage") != 0 && CapturedNormals::V2CompiledIn()) overrides[next++] = { "FD_FOLIAGE", "1" };
+		if (CapturedNormals::V2CompiledIn()) overrides[next++] = { "FD_FOLIAGE", "1" };
 		ShaderTemplate tmpl = {};
 		tmpl.Name = "FlashlightDeferred";
 		Pass = (ShaderRecordPixel*)ShaderRecord::LoadShader("FlashlightDeferred.pso", NULL, tmpl, "Deferred\\Flashlight\\", overrides);
@@ -214,7 +214,7 @@ namespace FlashlightDeferred {
 	// first-person eye minus kLightingOffset minus the world camera (a world-camera-relative point - shift = the same point relative to the
 	// first-person eye, where the view model's G-buffer distances start). No depth test (the mark selects the view model's pixels) and no shadow
 	// map (the player's own body and weapon never cast in it; the map is the world camera's).
-	struct ViewModelRun { bool on = false; float rows[3][4] = {}; D3DXVECTOR3 shift = D3DXVECTOR3(0.0f, 0.0f, 0.0f); };
+	struct ViewModelRun { bool on = false; float rows[3][4] = {}; D3DXVECTOR3 shift = D3DXVECTOR3(0.0f, 0.0f, 0.0f); IDirect3DTexture9* depthTex = nullptr; };
 	inline ViewModelRun Vm;
 	inline unsigned long long StatViewModel = 0;
 
@@ -232,8 +232,9 @@ namespace FlashlightDeferred {
 	inline bool TryApplyCompute(IDirect3DDevice9* d, IDirect3DSurface9* target, const D3DSURFACE_DESC& t, const D3DXVECTOR4 params[3]) {
 		if (ComputeFailed || t.Format != D3DFMT_A16B16G16R16F || t.MultiSampleType != D3DMULTISAMPLE_NONE ||
 			!DxvkCompute::PassesOnRect() || !DxvkCompute::Available() || DxvkCompute::KeptOnD3D9("FlashlightDeferred")) return false;
-		const bool depthIsLinear = DeferredDepth::LinearReady();
-		IDirect3DTexture9* depthTex = depthIsLinear ? DeferredDepth::LinearTexture : (DeferredDepth::Ready() ? DeferredDepth::Texture : nullptr);
+		const bool depthIsLinear = !Vm.on && DeferredDepth::LinearReady();
+		IDirect3DTexture9* depthTex = Vm.on ? Vm.depthTex :
+			(depthIsLinear ? DeferredDepth::LinearTexture : (DeferredDepth::Ready() ? DeferredDepth::Texture : nullptr));
 		if (!depthTex) return false;
 		if (!ComputePipeline || !ComputeUbo) {
 			if (ComputeTried) return false;
@@ -274,11 +275,11 @@ namespace FlashlightDeferred {
 		if (vp.Width == 0 || vp.Height == 0) return false;
 
 		FlashlightEffect* f = TheShaderManager->Effects.Flashlight;
-		IDirect3DTexture9* map = ShadowMap();
+		IDirect3DTexture9* map = Vm.on ? nullptr : ShadowMap();
 		const bool shadowed = map != nullptr;
 		D3DSURFACE_DESC mapDesc = {};
 		if (shadowed) map->GetLevelDesc(0, &mapDesc);
-		IDirect3DBaseTexture9* cookieTexture = f->Deferred.Cookie > 0.0f ? CookieTexture() : nullptr;
+		IDirect3DBaseTexture9* cookieTexture = (!Vm.on && f->Deferred.Cookie > 0.0f) ? CookieTexture() : nullptr;
 		const float cookieStrength = cookieTexture ? f->Deferred.Cookie : 0.0f;
 
 		const float gamma = LinearScene::Gamma > 1.0f ? LinearScene::Gamma : 2.2f;
@@ -295,15 +296,34 @@ namespace FlashlightDeferred {
 		cb.viewport[0] = (int)vp.X; cb.viewport[1] = (int)vp.Y; cb.viewport[2] = (int)vp.Width; cb.viewport[3] = (int)vp.Height;
 		cb.flDepth[0] = proj._33; cb.flDepth[1] = proj._43; cb.flDepth[2] = 0.01f; cb.flDepth[3] = depthPull;
 		cb.flView[0] = 1.0f / (float)vp.Width; cb.flView[1] = 1.0f / (float)vp.Height; cb.flView[2] = (float)vp.X; cb.flView[3] = (float)vp.Y;
-		cb.flRight[0] = iv._11; cb.flRight[1] = iv._12; cb.flRight[2] = iv._13; cb.flRight[3] = tanX;
-		cb.flUp[0] = iv._21; cb.flUp[1] = iv._22; cb.flUp[2] = iv._23; cb.flUp[3] = tanY;
-		cb.flFwd[0] = iv._31 - iv._11 * jx - iv._21 * jy; cb.flFwd[1] = iv._32 - iv._12 * jx - iv._22 * jy; cb.flFwd[2] = iv._33 - iv._13 * jx - iv._23 * jy; cb.flFwd[3] = 1.0f;
-		memcpy(cb.flPos, &params[0], 16);
-		memcpy(cb.flDir, &params[1], 16);
-		memcpy(cb.flColor, &params[2], 16);
+		if (Vm.on) {
+			memcpy(cb.flRight, Vm.rows[0], 16);
+			memcpy(cb.flUp, Vm.rows[1], 16);
+			memcpy(cb.flFwd, Vm.rows[2], 16);
+			cb.flFwd[3] = 1.0f;
+			const bool fromEye = TheSettingManager->GetSettingI("Shaders.Flashlight.Deferred", "ViewModelFromEye") != 0;
+			cb.flPos[0] = fromEye ? -16.0f * Vm.rows[2][0] : params[0].x - Vm.shift.x;
+			cb.flPos[1] = fromEye ? -16.0f * Vm.rows[2][1] : params[0].y - Vm.shift.y;
+			cb.flPos[2] = fromEye ? -16.0f * Vm.rows[2][2] : params[0].z - Vm.shift.z;
+			cb.flPos[3] = params[0].w;
+			memcpy(cb.flDir, &params[1], 16);
+			memcpy(cb.flColor, &params[2], 16);
+			cb.flDir[3] = -1.0f;
+			cb.flColor[3] = -0.999f;
+		} else {
+			cb.flRight[0] = iv._11; cb.flRight[1] = iv._12; cb.flRight[2] = iv._13; cb.flRight[3] = tanX;
+			cb.flUp[0] = iv._21; cb.flUp[1] = iv._22; cb.flUp[2] = iv._23; cb.flUp[3] = tanY;
+			cb.flFwd[0] = iv._31 - iv._11 * jx - iv._21 * jy; cb.flFwd[1] = iv._32 - iv._12 * jx - iv._22 * jy; cb.flFwd[2] = iv._33 - iv._13 * jx - iv._23 * jy; cb.flFwd[3] = 1.0f;
+			memcpy(cb.flPos, &params[0], 16);
+			memcpy(cb.flDir, &params[1], 16);
+			memcpy(cb.flColor, &params[2], 16);
+		}
 		cb.flGamma[0] = f->Settings.HotspotLimit; cb.flGamma[1] = f->Settings.softEdges ? 1.0f : 0.0f; cb.flGamma[2] = gamma; cb.flGamma[3] = 1.0f / gamma;
 		cb.flShadow[0] = shadowed ? 1.0f : 0.0f; cb.flShadow[1] = mapDesc.Width ? 1.0f / (float)mapDesc.Width : 0.0f; cb.flShadow[2] = f->Deferred.ShadowBias; cb.flShadow[3] = SoftnessTexels(mapDesc.Width);
-		cb.flLook[0] = cookieStrength; cb.flLook[1] = (float)f->Deferred.DebugView; cb.flLook[2] = f->Deferred.Falloff; cb.flLook[3] = f->Settings.NearFade;
+		cb.flLook[0] = cookieStrength;
+		cb.flLook[1] = Vm.on ? 0.0f : (float)f->Deferred.DebugView;
+		cb.flLook[2] = f->Deferred.Falloff;
+		cb.flLook[3] = Vm.on ? 0.0f : f->Settings.NearFade;
 		memcpy(cb.flLightViewProj, &TheShaderManager->SpotLightWorldToLightMatrix[0], sizeof(cb.flLightViewProj));
 		cb.flModel[0] = TheSettingManager->GetSettingI("Shaders.Flashlight.Deferred", "SpecularBit") != 0 ? 1.0f : 0.0f;
 		if (TheShaderManager && TheShaderManager->Shaders.PBR) {
@@ -323,7 +343,7 @@ namespace FlashlightDeferred {
 
 		UINT flags = 0;
 		if (CapturedNormals::V2CompiledIn()) flags |= 1u << 0u;
-		if (TheSettingManager->GetSettingI("Shaders.PBR.Linear", "Enabled") != 0) flags |= 1u << 1u;
+		flags |= 1u << 1u;	// Shaders.PBR.Linear.Enabled locked on for DeferredRenderer = 2
 		if (depthIsLinear) flags |= 1u << 2u;
 		if ((1.0 - NiDX9Renderer::GetSingleton()->m_fZClear) != 0.0) flags |= 1u << 3u;
 		if (TheSettingManager->GetSettingI("Shaders.PBR.LampFalloff", "Exterior") != 0 ||
@@ -333,6 +353,7 @@ namespace FlashlightDeferred {
 		if (smith == 1) flags |= 1u << 6u;
 		else if (smith == 2) flags |= 1u << 7u;
 		else flags |= 1u << 8u;
+		if (Vm.on) flags |= 1u << 9u;
 
 		ID3D9NvrExt* ext = DxvkCompute::Extension();
 		if (FAILED(ext->UpdateBuffer(ComputeUbo, 0, sizeof(cb), &cb))) return false;
@@ -362,8 +383,8 @@ namespace FlashlightDeferred {
 		dispatch.GroupsY = (vp.Height + 7u) / 8u;
 		dispatch.GroupsZ = 1u;
 
-		static GpuTimer computeTimer("Deferred flashlight (compute)");
-		GpuProfileScope gpu(computeTimer, d);
+		static GpuTimer computeTimer("Deferred flashlight (compute)"), vmComputeTimer("Deferred flashlight (first person, compute)");
+		GpuProfileScope gpu(Vm.on ? vmComputeTimer : computeTimer, d);
 		DxvkCompute::PreLoad(bindings, _countof(bindings));
 		d->SetRenderTarget(0, ComputeRt0DummySurf);
 		const HRESULT hr = ext->Dispatch(&dispatch);
@@ -374,8 +395,11 @@ namespace FlashlightDeferred {
 			Logger::Log("[WARNING] UNOFFICIAL FlashlightDeferred: compute dispatch failed (%08lX); falling back to D3D9 pass", hr);
 			return false;
 		}
-		StatPasses++;
-		DrewFrame = (unsigned)TheFrameRateManager->FrameNumber;
+		if (Vm.on) StatViewModel++;
+		else {
+			StatPasses++;
+			DrewFrame = (unsigned)TheFrameRateManager->FrameNumber;
+		}
 		return true;
 	}
 
@@ -383,13 +407,6 @@ namespace FlashlightDeferred {
 		FlashlightEffect* f = TheShaderManager->Effects.Flashlight;
 		if (!Usable() || !f->spotLightActive || !f->SpotLight) return;
 		if (!CapturedNormals::Drawn || !CapturedNormals::AlbedoTexture || !CapturedNormals::MaterialTexture || !CapturedNormals::Texture) {
-			// UNOFFICIAL 2026-11-06 (tester log, native D3D9 + iMultiSample 4: Cookie 0 -> 1 changed nothing, "0 objects in the G-buffer"): say once
-			// why the beam has no shadow or cookie, so a log shows it.
-			static bool told = false;
-			if (!told && CapturedNormals::MsaaWarned) {
-				told = true;
-				Logger::Log("[WARNING] UNOFFICIAL FlashlightDeferred: the flashlight's light pass needs the G-buffer, which the game's MSAA turns off on native D3D9 (see the CapturedNormals warning): the beam lights through the game lamp only, with no shadow and no cookie. For the full beam: Vegas Shaders DXVK, or iMultiSample=0 in the game's INIs");
-			}
 			StatSkipped++; return;
 		}
 		D3DXVECTOR4 params[3];
@@ -399,7 +416,15 @@ namespace FlashlightDeferred {
 		if (!target) { StatSkipped++; return; }
 		D3DSURFACE_DESC t = {};
 		target->GetDesc(&t);
-		if (!Vm.on && TryApplyCompute(d, target, t, params)) { target->Release(); return; }
+		if (TryApplyCompute(d, target, t, params)) { target->Release(); return; }
+		if (!Vm.on) {
+			static bool d3Logged = false;
+			if (!d3Logged) {
+				d3Logged = true;
+				Logger::Log("[D3-FALLBACK] FlashlightDeferred fell back to D3D9 (computeFailed=%d, fmt=%u)",
+					ComputeFailed ? 1 : 0, (unsigned)t.Format);
+			}
+		}
 		if (!EnsurePass()) { target->Release(); StatSkipped++; return; }
 		const bool linear = Vm.on || LinearScene::Linear;	// (the view model's light target is linear)
 		const int debugView = Vm.on ? 0 : f->Deferred.DebugView;

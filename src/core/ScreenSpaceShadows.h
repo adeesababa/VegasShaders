@@ -32,7 +32,7 @@ namespace ScreenSpaceShadows {
 
 	// Startup (TextureManager::Initialize, DeferredDepth::ReadStartup): the switch and the deferred renderer that reads the result
 	inline bool WantedAtStart() {
-		return TheSettingManager->GetSettingI(kSection, "Enabled") != 0 && TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredRenderer") > 0;
+		return TheSettingManager->GetSettingI(kSection, "Enabled") != 0;
 	}
 
 	inline IDirect3DTexture9* Texture = nullptr;	// TESR_ScreenSpaceShadows (G16R16F, r: 1 lit .. 0 shadowed)

@@ -105,7 +105,7 @@ namespace RtLampShadows {
 			gSettings.capsulesEnabled = TheSettingManager->GetSettingI(kScreenSection, "Enabled") != 0;
 			gSettings.capsules = TheSettingManager->GetSettingI(kScreenSection, "Capsules") != 0;
 			gSettings.capsulesContact = TheSettingManager->GetSettingI(kScreenSection, "Contact") != 0;
-			gSettings.forwardEnabled = TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Forward", "Enabled") != 0;
+			gSettings.forwardEnabled = true;	// Shaders.ShadowsInteriors.Forward.Enabled locked on for DeferredRenderer = 2
 			gSettings.manyLightsMax = TheSettingManager->GetSettingI(kSection, "ManyLightsMax");
 			gSettings.maxLamps = TheSettingManager->GetSettingI(kSection, "MaxLamps");
 			gSettings.debugView = TheSettingManager->GetSettingI(kSection, "DebugView");

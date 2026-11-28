@@ -38,8 +38,7 @@ namespace DeferredSkin {
 	inline bool WantedAtStartup() {
 		if (Wanted < 0) {
 			const bool key = TheSettingManager->GetSettingI(kSection, "DeferredSkin") != 0;
-			Wanted = key && DeferredRenderer::Mode() > 0 && CapturedNormals::V2CompiledIn();
-			if (key && !Wanted) Logger::Log("[WARNING] UNOFFICIAL DeferredSkin: needs [Main.Main.Quality] DeferredRenderer 1 or 2 and GBufferV2 at startup: the skin stays forward");
+			Wanted = key && CapturedNormals::V2CompiledIn();
 		}
 		return Wanted != 0;
 	}
@@ -69,26 +68,24 @@ namespace DeferredSkin {
 	}
 
 	inline bool IsOpaqueDeferredManaged(const char* name, const ShaderTemplate& tmpl) {
-		return DeferredRenderer::Mode() >= 2 && LightFreeRecords::WantedAtStartup() &&
+		return LightFreeRecords::WantedAtStartup() &&
 			(LightFreeRecords::Eligible(name, tmpl) || (WantedAtStartup() && Eligible(name, tmpl)));
 	}
 	inline const D3DXMACRO* LeanFallbackOverrides() {
 		static const D3DXMACRO overrides[] = {
-			{ "FORWARD_SHADOWS", "0" }, { "SUN_CROSSFADE", "0" }, { "CONTACT_HARDENING", "0" },
-			{ "FORWARD_CLOUD_SHADOWS", "0" }, { "PUDDLES_LEAN", "1" }, { "PUDDLES_NOMAP", "1" }, { NULL, NULL }
+			{ "SUN_CROSSFADE", "0" }, { "CONTACT_HARDENING", "0" },
+			{ "PUDDLES_LEAN", "1" }, { "PUDDLES_NOMAP", "1" }, { NULL, NULL }
 		};
 		return overrides;
 	}
 
 	// ShaderManager::LoadShader (pixel), after the shader's own records: the deferred skin record, compiled now (at load, never on the render
-	// thread), from the default overrides + LAMPS_DEFERRED (2 in mode 2, 3 in mode 1: mode 1 is live indoors only, where the default record's
-	// sun code is the interior one: GetSunShadowMaps returns 1 indoors by its own gate). Both light passes are made with it.
+	// thread), from the default overrides + LAMPS_DEFERRED 2. Both light passes are made with it.
 	inline void Load(NiD3DPixelShaderEx* shader, const char* name, ShaderTemplate tmpl) {
-		const bool standalone = DeferredRenderer::Mode() >= 2 && LightFreeRecords::Standalone() && shader && shader->ShaderHandleBackup != nullptr;
+		const bool standalone = LightFreeRecords::Standalone() && shader && shader->ShaderHandleBackup != nullptr;
 		if (!shader || (!shader->ShaderProg[ShaderRecordType::Default] && !standalone) || !Eligible(name, tmpl) || !WantedAtStartup() || Records.count(shader)) return;
 		static const D3DXMACRO mode2[2] = { { "LAMPS_DEFERRED", "2" }, { NULL, NULL } };
-		static const D3DXMACRO mode1[2] = { { "LAMPS_DEFERRED", "3" }, { NULL, NULL } };
-		ShaderRecordPixel* record = (ShaderRecordPixel*)ShaderRecord::LoadShader(name, NULL, tmpl, kCache, DeferredRenderer::Mode() >= 2 ? mode2 : mode1);
+		ShaderRecordPixel* record = (ShaderRecordPixel*)ShaderRecord::LoadShader(name, NULL, tmpl, kCache, mode2);
 		if (!record || !record->ShaderHandle) {
 			Refused++;
 			Logger::Log("[WARNING] UNOFFICIAL DeferredSkin record %s: did not load (see the device's line above): it stays forward; %u loaded, %u not so far", name, Loaded, Refused);
@@ -112,7 +109,7 @@ namespace DeferredSkin {
 		}
 		if (outdoor && outdoor->ShaderHandle) DeferredLamps::ForwardOfOutdoor[record->ShaderHandle] = outdoor->ShaderHandle;
 		// a lighting-free record's binds open DeferredSun's pass for the span (mode 2; DeferredSun::OnBind counts this set)
-		if (DeferredRenderer::Mode() >= 2) DeferredSun::FoliageHandles.insert(record->ShaderHandle);
+		DeferredSun::FoliageHandles.insert(record->ShaderHandle);
 		DeferredLamps::EnsurePass();
 		DeferredLamps::EnsureShadowShader();
 		if (!ComputeSssPreferred()) SssLoad();	// (2026-11-15 SSS v2: its passes at load, never on the render thread; skipped when Vulkan compute SSS handles it)
@@ -121,7 +118,7 @@ namespace DeferredSkin {
 			if (!loggedSkip) { loggedSkip = true; Logger::Log("UNOFFICIAL DeferredSkinSSS: skipping eager D3D9 SSS shader compile (Vulkan compute path active)"); }
 		}
 		Loaded++;
-		Logger::Log("UNOFFICIAL DeferredSkin record %s: loaded (LAMPS_DEFERRED %s; %u loaded, %u not so far)", name, DeferredRenderer::Mode() >= 2 ? "2" : "3", Loaded, Refused);
+		Logger::Log("UNOFFICIAL DeferredSkin record %s: loaded (LAMPS_DEFERRED 2; %u loaded, %u not so far)", name, Loaded, Refused);
 	}
 
 	// Once a frame, lazily (the first Choose of a frame): live with the renderer, not under the path tracer.
@@ -150,7 +147,7 @@ namespace DeferredSkin {
 		if (found == Records.end()) return nullptr;
 		Refresh();
 		if (!Live || !CapturedNormals::InSpan || (CapturedNormals::VmSpan && !CapturedNormals::VmDeferred)) return nullptr;
-		if (exterior && (DeferredRenderer::Mode() < 2 || !DeferredRenderer::SunRuns())) return nullptr;
+		if (exterior && !DeferredRenderer::SunRuns()) return nullptr;
 		if (DeferredRenderer::BlendedNow) { StatBlended++; return nullptr; }
 		StatBinds++;
 		DrawnThisSpan = true;

@@ -97,7 +97,7 @@ vec4 BlurWetMap(vec2 uv, vec2 offsetMask) {
     vec3 coverage = centre.rgb * weightSum;
     for (int tap = -2; tap <= 2; tap++) {
         if (tap != 0) {
-            vec2 sampleUV = saturate(uv + blurStep * float(tap));
+            vec2 sampleUV = clampToRect(uv + blurStep * float(tap), c.reciprocalResolution.xy);
             float sampleDepth = readDepth(sampleUV);
             float depthWeight = 1.0 - smoothstep(depthTolerance * 0.5,
                 depthTolerance, abs(sampleDepth - centerDepth));
@@ -112,7 +112,8 @@ vec4 BlurWetMap(vec2 uv, vec2 offsetMask) {
 }
 
 void main() {
-    if (pc.passIndex == 0u) o_color = WetMap(vUV);
-    else if (pc.passIndex == 1u) o_color = BlurWetMap(vUV, vec2(1.0, 0.0));
-    else o_color = BlurWetMap(vUV, vec2(0.0, 1.0));
+    vec2 ruv = screenToRect(vUV);
+    if (pc.passIndex == 0u) o_color = WetMap(ruv);
+    else if (pc.passIndex == 1u) o_color = BlurWetMap(ruv, vec2(1.0, 0.0));
+    else o_color = BlurWetMap(ruv, vec2(0.0, 1.0));
 }

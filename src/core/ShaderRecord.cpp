@@ -7,7 +7,6 @@
 #include "DxvkCompute.h"	// UNOFFICIAL 2026-10-24 (NVR DXVK phase 2)
 #include "MixCheck.h"	// UNOFFICIAL 2026-10-30 NvrDxvkMixCheck
 #include <atomic>
-#include "ShaderWarmUp.h"
 #include "PointShadowForward.h"
 #include "ManyLamps.h"	// UNOFFICIAL 2026-10-27 ManyLampsOnePass
 #include "DeferredLamps.h"	// UNOFFICIAL 2026-10-31 DeferredLamps
@@ -494,18 +493,11 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	// effects/WetnessEffects/HudRaindrops.h, 2026-11-04 in place of Wet World's HudDrops): compiled in only when on at startup.
 	AppendDefine("HUD_RAIN_ON", TheSettingManager->GetSettingI("Shaders.WetnessEffects.HudRaindrops", "Enabled") ? "1" : "0");
 
-	// UNOFFICIAL linear lighting (Includes/LinearLight.hlsl: ObjectTemplate, TerrainTemplate): compiled in only when on at
-	// startup, so that otherwise those shaders are exactly what they were. Gamma stays live (PBRShaders::UpdateSettings).
-	AppendDefine("LINEAR_LIGHTING_ON", TheSettingManager->GetSettingI("Shaders.PBR.Linear", "Enabled") ? "1" : "0");
-	// UNOFFICIAL 2026-10-28 LinearScene (Includes/LinearLight.hlsl LinearSceneOut, core/LinearScene.h): compiled in only when on at startup
-	// with linear lighting, so that otherwise the four lit templates are exactly what they were.
-	AppendDefine("LINEAR_SCENE_ON", TheSettingManager->GetSettingI("Shaders.PBR.Linear", "Enabled") && TheSettingManager->GetSettingI("Shaders.PBR.Linear", "LinearScene") ? "1" : "0");
-	// UNOFFICIAL 2026-10-28 CapturedNormals (Shaders/Includes/CapturedNormals.hlsl, core/CapturedNormals.h): the four lit templates write their
-	// smooth vertex normal to COLOR3; compiled in only when a reader's switch is on at startup, so that otherwise they are exactly as before
-	// (defined only then: the define list, and so the shader cache's keys, stay as they were with it off).
-	// UNOFFICIAL 2026-10-29: 2 = with MaterialBuffer; 2026-10-31: 3 = with AlbedoBuffer too (COLOR1; docs/next/DEFERRED-RENDERING-PLAN.md rung A)
-	// UNOFFICIAL 2026-11-14: 4 = GBufferV2 too (the MaterialBuffer's layout v2: core/CapturedNormals.h V2CompiledIn; a new value, no new define)
-	if (CapturedNormals::CompiledIn()) AppendDefine("CAPTURED_NORMALS_ON", CapturedNormals::V2CompiledIn() ? "4" : CapturedNormals::AlbedoCompiledIn() ? "3" : CapturedNormals::MaterialCompiledIn() ? "2" : "1");
+	// UNOFFICIAL linear lighting (Includes/LinearLight.hlsl: ObjectTemplate, TerrainTemplate): permanently on for DeferredRenderer = 2.
+	AppendDefine("LINEAR_LIGHTING_ON", "1");
+	AppendDefine("LINEAR_SCENE_ON", "1");
+	// UNOFFICIAL 2026-10-28 CapturedNormals (Shaders/Includes/CapturedNormals.hlsl, core/CapturedNormals.h): permanently GBufferV2 (4).
+	AppendDefine("CAPTURED_NORMALS_ON", "4");
 	// UNOFFICIAL 2026-11-16 fd-batchE ([Main.Main.Quality] DeferredADFog, restart, default off; docs/next/FD-BATCH-E.md item 19): the light-only
 	// base pass (AD) sends the game's fog amount and its deferred records keep 1 - that fog (ObjectTemplate.hlsl / ParallaxTemplate.hlsl
 	// AD_FOG_KEEP_ON). Defined only when on, so the define lists (and the shader cache's keys) are as before with it off.
@@ -520,9 +512,9 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 		if (!sheen[0]) snprintf(sheen, sizeof(sheen), "%.3f", DeferredRenderer::SheenFloor);
 		AppendDefine("DEFERRED_SHEEN", sheen);
 	}
-	// UNOFFICIAL 2026-10-28 [Main.Main.Quality] CapturedNormals also gives the land and parallax templates their smooth vertex normal for
-	// the sun lookup and the sky ambient (TerrainTemplate / ParallaxTemplate CAPTURED_NORMALS_FORWARD), as SmoothObjectNormals did for objects.
-	if (CapturedNormals::MergeWanted()) AppendDefine("CAPTURED_NORMALS_FORWARD", "1");
+	// UNOFFICIAL 2026-10-28 CapturedNormals also gives the land and parallax templates their smooth vertex normal for
+	// the sun lookup and the sky ambient (TerrainTemplate / ParallaxTemplate CAPTURED_NORMALS_FORWARD).
+	AppendDefine("CAPTURED_NORMALS_FORWARD", "1");
 	// UNOFFICIAL 2026-11-12 (ptbump) CAPTURED_PT (core/CapturedNormals.h PtCodesCompiled / BumpCompiled; Includes/CapturedNormals.hlsl): the
 	// MaterialBuffer's two record codes that only the path tracer reads. 1 = the object / parallax shaders can code "no highlight on this
 	// mesh"; 2 = also the land shaders (up to 5 layers) write their normal-mapped normal ([Main.Main.Quality] CapturedBumpNormals,
@@ -966,7 +958,7 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 						// UNOFFICIAL 2026-10-28 CapturedNormals (core/CapturedNormals.h): the pixel shaders that write the normal target (COLOR3).
 						const char* capturedOn = lastDefinition(Template, "CAPTURED_NORMALS_ON");
 						const bool writes = capturedOn && (!strcmp(capturedOn, "1") || !strcmp(capturedOn, "2") || !strcmp(capturedOn, "3") || !strcmp(capturedOn, "4"));	// (3: 2026-10-31 AlbedoBuffer; 4: 2026-11-14 GBufferV2)
-						const bool writesNormal = writes && !hasDefine(Template, "DIFFUSE") && !hasDefine(Template, "ONLY_SPECULAR") && !hasDefine(Template, "NVR_SLOT_TIGHT");
+						const bool writesNormal = writes && !hasDefine(Template, "DIFFUSE") && !hasDefine(Template, "ONLY_SPECULAR");
 						if (writesNormal) CapturedNormals::NoteWriter(static_cast<ShaderRecordPixel*>(record)->ShaderHandle);
 						if (writes) CapturedNormals::ViewEnsure(TheRenderManager->device);	// UNOFFICIAL 2026-11-14 GBufferView: compiled here, at record load (GBufferV2 only)
 						// UNOFFICIAL 2026-10-29 MaterialBuffer: Object / Parallax / Terrain write it on COLOR2 (the skin templates' COLOR2 is the skin blur's)
@@ -1308,9 +1300,6 @@ void ShaderFloatValue::GetValueFromConstantTable() {
 void ShaderRecord::SetCT() {
 	MixCheck::SetPass(Name);	// UNOFFICIAL 2026-10-30 NvrDxvkMixCheck: the game shader the next binds and draws belong to
 
-	// UNOFFICIAL: the first use of a game shader this session goes on the warm-up list (ShaderWarmUp.h)
-	if (!UsedOnce) { UsedOnce = true; ShaderWarmUp::NoteFirstUse(Name); }
-
 	// The scene so far, for shaders that read it: the current colour target copied, the depth resolved.
 	if (HasRenderedBuffer) {
 		IDirect3DSurface9* current = TheRenderManager->currentRTGroup->RenderTargets[0]->data->Surface;
@@ -1565,15 +1554,6 @@ void NiD3DPixelShaderEx::SetupShader(IDirect3DPixelShader9* BoundHandle) {
 		ShaderRecordPixel::Current = forwardPlus;
 		if (BoundHandle != ShaderHandle) forwardPlus->SetCT();
 		return;
-	}
-	// UNOFFICIAL 2026-10-31 DeferredLamps: indoors, the many-lamp shader's deferred record while the main list's G-buffer is bound
-	if (!Player->GetWorldSpace()) {
-		if (ShaderRecordPixel* deferred = DeferredLamps::Choose(this)) {
-			ShaderHandle = deferred->ShaderHandle;
-			ShaderRecordPixel::Current = deferred;
-			if (BoundHandle != ShaderHandle) deferred->SetCT();
-			return;
-		}
 	}
 	const bool inWorldspace = Player->GetWorldSpace() != nullptr;
 	if (ShaderRecordPixel* record = PickRecord(this, inWorldspace)) {

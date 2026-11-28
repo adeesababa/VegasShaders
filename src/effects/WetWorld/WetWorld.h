@@ -55,7 +55,6 @@ public:
 	bool				coverPending = false;
 	bool				covered = false;
 	void	RegisterTextures();
-	void	RenderCoverTest(IDirect3DDevice9* Device);
 
 	void	UpdateConstants();
 	void	RegisterConstants();
@@ -80,6 +79,7 @@ public:
 	// UNOFFICIAL 2026-10-25 (NVR DXVK): techniques 2, 3 and 4 as Vulkan passes (WetWorld.cpp ExtRender; Compute\WetWorldMap.frag and
 	// Compute\WetWorld.frag). Technique 0 (FastPaths off, the original trace) and the cover test (1) stay on the D3D9 passes.
 	bool	ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override;
+	bool	ExtSupportsRenderRect() const override { return true; }
 	ExtPass				extMap;
 	ExtPass				extWet;
 	ExtUniformBuffer	extUniforms;

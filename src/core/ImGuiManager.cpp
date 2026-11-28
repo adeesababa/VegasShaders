@@ -37,7 +37,6 @@
 #include "ShaderFallback.h"	// UNOFFICIAL 2026-11-12 ShaderFallback: its notices, shown with the install check's
 #include "SunFadeDeferred.h"	// UNOFFICIAL 2026-11-15 fd-smoothsun (the SunSmoothing notes)
 #include "ShelvedEffects.h"	// UNOFFICIAL 2026-11-16: shelved effects have no page, row or search entry in a release build
-#include "SettingForce.h"	// UNOFFICIAL 2026-11-16: keys the deferred renderer sets (on or off) show greyed, at the value in effect
 #include "CompileProgress.h"	// UNOFFICIAL 2026-11-20: close startup shader-compile overlay once the first frame arrives
 #include "DistantLandProto.h"	// UNOFFICIAL 2026-11-25 device reset release
 #include "DistantLandTerrain.h"	// UNOFFICIAL 2026-11-25 device reset release
@@ -293,8 +292,10 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 	// UNOFFICIAL 2026-11-07 (rt-shutdown): the window closing (Alt+F4, the X, Windows logging off) may end the game without xNVSE's
 	// ExitGame messages: the RT helper's shutdown first (RtCore::Shutdown; nothing when RT never ran, ~5 s at most). These arrive
 	// through the game's message pump on its main thread, outside a frame. (A WM_CLOSE the game then ignored leaves RT off.)
-	if (msg == WM_CLOSE || msg == WM_DESTROY || (msg == WM_ENDSESSION && wParam))
+	if (msg == WM_CLOSE || msg == WM_DESTROY || (msg == WM_ENDSESSION && wParam)) {
 		RtCore::Shutdown(msg == WM_CLOSE ? "the game window is closing (WM_CLOSE)" : msg == WM_DESTROY ? "the game window is closing (WM_DESTROY)" : "Windows is ending the session");
+		DeepProbe::OnGameExit();	// UNOFFICIAL 2026-11-28: live mode's final report (the writer gets at most 1 s)
+	}
 
 	if (msg == WM_ACTIVATE && LOWORD(wParam) == WA_INACTIVE) SetOverlayVisible(false);
 
@@ -453,6 +454,38 @@ static void PollMenuKeys() {
 	}
 }
 
+// UNOFFICIAL 2026-11-28 (deepprobe-live): the Performance probe's live-mode key ([Main.Develop.PerformanceProbe] LiveKey, Shift by
+// default) starts live mode or stops any running capture. Polled like the menu key (DXVK swallows key messages), only while the game
+// window is in front and no text box has the keyboard. The settings are read again every ~2 s, not every frame.
+static void PollProbeKey() {
+	if (!TheSettingManager) return;
+	static int vk = 0, frames = 0;
+	static bool needShift = true;
+	if (frames-- <= 0) {
+		frames = 120;
+		vk = VkForScanCode((BYTE)TheSettingManager->GetSettingI("Main.Develop.PerformanceProbe", "LiveKey"));
+		needShift = TheSettingManager->GetSettingI("Main.Develop.PerformanceProbe", "LiveKeyShift") != 0;
+		// (2026-11-28) LiveRequest 1 starts live mode, 2 stops it, read with the key every 120 frames and put back to 0: a shot list
+		// (the unattended bench) cannot press the key.
+		const int request = TheSettingManager->GetSettingI("Main.Develop.PerformanceProbe", "LiveRequest");
+		if (request != 0) {
+			TheSettingManager->SetSetting("Main.Develop.PerformanceProbe", "LiveRequest", 0);
+			if (request == 1 && !DeepProbe::LiveActive()) DeepProbe::RequestStartLive();
+			else if (request == 2 && DeepProbe::Active()) DeepProbe::RequestStop();
+			else if (request == 3 && !DeepProbe::Active()) DeepProbe::RequestStart(20.0, false);	// a timed 20 s capture (the bench)
+		}
+	}
+	HWND front = GetForegroundWindow();
+	DWORD pid = 0;
+	if (front) GetWindowThreadProcessId(front, &pid);
+	DeepProbe::SetGameInFront(pid == GetCurrentProcessId());	// the probe's watchdog reads this instead of calling user32
+	static KeyEdge probeKey;
+	if (!vk) { probeKey.Rose(false); return; }
+	const bool typing = ImGuiManager::IsVisible() && ImGui::GetIO().WantTextInput;
+	const bool down = pid == GetCurrentProcessId() && !typing && KeyHeld(vk) && (!needShift || KeyHeld(VK_SHIFT));
+	if (probeKey.Rose(down)) DeepProbe::ToggleLive();
+}
+
 // Screenshot mode hands input back to the game (and hides the cursor) until it ends.
 static void FollowScreenshotMode() {
 	static bool wasOn = false;
@@ -587,6 +620,7 @@ void ImGuiManager::NewFrame() {
 	if (gOverlay.open && !InterfaceManager->IsActive(Menu::MenuType::kMenuType_None)) SetOverlayVisible(false);
 
 	PollMenuKeys();
+	if (InterfaceManager->IsActive(Menu::MenuType::kMenuType_None) || gOverlay.open) PollProbeKey();	// in game, not in the game's menus
 	if (gOverlay.open) {
 		FollowScreenshotMode();
 		PollInsertKey();
@@ -989,13 +1023,11 @@ static void DrawMenuFrame() {
 	if (InterfaceManager->IsActive(Menu::MenuType::kMenuType_Main)) {	// the game's main menu: only the hint
 		RenderMainMenuToast();
 		RenderTwinDllWarning(true);
-		RenderDxvkConflictWarning(true);
 		RenderInstallNotice(true);
 		return;
 	}
 	RenderProfilerIndicator();
 	RenderTwinDllWarning(false);
-	RenderDxvkConflictWarning(false);
 	RenderInstallNotice(false);
 	bool reopenProbe = false;
 	if (!InterfaceManager->IsActive(Menu::MenuType::kMenuType_Loading) && DeepProbe::ConsumeJustFinished(reopenProbe)) {

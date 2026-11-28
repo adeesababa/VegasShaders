@@ -33,7 +33,14 @@ layout(set = 2, binding = 0, std140) uniform Consts {
     vec4 lightPosition[12];       // TESR_LightPosition
     vec4 shadowLightPosition[12]; // TESR_ShadowLightPosition
     vec4 lightColor[24];          // TESR_LightColor
+    vec4 renderScale;             // TESR_RenderScale (xy = Scale, zw = 1 / Scale)
 } c;
+
+vec2 rectToScreen(vec2 ruv) { return ruv * c.renderScale.zw; }
+vec2 screenToRect(vec2 s01) { return s01 * c.renderScale.xy; }
+vec2 clampToRect(vec2 ruv, vec2 texel) {
+    return clamp(ruv, 0.5 * texel, max(c.renderScale.xy - 0.5 * texel, 0.5 * texel));
+}
 
 #define farZ (c.cameraData.y)
 #define nearZ (c.cameraData.x)
@@ -68,10 +75,11 @@ float projectedDepthFromLinear(float linear01) {
     return nearZ * (farZ - viewZ) / (viewZ * (farZ - nearZ));
 }
 
-vec3 reconstructPosition(vec2 uv) {
-    float x = uv.x * 2.0 - 1.0;
-    float y = (1.0 - uv.y) * 2.0 - 1.0;
-    float z = projectedDepthFromLinear(texture(sampler2D(t_depth, NVR_SAMPLER(pc.sLin)), uv).x);
+vec3 reconstructPosition(vec2 ruv) {
+    vec2 s = rectToScreen(ruv);
+    float x = s.x * 2.0 - 1.0;
+    float y = (1.0 - s.y) * 2.0 - 1.0;
+    float z = projectedDepthFromLinear(texture(sampler2D(t_depth, NVR_SAMPLER(pc.sLin)), ruv).x);
     vec4 viewSpace = vec4(x, y, z, 1.0) * c.invProjection;
     viewSpace /= viewSpace.w;
     return viewSpace.xyz;
@@ -85,10 +93,11 @@ vec3 projectPosition(vec3 position) {
     return projection.xyz;
 }
 
-vec3 toWorld(vec2 tex) {
+vec3 toWorld(vec2 ruv) {
+    vec2 s = rectToScreen(ruv);
     vec3 v = c.view[2].xyz;
-    v += (1.0 / c.projection[0][0] * (2.0 * tex.x - 1.0)) * c.view[0].xyz;
-    v += (-1.0 / c.projection[1][1] * (2.0 * tex.y - 1.0)) * c.view[1].xyz;
+    v += (1.0 / c.projection[0][0] * (2.0 * s.x - 1.0)) * c.view[0].xyz;
+    v += (-1.0 / c.projection[1][1] * (2.0 * s.y - 1.0)) * c.view[1].xyz;
     return v;
 }
 
@@ -98,7 +107,7 @@ vec3 GetWorldNormal(vec2 uv) {
 }
 
 float SampleOrthoDepth(vec2 uv) {
-    return textureLod(sampler2D(t_ortho, NVR_SAMPLER(pc.sLin)), uv, 0.0).r;
+    return textureLod(sampler2D(t_ortho, NVR_SAMPLER(pc.sPoint)), uv, 0.0).r;
 }
 
 vec4 GetOrthoSurfacePosition(vec2 screenUV) {
@@ -175,13 +184,13 @@ float GetViewModelMask(vec2 screenUV) {
         (c.depthConstants.z > 0.0 && vmDepthX > 0.01)) ? 1.0 : 0.0;
 }
 
-float GetPuddleViewModelExclusion(vec2 uv, float centerMask) {
+float GetPuddleViewModelExclusion(vec2 ruv, float centerMask) {
     vec2 pixel = c.reciprocalResolution.xy;
     float mask = centerMask;
-    mask = max(mask, GetViewModelMask(uv + vec2(pixel.x, 0.0)));
-    mask = max(mask, GetViewModelMask(uv - vec2(pixel.x, 0.0)));
-    mask = max(mask, GetViewModelMask(uv + vec2(0.0, pixel.y)));
-    mask = max(mask, GetViewModelMask(uv - vec2(0.0, pixel.y)));
+    mask = max(mask, GetViewModelMask(clampToRect(ruv + vec2(pixel.x, 0.0), pixel)));
+    mask = max(mask, GetViewModelMask(clampToRect(ruv - vec2(pixel.x, 0.0), pixel)));
+    mask = max(mask, GetViewModelMask(clampToRect(ruv + vec2(0.0, pixel.y), pixel)));
+    mask = max(mask, GetViewModelMask(clampToRect(ruv - vec2(0.0, pixel.y), pixel)));
     return mask;
 }
 

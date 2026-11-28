@@ -2,7 +2,6 @@
 #include <unordered_set>	// UNOFFICIAL 2026-10-30 SettingsCache
 #include "InstallCheck.h"	// 2026-11-03: the user toml's unknown keys and version mark, for the install self-check
 #include "GpuDebug.h"	// UNOFFICIAL 2026-10-26: GpuDebugLabels / RenderDoc capture key ([Main.Develop.Main])
-#include "SettingForce.h"	// UNOFFICIAL 2026-11-14 full deferred renderer: its prerequisites read as forced
 #include "StalePresetValues.h"	// UNOFFICIAL 2026-11-18: settings step 90 moves the old defaults presets and scripts saved
 #include "ShelvedEffects.h"	// UNOFFICIAL 2026-11-16: a release build reads [Shaders.ShadowsInteriors.Capsules] Enabled as off
 #include "UnsavedSettings.h"	// 2026-11-25 (unsaved marks): which settings the menu marks as not saved yet
@@ -74,6 +73,41 @@ static bool RetiredSetting(const std::string& Name) {
 		"Shaders.Reflections.Main.HiZ", "Shaders.Reflections.Main.HiZSafeCells",
 		"Shaders.Reflections.Main.HiZCheck", "Shaders.Reflections.Main.HiZInteriorsTest",
 		"Shaders.Reflections.RT.DenoiserClip",
+		"Shaders.PBR.Main.Metallicness", "Shaders.PBR.Rain.Metallicness",
+		"Shaders.PBR.Night.Metallicness", "Shaders.PBR.NightRain.Metallicness",
+		"Shaders.PBR.Interiors.Metallicness",
+		"Main.Main.Misc.LampTableThread",
+		"Main.Main.Performance.ShaderWarmUp",
+		"Main.Main.Performance.DrawStateTracking",
+		"Main.Main.Performance.DrawStateTrackingCheck",
+		"Main.Main.Quality.DeferredRendererOnePass",
+		// (2026-11-27 D2: DeferredRenderer locked to mode 2; SettingForce, ForceMSAA, MSAA G-buffer & forward test tools retired)
+		"Main.Main.Quality.DeferredRenderer",
+		"Main.Main.Misc.ForceMSAA",
+		"Main.Main.Quality.CapturedNormals",
+		"Main.Main.Quality.MaterialBuffer",
+		"Main.Main.Quality.AlbedoBuffer",
+		"Main.Main.Quality.GBufferV2",
+		"Main.Main.Quality.DeferredFoliage",
+		"Main.Main.Quality.DeferredDistant",
+		"Main.Main.Quality.DeferredDepth",
+		"Shaders.PBR.Linear.Enabled",
+		"Shaders.PBR.Linear.LinearScene",
+		"Main.Main.Misc.FoldFog",
+		"Main.Main.Misc.LampTableStandalone",
+		"Main.Main.Misc.LampTableFast",
+		"Shaders.ShadowsInteriors.Forward.Enabled",
+		"Shaders.ShadowsInteriors.Atlas.Enabled",
+		"Shaders.ShadowsInteriors.Deferred.Enabled",
+		"Shaders.ShadowsInteriors.Deferred.UnshadowedLamps",
+		"Shaders.ShadowsInteriors.Deferred.LightFreeRecords",
+		"Shaders.ShadowsExteriors.Deferred.Enabled",
+		"Shaders.Terrain.Blending.Smooth",
+		"Main.Main.Performance.LampPassTestSkip",
+		"Main.Main.Misc.PassFamilyView",
+		"Main.Main.Misc.LinearSceneCensus",
+		"Main.Main.Misc.ForwardLightKill",
+		"Shaders.TAA.FSR.Version",
 	};
 	for (const char* k : kKeys) if (Name == k) return true;
 	// (2026-11-19: BloodFlow, BloodLens, and dead Blood stub removed; keep old user configs quiet)
@@ -548,7 +582,6 @@ void SettingManager::LoadSettings() {
 		SettingsMain.Main.ScreenshotKey = GetSettingI(sec, "ScreenshotKey");
 		SettingsMain.Main.HDRScreenshot = GetSettingI(sec, "HDRScreenshot");
 		SettingsMain.Main.ReplaceIntro = GetSettingI(sec, "ReplaceIntro");
-		SettingsMain.Main.ForceMSAA = GetSettingI(sec, "ForceMSAA");
 		SettingsMain.Main.SkipFog = GetSettingI(sec, "SkipFog");
 		SettingsMain.Main.RenderEffects = GetSettingI(sec, "RenderEffects");
 		SettingsMain.Main.RenderPreTonemapping = GetSettingI(sec, "RenderPreTonemapping");
@@ -624,18 +657,12 @@ void SettingManager::LoadSettings() {
 	SettingsMain.Main.BatchBoneUploads = boolSetting(performance, "BatchBoneUploads", true);
 	SettingsMain.Main.FastConstantMapSort = boolSetting(performance, "FastConstantMapSort", true);
 	SettingsMain.Main.SkinnedShadowFaceTest = boolSetting(performance, "SkinnedShadowFaceTest", true);
-	SettingsMain.Main.ShaderWarmUp = boolSetting(performance, "ShaderWarmUp", false);
 	SettingsMain.Main.HiddenObjectCulling = boolSetting(performance, "HiddenObjectCulling", false);
 	SettingsMain.Main.PreDecodeCache = boolSetting(performance, "PreDecodeCache", false);	// UNOFFICIAL 2026-10-21 cpulimits
 	SettingsMain.Main.FastCasterHash = boolSetting(performance, "FastCasterHash", false);
 	SettingsMain.Main.SkyOnWorker = boolSetting(performance, "SkyOnWorker", false);	// UNOFFICIAL 2026-11-03 cpu-workers
 	SettingsMain.Main.CasterListCache = boolSetting(performance, "CasterListCache", false);	// UNOFFICIAL 2026-10-30 ROOTPLAN round 7 step 18
 	SettingsMain.Main.TrimLampPasses = boolSetting(performance, "TrimLampPasses", true);
-	{
-		Configuration::ConfigNode node;
-		const int mode = Config.FillNode(&node, performance, "LampPassTestSkip") ? node.IntValue : 0;
-		SettingsMain.Main.LampPassTestSkip = max(0, min(mode, 7));	// 4 (2026-10-16): also the passes after the highlights (fog)
-	}
 	{
 		Configuration::ConfigNode node;
 		SettingsMain.Main.NeonSpillSelfTest = Config.FillNode(&node, "Shaders.BounceLight.Main", "NeonSpillSelfTest") ? node.BoolValue : false;
@@ -1157,42 +1184,40 @@ static const CachedSetting* CachedNode(SettingManager* manager, const char* sect
 	return &slot->second;
 }
 
-// UNOFFICIAL 2026-11-14 full deferred renderer (core/SettingForce.h): the prerequisites [Main.Main.Quality] DeferredRenderer turns on read as
-// forced while it is on at startup (decided at the session's first read; nothing is written into the settings). Off: State 0, nothing more.
-static bool ForcedValue(SettingManager* manager, const char* section, const char* key, int& value) {
-	if (SettingForce::State < 0) {
-		CachedSetting scratch;
-		const CachedSetting* mode = CachedNode(manager, "Main.Main.Quality", "DeferredRenderer", scratch);
-		if (!mode->ok) {	// a key every defaults file has: missing too = the settings are not loaded yet (decide at a later read)
-			CachedSetting other;
-			if (!CachedNode(manager, "Main.Main.Quality", "CapturedNormals", other)->ok) return false;
-		}
-		const int m = mode->ok ? mode->i : 0;
-		SettingForce::RendererMode = m < 0 ? 0 : m > 2 ? 2 : m;
-		SettingForce::State = SettingForce::RendererMode > 0 ? 1 : 0;
-		// (logged by DeferredRenderer::BeginFrame, not here: under the cache lock)
-	}
-	return SettingForce::State == 1 && SettingForce::Find(section, key, value);
-}
-
 int SettingManager::GetSettingI(const char* section, const char* key) {
 	std::lock_guard<std::mutex> lock(SettingCacheLock);
 	CachedSetting scratch;
-	if (SettingForce::DxvkRequiredOff(section, key)) return 0;	// UNOFFICIAL 2026-11-20: FSR / DLSS / HDR off when DXVK fork is absent
-	if (SettingForce::State) { int forced; if (ForcedValue(this, section, key, forced)) return forced; }
 	const CachedSetting* node = CachedNode(this, section, key, scratch);
 	if constexpr (ShelvedEffects::Active) { if (ShelvedEffects::ForcedOff(section, key, node->i)) return 0; }	// UNOFFICIAL 2026-11-16 (release builds only)
 	return node->i;	// the typed value directly, no string re-parse (0 when the setting does not exist)
 }
 
 float SettingManager::GetSettingF(const char* section, const char* key) {
-	std::lock_guard<std::mutex> lock(SettingCacheLock);
-	CachedSetting scratch;
-	if (SettingForce::DxvkRequiredOff(section, key)) return 0.0f;	// UNOFFICIAL 2026-11-20: FSR / DLSS / HDR off when DXVK fork is absent
-	if (SettingForce::State) { int forced; if (ForcedValue(this, section, key, forced)) return (float)forced; }	// UNOFFICIAL 2026-11-14 (above)
-	float value = CachedNode(this, section, key, scratch)->f;
-	if constexpr (ShelvedEffects::Active) { if (ShelvedEffects::ForcedOff(section, key, value != 0.0f)) return 0.0f; }	// UNOFFICIAL 2026-11-16 (release builds only)
-	if (SettingForce::State == 1) SettingForce::FloorF(section, key, value);	// UNOFFICIAL 2026-11-15 linear gamma floor (SettingForce.h)
+	float value;
+	{
+		std::lock_guard<std::mutex> lock(SettingCacheLock);
+		CachedSetting scratch;
+		value = CachedNode(this, section, key, scratch)->f;
+		if constexpr (ShelvedEffects::Active) { if (ShelvedEffects::ForcedOff(section, key, value != 0.0f)) return 0.0f; }	// UNOFFICIAL 2026-11-16 (release builds only)
+	}
+	if (!strcmp(section, "Shaders.PBR.Linear")) {
+		static float gammaWas = -1.0f, nightWas = -1.0f;
+		if (!strcmp(key, "Gamma")) {
+			const float was = value <= 1.0f ? value : -1.0f;
+			if (was != gammaWas) {
+				gammaWas = was;
+				if (was >= 0.0f) Logger::Log("UNOFFICIAL DeferredRenderer: [Shaders.PBR.Linear] Gamma %.2f reads as 2.2 while the deferred renderer is on (a gamma of 1.0 is the same as linear lighting off, which the renderer needs)", was);
+			}
+			if (value <= 1.0f) value = 2.2f;
+		} else if (!strcmp(key, "NightGamma")) {
+			const float was = (value > 0.0f && value <= 1.0f) ? value : -1.0f;
+			if (was != nightWas) {
+				nightWas = was;
+				if (was >= 0.0f) Logger::Log("UNOFFICIAL DeferredRenderer: [Shaders.PBR.Linear] NightGamma %.2f reads as 0 (follow Gamma) while the deferred renderer is on (a gamma of 1.0 is the same as linear lighting off, which the renderer needs)", was);
+			}
+			if (value > 0.0f && value <= 1.0f) value = 0.0f;
+		}
+	}
 	return value;
 }
 

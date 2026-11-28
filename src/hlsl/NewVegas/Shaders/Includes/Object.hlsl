@@ -188,6 +188,13 @@ void RmaosRead(float2 uv) {
     [branch] if (RMAOS_ACTIVE) {
         RmaosValue = tex2Dgrad(NVR_RmaosMap, uv, dx, dy);
         RmaosValue.rg = saturate(RmaosValue.rg + RmaosValue.rg * TESR_PBRMath.wz);
+        #if defined(MATERIAL_RULES) && !defined(NVR_SLOT_TIGHT)
+            if (TESR_MaterialRule.x > 0.0f && TESR_MaterialRule.y <= 0.0f) {
+                if (RmaosValue.g > 0.10f && RmaosValue.g < 0.62f && TESR_MaterialRough.x > 0.0f)
+                    RmaosValue.r = max(RmaosValue.r, TESR_MaterialRough.x * 0.85f);
+                RmaosValue.g *= smoothstep(0.58f, 0.75f, RmaosValue.g);
+            }
+        #endif
         #ifdef RMAOS_SPEC
             RmaosSpecular = RMAOS_FADING ? lerp(1.0f, RmaosValue.a, NVR_Rmaos.x) : RmaosValue.a;	// (FadeIn: from the plain 0.04)
         #endif
@@ -595,8 +602,11 @@ float getMetalRoughness(float specMask) {
     return roughness;
 }
 
-// The metal's reflections of its surroundings, times the rule's (1 without one).
+// The metal's reflections of its surroundings, times the rule's (1 without one). Authored _rmaos assets bypass MaterialRules overrides.
 float getMaterialReflections() {
+    #ifdef RMAOS
+        if (RMAOS_ACTIVE && RmaosValue.g > 0.65f) return 1.0f;
+    #endif
     #ifdef MATERIAL_RULES
         if (TESR_MaterialRule.x > 0.0f) return TESR_MaterialRule.w;
     #endif
@@ -689,12 +699,16 @@ float3 getSurfaceIBL(float3 ambient, float3 f0, float roughness, float NdotV, fl
     #endif
     float skySharpness = 1.0f - saturate(metalRough);
     skySharpness *= skySharpness;
-    float3 sky = SkyAmbientElevation(lerp(worldNormal.z, upReflect, skySharpness));
+    const float skyZ = lerp(worldNormal.z, upReflect, skySharpness);
+    float3 sky = SkyAmbientElevation(skyZ);
     [branch] if (TESR_SharpSky.x > 0.0f && skyValid > 0.0f) {
         float3 skySharp = SkyAmbientSharpened(getMetalSkyDirection(worldPos, worldNormal, upReflect), sky);
         sky = lerp(sky, skySharp, skySharpness);
     }
-    float3 localEnv = ambient * LIN_SCALE_AMBIENT + LinSky(sky) * LIN_SCALE_SKY * skyValid;
+    float indoorHemi = (skyValid > 0.0f && TESR_PBRExtraData.y <= 1.0e-4f)
+        ? (0.65f + 0.55f * saturate(skyZ * 0.5f + 0.5f))
+        : 1.0f;
+    float3 localEnv = ambient * (LIN_SCALE_AMBIENT * indoorHemi) + LinSky(sky) * LIN_SCALE_SKY * skyValid;
     float3 env = localEnv;
     #ifdef NVR_LIVE_CUBE
     [branch] if (TESR_EnvCube.x > 0.0f && skyValid > 0.0f) {
@@ -703,7 +717,9 @@ float3 getSurfaceIBL(float3 ambient, float3 f0, float roughness, float NdotV, fl
         liveLin /= 1.0f + max(liveLin.r, max(liveLin.g, liveLin.b)) * 0.25f;
         float localLum = dot(localEnv, float3(0.2126f, 0.7152f, 0.0722f));
         float liveLum = dot(liveLin, float3(0.2126f, 0.7152f, 0.0722f));
-        float occ = lerp(1.0f, saturate((localLum * 2.5f) / max(liveLum, 1.0e-4f)), 0.88f);
+        // (2026-11-27 cube-visible) at most 2.5 x the local light, eased to 2.5 x CubeStrength above 1 (TESR_EnvCube.w = 1 / max(k, 1)):
+        // a metal in shade keeps from glowing with a bright cube, but bright windows and lamps in it stay visible.
+        float occ = lerp(1.0f, saturate((localLum * 2.5f) / max(liveLum * TESR_EnvCube.w, 1.0e-4f)), 0.88f);
         env = lerp(localEnv, liveLin * occ, TESR_EnvCube.x * live.a);
     }
     #endif
@@ -717,7 +733,8 @@ float3 getSurfaceIBL(float3 ambient, float3 f0, float roughness, float NdotV, fl
         float2 scaleBias = float2(-1.04f, 1.04f) * bias0 + mixed.zw;
         float ess = max(scaleBias.x + scaleBias.y, 0.15f);
         float3 msBoost = min(1.0f + metalF0 * (1.0f / ess - 1.0f), 2.0f);
-        float3 totalRefl = (metalF0 * scaleBias.x + pearlF90 * scaleBias.y) * msBoost * env;
+        pearlF90 = max(pearlF90 * saturate(1.0f - metalRough * 0.85f), metalF0);
+        float3 totalRefl = (metalF0 * scaleBias.x + pearlF90 * max(scaleBias.y, 0.0f)) * msBoost * env;
         [branch] if (TESR_SharpSky.y > 0.001f) {
             totalRefl *= CandyCoatAbsorption(metalF0, coatNdotV, TESR_SharpSky.y, 1.0f);
             float coatO = 1.0f - saturate(coatNdotV);
@@ -741,7 +758,7 @@ float3 getSurfaceIBL(float3 ambient, float3 f0, float roughness, float NdotV, fl
                     coatLin /= 1.0f + max(coatLin.r, max(coatLin.g, coatLin.b)) * 0.25f;
                     float coatLocLum = dot(coatLocalEnv, float3(0.2126f, 0.7152f, 0.0722f));
                     float coatLiveLum = dot(coatLin, float3(0.2126f, 0.7152f, 0.0722f));
-                    float coatOcc = lerp(1.0f, saturate((coatLocLum * 2.5f) / max(coatLiveLum, 1.0e-4f)), 0.88f);
+                    float coatOcc = lerp(1.0f, saturate((coatLocLum * 2.5f) / max(coatLiveLum * TESR_EnvCube.w, 1.0e-4f)), 0.88f);
                     coatEnv = lerp(coatLocalEnv, coatLin * coatOcc, TESR_EnvCube.x * coatLive.a);
                 }
                 #endif

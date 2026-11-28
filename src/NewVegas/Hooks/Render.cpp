@@ -15,7 +15,6 @@
 #include "../../core/PixelInspector.h"	// UNOFFICIAL 2026-10-26 (debugging tool)
 #include "../../core/Diagnostics.h"	// UNOFFICIAL 2026-11-01 flash detector + report key
 #include "../../core/PointShadowForward.h"
-#include "../../core/ShaderWarmUp.h"
 #include "../../core/GlassMask.h"	// UNOFFICIAL 2026-10-29 glass reflections (RenderBlendedHook)
 #include "../../core/BlendedLayerFix.h"	// UNOFFICIAL 2026-11-23 BlendedLayerFix: draw surface-hugging AO/decal overlays before smoke/particles (RenderBlendedHook)
 #include "../../core/WaterMask.h"	// UNOFFICIAL 2026-11-12 PTWaterMask: the game's water pixels for the path tracer (RenderPassStandardHook)
@@ -29,7 +28,6 @@
 #include "../../core/ConstantMapSort.h"	// UNOFFICIAL 2026-11-24 refcount-free constant-map partition
 #include "../../core/HiddenObjectCulling.h"
 #include "../../core/LampScissor.h"
-#include "../../core/LampPassTest.h"
 #include "../../core/PassSums.h"
 #include "../../core/LampsInOnePass.h"
 #include "../../core/OnePassDepth.h"	// UNOFFICIAL 2026-10-26 LampsDepthFirst: the one many-lamp passes drawn depth first
@@ -38,9 +36,7 @@
 #include "../../core/EffectSelfTest.h"
 #include "../../core/MaterialRules.h"
 #include "../../core/PbrPop.h"	// UNOFFICIAL 2026-10-18 PBR pop-in: SpecularFade, SpecularLODPasses (+ test diagnostic)
-#include "../../core/PassFamilyView.h"	// UNOFFICIAL 2026-10-21, diagnostic: which pass family draws each lit object
 #include "../../core/CasterView.h"	// UNOFFICIAL 2026-10-28, diagnostic: which objects cast into the sun cascade that covers them
-#include "../../core/LinearSceneCensus.h"	// UNOFFICIAL 2026-10-28, diagnostic: what draws into the world and how (linear-scene plan)
 #include "../../core/LinearScene.h"	// UNOFFICIAL 2026-10-28 LinearScene: the world's main list kept in linear light
 #define MIXCHECK_IMPLEMENTATION	// UNOFFICIAL 2026-10-30 NvrDxvkMixCheck: the check's bodies are compiled here, once
 #include "../../core/MixCheck.h"
@@ -808,7 +804,6 @@ namespace FrameSplit {
 	}
 }
 
-void NvrDepthWarningTick();	// RenderManager.cpp
 // Camera and shader constants for the frame, in the order the scene and image space need them.
 static void PrepareSceneCameras() {
 	auto* renderer = TheRenderManager;
@@ -820,6 +815,17 @@ static void PrepareSceneCameras() {
 using RenderMethod = void(__thiscall*)(Main*, BSRenderedTexture*, int, int);
 RenderMethod Render = reinterpret_cast<RenderMethod>(Hooks::Render);
 static bool MaterialWFor(const void* Pass, float& w, bool inSpan);	// UNOFFICIAL 2026-11-15 (below, MaterialForPass): c211.w for MergeCopies' key
+
+// UNOFFICIAL 2026-11-28 (deepprobe-live): the test build's own stack samplers run until the game exits; the Performance probe must not
+// start a second sampler beside them (DeepProbe.h, StartCapture).
+static const char* OtherStackSampler() {
+#if NVR_TEST_TOOLS
+	if (CpuSampler::Started && CpuSampler::Hz > 0) return "the test build's CpuSampler (a shot list's 'sampler' line)";
+	if (ArrivalSampler::Enabled) return "the test build's ArrivalSampler ([Main.Main.Performance] ArrivalSampler)";
+#endif
+	return nullptr;
+}
+
 void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTexture, int Arg2, int Arg3) {
 	SessionLog::StageScope stage("game frame");	// 2026-11-04: the CRASH lines' stage (SessionLog.h)
 	// UNOFFICIAL 2026-11-16 fast-restart (core/LateInteriors.h): the lamp-shadow records left out of the start, before anything of this frame
@@ -828,6 +834,7 @@ void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTe
 	SessionLog::StallWatch::FrameScope stallFrame;	// UNOFFICIAL 2026-11-07 (perf-ptcost): the STALL watchdog's frame begin / end (SessionLog.h)
 	static CpuTimer gameRenderCpuTimer("Game render (CPU)"), presentCpuTimer("Present (CPU)"), gameUpdateCpuTimer("Game update (CPU)");
 	const double renderStart = CpuTimer::NowMs();
+	DeepProbe::SetOtherSamplerCheck(&OtherStackSampler);
 	const bool probeActive = DeepProbe::TickFrameBegin(TheRenderManager->device, renderStart, FrameSplit::RenderEnd, FrameSplit::PresentMs, FrameSplit::OriginalPresent != nullptr);
 	if (GpuTimer::Enabled || probeActive) {
 		FrameSplit::Install(TheRenderManager->device);
@@ -841,7 +848,6 @@ void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTe
 	FrameSplit::PresentMs = 0.0;
 	CpuSplit::MarkNow(CpuSplit::kRenderBegin);
 	DxvkCompute::ProfileTick(GpuTimer::Enabled);	// UNOFFICIAL 2026-10-26: game thread vs DXVK thread vs GPU (NVR DXVK 1.5)
-	NvrDepthWarningTick();	// UNOFFICIAL 2026-10-27: stock DXVK on NVIDIA gives NVR no depth: said once on screen (RenderManager.cpp)
 #if NVR_TEST_TOOLS
 	ShaderWarmUp2::FrameTick(SettingShots::Running ? (int)SettingShots::Index : -1);	// UNOFFICIAL ShaderWarmUp2: frame times + new setups (shot index: picture frames)
 	GrassTiming::OnFrame(SettingShots::Running ? (int)SettingShots::Index : -1);	// UNOFFICIAL 2026-11-09: the game's grass CPU time (GrassTiming key)
@@ -886,9 +892,6 @@ void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTe
 	ClothWind::BeginFrame(Tes ? Tes->sky : nullptr, TheShaderManager->GameState.isExterior);	// UNOFFICIAL cloth wind
 	PipboyFit::BeginFrame();	// UNOFFICIAL 2026-11-03 PipboyFit
 	PlantWind::BeginFrame(Tes ? Tes->sky : nullptr, TheShaderManager->GameState.isExterior);	// UNOFFICIAL 2026-10-20 plant wind (after the cloth: it uses its bookkeeping)
-#if NVR_TEST_TOOLS
-	LampPassTest::BeginFrame();	// UNOFFICIAL, diagnostic: LampPassTestSkip
-#endif
 	DeferredRenderer::BeginFrame();	// UNOFFICIAL 2026-11-14 full deferred renderer (before LampsInOnePass: its one-pass wish; before DeferredLamps: its live switch)
 	InteriorRecordCensus::Frame(!TheShaderManager->GameState.isExterior && Player && Player->parentCell, DeferredRenderer::Live);	// UNOFFICIAL 2026-11-16 fast-restart (log only, F10)
 	DeferredTransparents::BeginFrame();	// UNOFFICIAL 2026-11-15 forward+ for the blended list (off: nothing)
@@ -930,7 +933,7 @@ void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTe
 		// are made in the innermost of NVR's draw hooks, so they go in while it is on
 		if (!MergeCopies::SpecFadeOf) MergeCopies::SpecFadeOf = [](const void* geometry) -> float {
 			return PbrPop::SpecFade::Compiled && PbrPop::SpecFade::On ? PbrPop::GameSpecularFade(PbrPop::LitProperty((const NiGeometry*)geometry)) : 1.0f; };
-		if (!MergeCopies::DeferredMode) MergeCopies::DeferredMode = []() -> int { return DeferredRenderer::Live ? DeferredRenderer::Mode() : 0; };	// (v2: the passes past 0xFC)
+		if (!MergeCopies::DeferredMode) MergeCopies::DeferredMode = []() -> int { return DeferredRenderer::Live ? 2 : 0; };	// (v2: the passes past 0xFC)
 		if (!MergeCopies::DeferredPS) MergeCopies::DeferredPS = [](IDirect3DPixelShader9* ps) -> bool { return ps && DeferredRenderer::Handles.count(ps) != 0; };
 		if (!MergeCopies::MaterialWOf) MergeCopies::MaterialWOf = [](const void* pass, float& w) -> bool { return MaterialWFor(pass, w, true); };	// (batch 3: c211.w a key part)
 		if (MergeCopies::BeginFrame(TheRenderManager->device)) CapturedNormals::Hook(TheRenderManager->device);
@@ -947,11 +950,7 @@ void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTe
 	LampsInOnePass::Census::NewFrame();	// UNOFFICIAL, diagnostic (F10 only)
 	PbrPop::SpecLodTest::BeginFrame();	// UNOFFICIAL, test: PbrPopSpecLODEnd
 	PbrPop::PopLog::NewFrame();	// UNOFFICIAL, diagnostic: PbrPopLog
-	PassFamilyView::BeginFrame();	// UNOFFICIAL 2026-10-21, diagnostic: PassFamilyView
 	CasterView::BeginFrame();	// UNOFFICIAL 2026-10-28, diagnostic: CasterView
-	if (!LinearSceneCensus::ContextOf) LinearSceneCensus::ContextOf = []() -> int {
-		return ShaderSplit::CurrentContext == ShaderSplit::World ? 1 : ShaderSplit::CurrentContext == ShaderSplit::FirstPerson ? 2 : 0; };
-	LinearSceneCensus::BeginFrame(TheRenderManager->device);	// UNOFFICIAL 2026-10-28, diagnostic: LinearSceneCensus
 #endif
 	// UNOFFICIAL the skin shader (Skin.h): the blur's targets are cleared on the frame's first skin draw; interior faces take
 	// SkinShader's own passes while it is in use (Shaders.cpp UpdateFaceGenInteriorFlag: the game's own flag while Vanilla Plus
@@ -964,7 +963,6 @@ void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTe
 	Render(This, RenderedTexture, Arg2, Arg3);
 	ScopeOverlay::EndWorld();
 	SkyProjection::Join();	// UNOFFICIAL 2026-11-03 SkyOnWorker: never past the frame it was started in
-	ManyLamps::FinishTable();	// UNOFFICIAL 2026-11-14 LampTableThread: the lamp table never stays locked past the frame's render call
 	BoneMatrixBatch::OnFrameEnd(GpuTimer::Enabled);
 	ConstantMapSort::OnFrameEnd(GpuTimer::Enabled);
 	ShaderSplit::EndFrame();
@@ -2457,7 +2455,8 @@ namespace RmaosDraw {
 		TheRenderManager->device->SetTexture(2, texture);
 		TheRenderManager->renderState->NoteDeviceTexture(2, texture);
 		const DWORD states[][2] = { {D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP}, {D3DSAMP_ADDRESSV, D3DTADDRESS_WRAP},
-			{D3DSAMP_MAGFILTER, D3DTEXF_LINEAR}, {D3DSAMP_MINFILTER, D3DTEXF_LINEAR}, {D3DSAMP_MIPFILTER, D3DTEXF_LINEAR} };
+			{D3DSAMP_MAGFILTER, D3DTEXF_LINEAR}, {D3DSAMP_MINFILTER, D3DTEXF_LINEAR}, {D3DSAMP_MIPFILTER, D3DTEXF_LINEAR},
+			{D3DSAMP_SRGBTEXTURE, FALSE} };
 		for (const auto& s : states) TheRenderManager->SetSamplerState(2, (D3DSAMPLERSTATETYPE)s[0], s[1]);
 	}
 
@@ -2528,7 +2527,7 @@ namespace RmaosDraw {
 		if (on && FadeSeconds > 0.0f) share = std::clamp((float)((FrameNowMs - map->ArrivedMs) / (1000.0 * FadeSeconds)), 0.001f, 1.0f);
 		values[0] = on ? share : 0.0f;
 		ThisDraw = on;
-		if (on && ReflMaterial::Writing && map->ReflGeneration != ReflMaterial::OverrideGeneration) {
+		if (on && (ReflMaterial::Writing || ReflMaterial::FirstPersonLive) && map->ReflGeneration != ReflMaterial::OverrideGeneration) {
 			map->ReflRough = ReflMaterial::RoughFor(map->File);
 			map->ReflGeneration = ReflMaterial::OverrideGeneration;
 		}
@@ -3331,9 +3330,6 @@ namespace GrassFirst {
 		// last, after LinearScene has encoded the target back (its span ends at this function's end too).
 		struct ReactiveSpan { bool on; ReactiveSpan(bool main) : on(main && ShaderSplit::CurrentContext == ShaderSplit::World) {}
 			~ReactiveSpan() { if (on) { ShaderSplit::MarkStage("REACTIVE OPQ"); ReactiveMask::NoteOpaque(TheRenderManager->device); ShaderSplit::MarkStage("(post-main)"); } } } reactiveSpan(first == 1 && last == 0x25B && group < 0);
-#if NVR_TEST_TOOLS
-		struct CensusMain { bool was; CensusMain() : was(LinearSceneCensus::InMain) { LinearSceneCensus::InMain = true; } ~CensusMain() { LinearSceneCensus::InMain = was; } } censusMain;	// UNOFFICIAL 2026-10-28, diagnostic
-#endif
 		// UNOFFICIAL 2026-10-28 LinearScene: the world's main list in linear light, left encoded at its end (core/LinearScene.h).
 		struct LinearSpan { bool on; LinearSpan() : on(ShaderSplit::CurrentContext == ShaderSplit::World) { if (on) LinearScene::BeginSpan(TheRenderManager->device); }
 			~LinearSpan() { if (on) { ShaderSplit::MarkStage("LINEAR END"); LinearScene::EndSpan(TheRenderManager->device); } } } linearSpan;
@@ -4156,10 +4152,7 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 	FoldHighlights::OnBind(PixelShader ? PixelShader->Name : nullptr, PointShadowForward::LastPixelShaderNvr, PassIndex);	// UNOFFICIAL FoldHighlights
 	if (GBufferCensus::Mode) GBufferCensus::OnBind(boundPS, PixelShader ? PixelShader->Name : nullptr, PointShadowForward::LastPixelShaderNvr);	// UNOFFICIAL 2026-11-14 GBufferCensus (test only)
 #if NVR_TEST_TOOLS
-	PassFamilyView::OnBind(TheRenderManager->device, PixelShader ? PixelShader->Name : nullptr, PointShadowForward::LastPixelShaderNvr,
-		ShaderSplit::CurrentContext == ShaderSplit::World, PassIndex);	// UNOFFICIAL, diagnostic: PassFamilyView
 	CasterView::OnBind(TheRenderManager->device);	// UNOFFICIAL 2026-10-28, diagnostic
-	LinearSceneCensus::OnBind(boundPS, PixelShader ? PixelShader->Name : nullptr, PointShadowForward::LastPixelShaderNvr, PassIndex);	// UNOFFICIAL 2026-10-28, diagnostic
 #endif
 	PointShadowForward::SetForDraw(PixelShader, ShaderSplit::WorldOrScope(),	// (UNOFFICIAL 2026-11-12 [Main.Main.Scope] OwnCamera: lamp shadows in a scope's picture too)
 		ShaderSplit::CurrentContext == ShaderSplit::FirstPerson,
@@ -4806,7 +4799,6 @@ static void ForwardShadowsForPass(void* Pass) {
 	const PointShadowForward::RenderPassView* lamps = ManyLamps::Bound ? ManyLamps::Steady((const PointShadowForward::RenderPassView*)Pass) : (const PointShadowForward::RenderPassView*)Pass;
 	ManyLamps::ForPass(lamps, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-10-27 ManyLampsOnePass: the object's lamps in c37-c63
 	LampsInOnePass::GlowForPass((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL ManyLampsGlow: the glow map on s4
-	LampsInOnePass::EmitForPass((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL 2026-11-15 DeferredRenderer (native one pass): the emittance as the forward reference has it
 	PointShadowForward::OnRenderPass(lamps, ShaderSplit::WorldOrScope(),	// (UNOFFICIAL 2026-11-12 [Main.Main.Scope] OwnCamera, as SetForDraw)
 		ShaderSplit::CurrentContext == ShaderSplit::FirstPerson);
 	ManyLamps::ParityCheck((const PointShadowForward::RenderPassView*)Pass, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-10-31 TableLampsParity (a test)
@@ -4957,8 +4949,6 @@ void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32
 	LampsInOnePass::Census::Note(Pass, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL, diagnostic (F10 only)
 	if (ShaderSplit::CurrentContext == ShaderSplit::World || ShaderSplit::CurrentContext == ShaderSplit::FirstPerson)	// UNOFFICIAL, diagnostic: PbrPopLog
 		PbrPop::PopLog::Note((const PointShadowForward::RenderPassView*)Pass, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson ? 1 : 0);
-	if (LampPassTest::Skip(Pass, ShaderSplit::CurrentContext == ShaderSplit::World)) return;	// UNOFFICIAL, diagnostic
-	if (PassFamilyView::Skip(Pass, ShaderSplit::CurrentContext == ShaderSplit::World)) return;	// UNOFFICIAL, diagnostic: PassFamilyView
 	if (CasterView::Skip(Pass, ShaderSplit::CurrentContext == ShaderSplit::World)) return;	// UNOFFICIAL 2026-10-28, diagnostic: CasterView
 #endif
 	if (DeferredRenderer::Skip(Pass, (ShaderSplit::CurrentContext == ShaderSplit::World || DeferredRenderer::ViewModelRoot))) return;	// UNOFFICIAL 2026-11-14 full deferred renderer: the lamp pass adds this light
@@ -5003,12 +4993,12 @@ void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32
 	}
 	ClothWind::PassGeometry = ((const PointShadowForward::RenderPassView*)Pass)->geometry;	// UNOFFICIAL 2026-10-19 cloth: SetShadersHook notes this object
 #if NVR_TEST_TOOLS
-	PassFamilyView::BeforeDraw(TheRenderManager->device, Pass, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL, diagnostic
 	CasterView::BeforeDraw(TheRenderManager->device, Pass, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-10-28, diagnostic
 #endif
 	ReflMaterial::NeutralBegin(Pass, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World,
 		ShaderSplit::CurrentContext == ShaderSplit::FirstPerson, RmaosDraw::ThisDraw, TheRenderManager->device);	// UNOFFICIAL 2026-11-07 perf-mirrorfix: every pass's own alpha
-	ReflMaterial::ForPass(Pass, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World, RmaosDraw::ThisDraw, TheRenderManager->device);	// UNOFFICIAL MaterialAware reflections
+	ReflMaterial::ForPass(Pass, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World,
+		ShaderSplit::CurrentContext == ShaderSplit::FirstPerson, RmaosDraw::ThisDraw, TheRenderManager->device);	// UNOFFICIAL MaterialAware reflections
 	const bool countOpt = OnePassDepth::Count && GpuTimer::Enabled && ShaderSplit::CurrentContext == ShaderSplit::World &&
 		OnePassDepth::IsOpt(((const PointShadowForward::RenderPassView*)Pass)->passEnum);	// UNOFFICIAL LampsDepthFirstCount (test aid)
 	if (countOpt) OnePassDepth::Counts::Before(TheRenderManager->device);
@@ -5045,19 +5035,14 @@ void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32
 	if (countOpt) OnePassDepth::Counts::After();
 	ManyLamps::AfterDraw((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL ManyLampsOnePass: the first person's lighting offset
 	LampsInOnePass::GlowAfterDraw(Pass);	// UNOFFICIAL ManyLampsGlow (statistics)
-	LampsInOnePass::EmitAfterPass();	// UNOFFICIAL 2026-11-15 (the game's own emittance choice back)
 	ReflMaterial::AfterPass(TheRenderManager->device);
 	ReflMaterial::NeutralEnd(TheRenderManager->device);	// (perf-mirrorfix)
 #if NVR_TEST_TOOLS
 	FoldHighlights::AfterDraw(TheRenderManager->device);	// UNOFFICIAL, diagnostic
-	PassFamilyView::After(TheRenderManager->device, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL, diagnostic
 	CasterView::After(TheRenderManager->device);	// UNOFFICIAL 2026-10-28, diagnostic
 #endif
 	ClothWind::PassGeometry = nullptr;
 	ClothWind::AfterDraw(TheRenderManager->device);	// UNOFFICIAL 2026-10-19: no cloth values left behind for other draws
-#if NVR_TEST_TOOLS
-	LampPassTest::AfterDraw(Pass, ShaderSplit::CurrentContext == ShaderSplit::World, TheRenderManager->device);	// UNOFFICIAL, diagnostic
-#endif
 	LampScissor::After();
 	HiddenObjectCulling::After();
 	PointShadowForward::NoteDraw((const PointShadowForward::RenderPassView*)Pass, ShaderSplit::CurrentContext == ShaderSplit::World);	// LogLamps diagnostic
@@ -5069,8 +5054,6 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 	LampsInOnePass::Census::Note(Pass, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL, diagnostic (F10 only)
 	if (ShaderSplit::CurrentContext == ShaderSplit::World || ShaderSplit::CurrentContext == ShaderSplit::FirstPerson)	// UNOFFICIAL, diagnostic: PbrPopLog
 		PbrPop::PopLog::Note((const PointShadowForward::RenderPassView*)Pass, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson ? 1 : 0);
-	if (LampPassTest::Skip(Pass, ShaderSplit::CurrentContext == ShaderSplit::World)) return;	// UNOFFICIAL, diagnostic
-	if (PassFamilyView::Skip(Pass, ShaderSplit::CurrentContext == ShaderSplit::World)) return;	// UNOFFICIAL, diagnostic: PassFamilyView
 	if (CasterView::Skip(Pass, ShaderSplit::CurrentContext == ShaderSplit::World)) return;	// UNOFFICIAL 2026-10-28, diagnostic: CasterView
 #endif
 	if (DeferredRenderer::Skip(Pass, (ShaderSplit::CurrentContext == ShaderSplit::World || DeferredRenderer::ViewModelRoot))) return;	// UNOFFICIAL 2026-11-14 full deferred renderer: the lamp pass adds this light
@@ -5107,12 +5090,12 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 	ForwardShadowsForPass(Pass);
 	ClothWind::PassGeometry = ((const PointShadowForward::RenderPassView*)Pass)->geometry;	// UNOFFICIAL 2026-10-19 cloth: SetShadersHook notes this object
 #if NVR_TEST_TOOLS
-	PassFamilyView::BeforeDraw(TheRenderManager->device, Pass, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL, diagnostic
 	CasterView::BeforeDraw(TheRenderManager->device, Pass, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-10-28, diagnostic
 #endif
 	ReflMaterial::NeutralBegin(Pass, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World,
 		ShaderSplit::CurrentContext == ShaderSplit::FirstPerson, RmaosDraw::ThisDraw, TheRenderManager->device);	// UNOFFICIAL 2026-11-07 perf-mirrorfix: every pass's own alpha
-	ReflMaterial::ForPass(Pass, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World, RmaosDraw::ThisDraw, TheRenderManager->device);	// UNOFFICIAL MaterialAware reflections
+	ReflMaterial::ForPass(Pass, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World,
+		ShaderSplit::CurrentContext == ShaderSplit::FirstPerson, RmaosDraw::ThisDraw, TheRenderManager->device);	// UNOFFICIAL MaterialAware reflections
 	const bool countOpt = OnePassDepth::Count && GpuTimer::Enabled && ShaderSplit::CurrentContext == ShaderSplit::World &&
 		OnePassDepth::IsOpt(((const PointShadowForward::RenderPassView*)Pass)->passEnum);	// UNOFFICIAL LampsDepthFirstCount (test aid)
 	if (countOpt) OnePassDepth::Counts::Before(TheRenderManager->device);
@@ -5139,12 +5122,10 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 	if (countOpt) OnePassDepth::Counts::After();
 	ManyLamps::AfterDraw((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL ManyLampsOnePass: the first person's lighting offset
 	LampsInOnePass::GlowAfterDraw(Pass);	// UNOFFICIAL ManyLampsGlow (statistics)
-	LampsInOnePass::EmitAfterPass();	// UNOFFICIAL 2026-11-15 (the game's own emittance choice back)
 	ReflMaterial::AfterPass(TheRenderManager->device);
 	ReflMaterial::NeutralEnd(TheRenderManager->device);	// (perf-mirrorfix)
 #if NVR_TEST_TOOLS
 	FoldHighlights::AfterDraw(TheRenderManager->device);	// UNOFFICIAL, diagnostic
-	PassFamilyView::After(TheRenderManager->device, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL, diagnostic
 	CasterView::After(TheRenderManager->device);	// UNOFFICIAL 2026-10-28, diagnostic
 #endif
 	ClothWind::PassGeometry = nullptr;
@@ -5915,6 +5896,11 @@ void __fastcall RenderWorldSceneGraphHook(Main* This, UInt32 edx, Sun* SkySun, U
 	}
 }
 
+static bool IsEnvTemplatePixelShaderBound() {
+	const char* name = ShaderRecordPixel::Current ? ShaderRecordPixel::Current->Name : nullptr;
+	return name && (!strcmp(name, "SLS2057.pso") || !strcmp(name, "SLS2058.pso"));
+}
+
 using RenderFirstPersonMethod = void(__thiscall*)(Main*, NiDX9Renderer*, NiGeometry*, Sun*, BSRenderedTexture*);
 RenderFirstPersonMethod RenderFirstPerson = reinterpret_cast<RenderFirstPersonMethod>(Hooks::RenderFirstPerson);
 void __fastcall RenderFirstPersonHook(Main* This, UInt32 edx, NiDX9Renderer* Renderer, NiGeometry* Geo, Sun* SkySun, BSRenderedTexture* RenderedTexture) {
@@ -5979,7 +5965,7 @@ void __fastcall RenderFirstPersonHook(Main* This, UInt32 edx, NiDX9Renderer* Ren
 	ReflectionsEffect* reflEff = TheShaderManager->Effects.Reflections;
 	ReflMaterial::BeginFirstPerson(TheRenderManager->renderState, TheRenderManager->device,
 		ReflMaterial::CompiledIn() && TheSettingManager->GetSettingI("Shaders.Reflections.Main", "MaterialAware") > 0,
-		reflEff && reflEff->WeaponReflectionsActive());
+		reflEff && reflEff->WeaponReflectionsActive(), IsEnvTemplatePixelShaderBound());
 	{
 		bool vmCapture = false, vmJitter = false;
 		float vmJx = 0.0f, vmJy = 0.0f;
@@ -6047,7 +6033,7 @@ void __fastcall RenderFirstPersonHook(Main* This, UInt32 edx, NiDX9Renderer* Ren
 		TheRenderManager->device->SetVertexShaderConstantF(244, (const float*)&savedInvView, 4);
 	}
 	ViewModelMotion::EndCapture();
-	ReflMaterial::EndFirstPerson(TheRenderManager->renderState, TheRenderManager->device);
+	ReflMaterial::EndFirstPerson(TheRenderManager->renderState, TheRenderManager->device, IsEnvTemplatePixelShaderBound());
 	CapturedNormals::EndViewModelSpan(TheRenderManager->device, TheFrameRateManager->FrameNumber);
 	if (fpLinear) LinearScene::EndSpan(TheRenderManager->device);
 	DeferredFirstPerson::End(TheRenderManager->device);	// UNOFFICIAL 2026-11-15: the gear's weather and the light passes on the view model (before its sun map's constants go back)
@@ -6426,7 +6412,6 @@ void __fastcall RenderInterfaceHook(void* apThis, void*, void* apCuller, bool ab
 	// the warm-ups (native D3D9) wait for that, so they draw those records too, as before
 	if (LateInteriors::Any()) { SessionLog::StageScope late("lamp-shadow records"); LateInteriors::Tick(Player && Player->parentCell && Player->parentCell->IsInterior()); }
 	if (!LateInteriors::Any()) {
-		{ SessionLog::StageScope warm("shader warm-up"); ShaderWarmUp::OnInterfaceFrame(); }	// UNOFFICIAL: at the main menu, draw the shaders used in play once (ShaderWarmUp.h)
 		{ SessionLog::StageScope warm("shader warm-up 2"); ShaderWarmUp2::OnInterfaceFrame(); }	// UNOFFICIAL: at the main menu, draw the recorded drawing setups once (ShaderWarmUp2.h)
 	}
 	{ SessionLog::StageScope movie("the main menu movie"); RenderMainMenuMovie(); }

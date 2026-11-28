@@ -440,7 +440,7 @@ static const MenuGroup kMenuGroups[] = {
 
 	// Main.Main.Performance (the DXVK group above stays as it is)
 	{ "Main.Main.Performance", "Shader compiling and warm-up",
-		"ParallelShaderCompile, NewEffectCompiler, ShaderWarmUp, ShaderWarmUp2, ShaderWarmUp2BudgetMs, ShaderWarmUp2MinMs",
+		"ParallelShaderCompile, NewEffectCompiler, ShaderWarmUp2, ShaderWarmUp2BudgetMs, ShaderWarmUp2MinMs",
 		FogType::None, true, "How the mod's shaders are compiled at game start and preloaded against stutter.", nullptr },
 	{ "Main.Main.Performance", "ReShade",
 		"ReShadeDepthCompat, ReShadeNVRDepth, ReShadeBeforeHUD, ReShadeUnderNVRMenu, ReShadeDepthNearRemap, ReShadeMenuGuard, "
@@ -452,7 +452,7 @@ static const MenuGroup kMenuGroups[] = {
 		"FrameChain, CompositeApply, ChainUsesGameTexture, MergedDepthNormals, SkipIdentityExposure, SlimDepthBuffer",
 		FogType::None, false, "Fewer whole-frame copies and passes between the mod's effects.", nullptr },
 	{ "Main.Main.Performance", "Lamp light passes",
-		"LampScissor, LampScissorExact, TrimLampPasses, LampMaskScissor, LampMaskScissorCheck, LampPassTestSkip, LampPassOrderLog",
+		"LampScissor, LampScissorExact, TrimLampPasses, LampMaskScissor, LampMaskScissorCheck, LampPassOrderLog",
 		FogType::None, false, "Indoors, each extra lamp's light is drawn only where the lamp reaches.", nullptr },
 	{ "Main.Main.Performance", "Indoor lamp shadows",
 		"SkinnedShadowFaceTest, FastCasterHash, CasterListCache, InteriorShadowFold, InteriorShadowFoldRound, InteriorShadowFoldCheck, "
@@ -2151,14 +2151,14 @@ static void RenderIndirectLightingPage() {
 static bool IsDeferredQualityKey(const char* key) {
 	if (!strncmp(key, "GearWeather", 11)) return true;
 	static const char* const kDeferredKeys[] = {
-		"DeferredRenderer", "DeferredRendererLive", "DeferredStandalone", "DeferredRendererOnePass",
-		"DeferredTransparents", "DeferredFoliage", "DeferredFoliageLamps",
+		"DeferredRendererLive", "DeferredStandalone",
+		"DeferredTransparents", "DeferredFoliageLamps",
 		"DeferredSkin", "DeferredSkinLive", "DeferredSkinBlur", "DeferredSkinSSS",
 		"DeferredHair", "DeferredHairLive", "DeferredFirstPerson", "DeferredFirstPersonLive",
-		"DeferredDistant", "DeferredReflections", "DeferredBumpedNormals",
+		"DeferredReflections", "DeferredBumpedNormals",
 		"DeferredALAlbedo", "DeferredALAlbedoGain", "DeferredRRGuides",
 		"DeferredRtSunFirst", "DeferredTiledLight", "DeferredADFog",
-		"DeferredDepth", "DeferredDepthProbe", "GBufferV2", "GBufferView"
+		"DeferredDepthProbe", "GBufferView"
 	};
 	for (const char* k : kDeferredKeys) if (!strcmp(key, k)) return true;
 	return false;
@@ -2176,28 +2176,13 @@ static void DrawSettingKey(const char* section, const char* key, bool skipIntern
 static void RenderDeferredRendererPage() {
 	PageTitle("Deferred renderer", "Unified screen-space sun and lamp lighting, G-buffer materials, skin/hair/glass deferred paths, and developer controls.");
 
-	const int defMode = TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredRenderer");
-	const int bootMode = SettingForce::Mode();
-	const bool msaa = RtOn("Main.Main.Misc", "ForceMSAA");
 	const ImVec4 green(0.45f, 0.85f, 0.45f, 1.0f);
-	const ImVec4 amber(1.0f, 0.75f, 0.2f, 1.0f);
 
 	ImGui::TextUnformatted("Active state:");
 	ImGui::SameLine();
-	if (msaa) ImGui::TextColored(amber, "Forward + MSAA (ForceMSAA overrides Deferred)");
-	else if (bootMode >= 2) ImGui::TextColored(green, "Deferred (Full: outdoors + indoors)");
-	else if (bootMode == 1) ImGui::TextColored(green, "Deferred (Indoors only)");
-	else ImGui::TextDisabled("Forward (Off)");
+	ImGui::TextColored(green, "Deferred (Full: outdoors + indoors)");
 
-	if (defMode != bootMode) {
-		ImGui::PushTextWrapPos(0.0f);
-		ImGui::TextColored(kRestartOrange, "Mode changed since launch - press Save and restart the game to apply.");
-		ImGui::PopTextWrapPos();
-	}
-
-	DrawSettingKey("Main.Main.Quality", "DeferredRenderer");
 	if (ImGui::Button("Apply recommended settings##def_recommended")) {
-		TheSettingManager->SetSetting("Main.Main.Quality", "DeferredRenderer", 2);
 		TheSettingManager->SetSetting("Main.Main.Quality", "DeferredSkin", true);
 		TheSettingManager->SetSetting("Main.Main.Quality", "DeferredSkinSSS", 2);
 		TheSettingManager->SetSetting("Main.Main.Quality", "DeferredHair", true);
@@ -2206,7 +2191,7 @@ static void RenderDeferredRendererPage() {
 		TheSettingManager->LoadSettings();
 	}
 	if (ImGui::IsItemHovered())
-		WrappedTooltip("Sets DeferredRenderer to Full (2) and enables the recommended sub-features (Skin, Burley SSS, Hair, Transparents, Bumped Normals). Press Save and restart if startup settings changed.");
+		WrappedTooltip("Enables the recommended deferred sub-features (Skin, Burley SSS, Hair, Transparents, Bumped Normals). Press Save and restart if startup settings changed.");
 
 	ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.5f));
 	if (MenuWidgets::SubHeader("Deferred features###def_features", true)) {
@@ -2219,7 +2204,7 @@ static void RenderDeferredRendererPage() {
 	if (!DevOptionsShown()) {
 		ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.5f));
 		ImGui::PushTextWrapPos(0.0f);
-		ImGui::TextDisabled("First-person deferred, experimental switches, and forced prerequisites are hidden (View > Developer options).");
+		ImGui::TextDisabled("First-person deferred and experimental switches are hidden (View > Developer options).");
 		ImGui::PopTextWrapPos();
 		return;
 	}
@@ -2251,19 +2236,6 @@ static void RenderDeferredRendererPage() {
 		};
 		for (const char* k : kSunKeys) DrawSettingKey("Shaders.ShadowsExteriors.Deferred", k);
 	}
-
-	if (MenuWidgets::SubHeader("Managed automatically by DeferredRenderer (Dev)###def_forced", false)) {
-		ImGui::PushTextWrapPos(0.0f);
-		ImGui::TextDisabled("Forced by SettingForce while DeferredRenderer is active (mode 1 or 2). Shown read-only for visibility.");
-		ImGui::PopTextWrapPos();
-		static const char* const kForcedKeys[] = {
-			"GBufferV2", "DeferredDepth", "DeferredFoliage", "DeferredDistant"
-		};
-		for (const char* k : kForcedKeys) DrawSettingKey("Main.Main.Quality", k);
-		ImGui::PushTextWrapPos(0.0f);
-		ImGui::TextDisabled("Also forced across other sections: CapturedNormals, MaterialBuffer, AlbedoBuffer, Shaders.PBR.Linear (Enabled/LinearScene), Main.Main.Misc (FoldFog, LampTableStandalone/Fast), ShadowsInteriors (Forward/Atlas/Deferred), ShadowsExteriors.Deferred (mode 2), Terrain.Blending.Smooth = 0 (mode 2).");
-		ImGui::PopTextWrapPos();
-	}
 }
 
 static bool ContainsNoCase(const char* haystack, const char* needle) {
@@ -2291,7 +2263,6 @@ static void RenderDebugSettingsPage() {
 		{ "Main.Main.Quality", "GearWeatherDebug", "Gear weather (GearWeatherDebug)", DbgKind::IntZero },
 		{ "Shaders.WorldSurface.Main", "DebugView", "World surface detail (DebugView)", DbgKind::IntZero },
 		{ "Main.Main.ReducedQuality", "SunLayersDebug", "Sun layers (SunLayersDebug)", DbgKind::IntZero },
-		{ "Main.Main.Misc", "PassFamilyView", "Pass family (PassFamilyView)", DbgKind::IntZero },
 	};
 	static const DbgItem kDbgLighting[] = {
 		{ "Shaders.AmbientLight.Main", "DebugView", "Ambient light (DebugView)", DbgKind::IntZero },
@@ -2497,12 +2468,10 @@ static const char* const kScopeUnderDev = "Main.Main.Quality:GearWeather, Main.M
 static void DrawGearWeatherControls() {
 	DrawSettingKey("Main.Main.Quality", "GearWeather", false);
 	{
-		const int defMode = TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredRenderer");
 		const bool fpOn = TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredFirstPerson") != 0;
-		const bool msaa = TheSettingManager->GetSettingI("Main.Main.Misc", "ForceMSAA") != 0;
-		if (defMode < 1 || msaa || !fpOn) {
+		if (!fpOn) {
 			ImGui::PushTextWrapPos(0.0f);
-			ImGui::TextColored(kRestartOrange, "Requires DeferredRenderer and DeferredFirstPerson (restart).");
+			ImGui::TextColored(kRestartOrange, "Requires DeferredFirstPerson (restart).");
 			ImGui::PopTextWrapPos();
 			DrawSettingKey("Main.Main.Quality", "DeferredFirstPerson", false);
 		}
@@ -2552,13 +2521,6 @@ static void RenderUnderDevelopmentPage() {
 	const bool wsMarked = ScopeMarked("Shaders.WorldSurface.Status:Enabled, Shaders.WorldSurface.Main, Shaders.WorldSurface.Dust, Shaders.WorldSurface.Rust, Shaders.WorldSurface.Waterline, Shaders.WorldSurface.Moss");
 	if (MenuWidgets::SubHeader("World surface detail & weathering###underdev_ws", true, wsMarked)) {
 		DrawVisualEffectSwitch("WorldSurface", "World surface detail & weathering");
-		const int defMode = TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredRenderer");
-		const bool msaa = TheSettingManager->GetSettingI("Main.Main.Misc", "ForceMSAA") != 0;
-		if (defMode < 1 || msaa) {
-			ImGui::PushTextWrapPos(0.0f);
-			ImGui::TextColored(kRestartOrange, "Requires DeferredRenderer (and ForceMSAA off; restart).");
-			ImGui::PopTextWrapPos();
-		}
 		DrawVisualItem({ "Shaders.WorldSurface.Main", nullptr, nullptr }, false);
 		DrawVisualItem({ "Shaders.WorldSurface.Dust", nullptr, "Crevice & seam dust" }, true);
 		DrawVisualItem({ "Shaders.WorldSurface.Rust", nullptr, "Metal oxidation & rust" }, true);
@@ -2568,13 +2530,6 @@ static void RenderUnderDevelopmentPage() {
 	}
 
 	if (MenuWidgets::SubHeader("Material subsurface scattering (MaterialSSS)###underdev_sss", true, UnsavedSettings::Key("Main.Main.Quality", "MaterialSSS"))) {
-		const int defMode = TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredRenderer");
-		const bool msaa = TheSettingManager->GetSettingI("Main.Main.Misc", "ForceMSAA") != 0;
-		if (defMode < 2 || msaa) {
-			ImGui::PushTextWrapPos(0.0f);
-			ImGui::TextColored(kRestartOrange, "Requires Full DeferredRenderer (mode 2) and ForceMSAA off.");
-			ImGui::PopTextWrapPos();
-		}
 		DrawSettingKey("Main.Main.Quality", "MaterialSSS", false, "Material SSS mode");
 		ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.35f));
 	}
@@ -2629,12 +2584,7 @@ static void RenderQuickSettingsPage() {
 	ImGui::Separator();
 	statusLine("DXVK fork", DxvkCompute::Available() ? &green : &kRestartOrange,
 		DxvkCompute::Available() ? "Loaded (Vulkan compute, tessellation & RT)" : "Not loaded (D3D9 / stock DXVK - no Vulkan or RT)");
-	const int defMode = TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredRenderer");
-	const bool msaa = RtOn("Main.Main.Misc", "ForceMSAA");
-	if (msaa) statusLine("Renderer", &amber, "Forward + MSAA (ForceMSAA overrides Deferred)");
-	else if (defMode >= 2) statusLine("Renderer", &green, "Deferred (Full: outdoors + indoors)");
-	else if (defMode == 1) statusLine("Renderer", &green, "Deferred (Indoors only)");
-	else statusLine("Renderer", nullptr, "Forward (Deferred off)");
+	statusLine("Renderer", &green, "Deferred (Full: outdoors + indoors)");
 	statusLine("Location", nullptr, TheShaderManager->GameState.isExterior ? "Outdoors (uses outdoor settings)" : "Indoors (uses indoor settings)");
 	if (DxvkCompute::Available()) {
 		DrawRtStatusLine("Ray tracing", RtCoreLine());
@@ -2656,7 +2606,6 @@ static void RenderQuickSettingsPage() {
 		if (ImGui::IsItemHovered() || MenuWidgets::RowLabelHovered())
 			WrappedTooltip("Master switch: turns all Vegas Shaders effects on or off at once (hotkey: modifier + menu key).");
 
-		DrawVisualItem({ "Main.Main.Quality", "DeferredRenderer", nullptr }, false);
 		if (ImGui::Button("Open Deferred Renderer...##qs_jump_deferred")) gMenu.page = kDeferredTabId;
 
 		static const char* const kAaNames[] = {
@@ -2801,15 +2750,6 @@ static void DrawSimpleEffectCard(const char* shader, const char* title, std::ini
 		ImGui::PushTextWrapPos(0.0f);
 		ImGui::TextColored(kRestartOrange, "Warning: HDR currently causes freezes for some players. A fix is being researched.");
 		ImGui::PopTextWrapPos();
-	}
-	if (!strcmp(shader, "WorldSurface")) {
-		const int defMode = TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredRenderer");
-		const bool msaa = TheSettingManager->GetSettingI("Main.Main.Misc", "ForceMSAA") != 0;
-		if (defMode < 1 || msaa) {
-			ImGui::PushTextWrapPos(0.0f);
-			ImGui::TextColored(kRestartOrange, "Requires DeferredRenderer (and ForceMSAA off; restart).");
-			ImGui::PopTextWrapPos();
-		}
 	}
 	if (on) {
 		DrawPtNote(shader);

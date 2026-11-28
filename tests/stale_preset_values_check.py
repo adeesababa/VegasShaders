@@ -19,7 +19,16 @@ table = {}
 for sec, key, val in re.findall(r'\{ "([^"]+)", "([^"]+)", ([0-9.]+)f, \d+(?:, true)? \}', hdr):
     table[(sec.lower(), key.lower())] = float(val)
 
-GONE = {('shaders.shadowsexteriors.shadowmaps', 'mode')}   # 70's key is no longer a setting (ignored by the build itself)
+GONE = {
+    ('shaders.shadowsexteriors.shadowmaps', 'mode'),   # 70's key is no longer a setting (ignored by the build itself)
+    ('shaders.pbr.linear', 'linearscene'),
+    ('main.main.quality', 'materialbuffer'),
+    ('main.main.quality', 'albedobuffer'),
+    ('shaders.shadowsinteriors.atlas', 'enabled'),
+    ('shaders.shadowsinteriors.deferred', 'enabled'),
+    ('main.main.quality', 'deferredrenderer'),
+    ('shaders.taa.fsr', 'version'),
+}
 
 LOOK_OR_CHOICE = {
     ('shaders.ambientlight.status', 'enabled'),            # 68: an effect switch

@@ -203,7 +203,6 @@
     <ClCompile Include="..\src\effects\TAA\TAA.cpp" />
     <ClCompile Include="..\src\effects\TAA\TAAFSR.cpp" />
     <ClCompile Include="..\src\effects\TAA\TAAUpscale.cpp" />
-    <ClCompile Include="..\src\core\Upscaler.cpp" />
     <ClCompile Include="..\src\core\UpscalerDlss.cpp" />
     <ClCompile Include="..\src\core\UpscalerFsr31.cpp" />
     <ClCompile Include="..\src\core\RtCore.cpp" />
@@ -334,7 +333,6 @@
     <ClInclude Include="..\src\core\Paths.h" />
     <ClInclude Include="..\src\core\DxvkLoader.h" />
     <ClInclude Include="..\src\core\InstallCheck.h" />
-    <ClInclude Include="..\src\core\ShaderCounters.h" />
     <ClInclude Include="..\src\core\NvrDxvkExt.h" />
     <ClInclude Include="..\src\core\GpuProfiler.h" />
     <ClInclude Include="..\src\core\ScreenSpaceShadows.h" />

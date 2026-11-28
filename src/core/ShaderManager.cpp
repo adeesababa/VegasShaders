@@ -46,6 +46,7 @@
 #include "ShaderPrecompile.h"	// UNOFFICIAL 2026-11-16 fast-restart (LateInteriors: the workers' jobs still running)
 #include "LateInteriors.h"	// UNOFFICIAL 2026-11-16 fast-restart
 #include "Branding.h"
+#include "TestTools.h"
 #include <fstream>
 #include <unordered_map>	// UNOFFICIAL 2026-10-27 RenderScale v2 (RenderRect::RescaleRegistered)
 extern D3DXVECTOR4 NvrGameMultisample;	// UNOFFICIAL 2026-11-04 Hooks/Settings.cpp (TESR_GameMultisample)
@@ -53,6 +54,90 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 
 // Clears live shader/effect Cache directories once when a new VegasShaders.dll build runs,
 // leaving CacheShipped\ untouched so prebuilt default shaders remain ready.
+static std::string ReadCacheStampTrimmed(const std::string& path) {
+	HANDLE file = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+		nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (file == INVALID_HANDLE_VALUE) return {};
+	char buf[256] = {};
+	DWORD read = 0;
+	const BOOL ok = ReadFile(file, buf, sizeof(buf) - 1, &read, nullptr);
+	CloseHandle(file);
+	if (!ok || read == 0) return {};
+	std::string text(buf, read);
+	while (!text.empty() && (text.back() == '\r' || text.back() == '\n' || text.back() == ' ' || text.back() == '\t'))
+		text.pop_back();
+	return text;
+}
+
+static bool EnsureCacheFolders(const std::string& path) {
+	for (size_t at = path.find_first_of("\\/"); at != std::string::npos; at = path.find_first_of("\\/", at + 1)) {
+		if (at > 0 && path[at - 1] != ':') CreateDirectoryA(path.substr(0, at).c_str(), nullptr);
+	}
+	if (CreateDirectoryA(path.c_str(), nullptr)) return true;
+	const DWORD attr = GetFileAttributesA(path.c_str());
+	return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static bool WriteCacheStampVerified(const std::string& path, const char* text) {
+	HANDLE file = CreateFileA(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+		nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (file == INVALID_HANDLE_VALUE) {
+		Logger::Log("[WARNING] Shader cache: failed to open stamp %s for write (err=%lu)", path.c_str(), GetLastError());
+		return false;
+	}
+	const DWORD len = (DWORD)strlen(text);
+	DWORD written = 0;
+	const BOOL ok = WriteFile(file, text, len, &written, nullptr);
+	const DWORD err = ok ? 0 : GetLastError();
+	CloseHandle(file);
+	if (!ok || written != len) {
+		Logger::Log("[WARNING] Shader cache: failed to write stamp %s (err=%lu)", path.c_str(), err);
+		return false;
+	}
+	if (ReadCacheStampTrimmed(path) != text) {
+		Logger::Log("[WARNING] Shader cache: build stamp read-back mismatch at %s", path.c_str());
+		return false;
+	}
+	return true;
+}
+
+static size_t DeleteDirectoryTreeContents(const std::string& dir, const char* keepFileName) {
+	std::vector<std::string> files;
+	std::vector<std::string> subdirs;
+	WIN32_FIND_DATAA entry = {};
+	const HANDLE search = FindFirstFileA((dir + "\\*").c_str(), &entry);
+	if (search == INVALID_HANDLE_VALUE) return 0;
+	do {
+		const char* name = entry.cFileName;
+		if (!strcmp(name, ".") || !strcmp(name, "..")) continue;
+		if (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+			subdirs.emplace_back(dir + "\\" + name);
+		}
+		else if (!keepFileName || _stricmp(name, keepFileName) != 0) {
+			files.emplace_back(dir + "\\" + name);
+		}
+	} while (FindNextFileA(search, &entry));
+	FindClose(search);
+
+	size_t cleared = 0;
+	for (const std::string& file : files) {
+		SetFileAttributesA(file.c_str(), FILE_ATTRIBUTE_NORMAL);
+		if (DeleteFileA(file.c_str())) cleared++;
+	}
+	for (const std::string& sub : subdirs) {
+		cleared += DeleteDirectoryTreeContents(sub, nullptr);
+		SetFileAttributesA(sub.c_str(), FILE_ATTRIBUTE_NORMAL);
+		if (RemoveDirectoryA(sub.c_str())) cleared++;
+	}
+	return cleared;
+}
+
+static std::string AbsoluteCacheDir(const char* baseDir) {
+	std::string s = std::string(baseDir ? baseDir : "") + "Cache";
+	if (s.size() >= 2 && (s[1] == ':' || (s[0] == '\\' && s[1] == '\\'))) return s;
+	return Paths::GameRoot() + "\\" + s;
+}
+
 static void AutoClearStaleShaderCache() {
 	const auto* base = reinterpret_cast<const unsigned char*>(&__ImageBase);
 	const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + __ImageBase.e_lfanew);
@@ -62,38 +147,51 @@ static void AutoClearStaleShaderCache() {
 		static_cast<unsigned>(nt->FileHeader.TimeDateStamp),
 		static_cast<unsigned>(nt->OptionalHeader.SizeOfImage));
 
+	static const char* const kStampName = "vs_build_stamp.txt";
+	static const char* const kLegacyStampName = ".vs-build-stamp";
+	const std::string backupStampPath = Paths::PluginsDir() + "VegasShaders.cache.stamp";
+	const std::string backupPrev = ReadCacheStampTrimmed(backupStampPath);
+
 	const std::string cacheDirs[2] = {
-		std::string(ShadersPath) + "Cache",
-		std::string(EffectsPath) + "Cache",
+		AbsoluteCacheDir(ShadersPath),
+		AbsoluteCacheDir(EffectsPath),
 	};
 	for (const std::string& cacheDir : cacheDirs) {
-		const std::string stampPath = cacheDir + "\\.vs-build-stamp";
-		std::string prev;
-		{
-			std::ifstream in(stampPath, std::ios::in | std::ios::binary);
-			if (in.is_open()) {
-				prev.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-				while (!prev.empty() && (prev.back() == '\r' || prev.back() == '\n')) prev.pop_back();
-			}
+		const std::string stampPath = cacheDir + "\\" + kStampName;
+		const std::string legacyStampPath = cacheDir + "\\" + kLegacyStampName;
+		const std::string prev = ReadCacheStampTrimmed(stampPath);
+		if (prev == stamp) {
+			if (GetFileAttributesA(legacyStampPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+				DeleteFileA(legacyStampPath.c_str());
+			continue;
 		}
-		if (prev == stamp) continue;
+		const std::string legacyPrev = prev.empty() ? ReadCacheStampTrimmed(legacyStampPath) : std::string();
+		if (legacyPrev == stamp) {
+			EnsureCacheFolders(cacheDir);
+			WriteCacheStampVerified(stampPath, stamp);
+			DeleteFileA(legacyStampPath.c_str());
+			continue;
+		}
+		if (backupPrev == stamp) {
+			EnsureCacheFolders(cacheDir);
+			WriteCacheStampVerified(stampPath, stamp);
+			Logger::Log("Shader cache: build %s already initialized (restored stamp in %s)", stamp, cacheDir.c_str());
+			continue;
+		}
 
-		std::error_code ec;
-		size_t cleared = 0;
-		if (std::filesystem::exists(cacheDir, ec)) {
-			for (std::filesystem::directory_iterator it(cacheDir, ec), end; !ec && it != end; it.increment(ec)) {
-				std::error_code rmEc;
-				const auto n = std::filesystem::remove_all(it->path(), rmEc);
-				if (!rmEc && n > 0) cleared += static_cast<size_t>(n);
-			}
-		}
+		const size_t cleared = DeleteDirectoryTreeContents(cacheDir, kStampName);
+		const std::string& oldStamp = !prev.empty() ? prev : !legacyPrev.empty() ? legacyPrev : backupPrev;
 		if (cleared > 0) {
 			Logger::Log("Shader cache: new build detected (%s -> %s); cleared %zu stale entr%s in %s",
-				prev.empty() ? "none" : prev.c_str(), stamp, cleared, cleared == 1 ? "y" : "ies", cacheDir.c_str());
+				oldStamp.empty() ? "none" : oldStamp.c_str(), stamp, cleared, cleared == 1 ? "y" : "ies", cacheDir.c_str());
 		}
-		std::filesystem::create_directories(cacheDir, ec);
-		std::ofstream out(stampPath, std::ios::out | std::ios::binary | std::ios::trunc);
-		if (out.is_open()) out.write(stamp, strlen(stamp));
+		EnsureCacheFolders(cacheDir);
+		WriteCacheStampVerified(stampPath, stamp);
+	}
+
+	if (backupPrev != stamp) {
+		EnsureCacheFolders(Paths::PluginsDir());
+		WriteCacheStampVerified(backupStampPath, stamp);
 	}
 }
 
@@ -130,7 +228,7 @@ void ShaderManager::Initialize() {
 	sm->PreviousCell = nullptr;
 	sm->IsMenuSwitch = false;
 
-	AutoClearStaleShaderCache();
+	if constexpr (!NVR_TEST_TOOLS) AutoClearStaleShaderCache();
 
 	// Cache folders the shader and effect code writes into, created in this order; a failure is logged and skipped.
 	// The folders are Paths.h's (Data\Shaders\VegasShaders, Data\Textures\VegasShaders, or the old ones of an older install).
@@ -1386,8 +1484,7 @@ static void LoadLampShadowRecords(NiD3DPixelShaderEx* pixel, const ShaderTemplat
 	// from their own source with INTERIOR_SHADOWS, the sun's code compiled out (it never runs indoors). Only with the
 	// setting on at startup; exteriors keep their records.
 	if (!pixel->ShaderProg[ShaderRecordType::Interior] && pixel->ShaderProg[ShaderRecordType::Default] &&
-		PointShadowForward::Eligible(pixel->Name, tmpl) &&
-		TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Forward", "Enabled")) {
+		PointShadowForward::Eligible(pixel->Name, tmpl)) {
 		// UNOFFICIAL 2026-10-20 (P82 tester): when the GPU refuses a record (too long), shorter ones in turn (PointShadowForward.hlsl
 		// POINT_SHADOW_FIT, each with its own cache folder; the first is the old one exactly, also what ShaderPrecompile makes), and
 		// PointShadowForward::FitLevel / Refused keep every object to what the shortest one loaded can do.
@@ -1437,8 +1534,6 @@ static void LoadLampShadowRecords(NiD3DPixelShaderEx* pixel, const ShaderTemplat
 			}
 			record->PointShadowForward = true;
 			pixel->ShaderProg[ShaderRecordType::Interior] = record;
-			if (!level) DeferredLamps::LoadRecord(pixel, pixel->Name, tmpl, overrides[0], record);	// UNOFFICIAL 2026-10-31 DeferredLamps (the many-lamp family's deferred record)
-			DeferredRenderer::LoadInterior(pixel, pixel->Name, tmpl, overrides[0], record);	// UNOFFICIAL 2026-11-14 full deferred renderer 1 (LAMPS_DEFERRED 3; off: nothing)
 			DeferredTransparents::Load(pixel, pixel->Name, tmpl, overrides[0]);	// UNOFFICIAL 2026-11-15 forward+ for blended draws (LAMPS_DEFERRED 4; off: nothing)
 			PointShadowForward::CompiledIn = true;
 			PointShadowForward::CompiledCount++;
@@ -1549,10 +1644,7 @@ namespace LateInteriors {
 
 	bool Wanted() {
 		if (WantedState < 0) {
-			WantedState = TheSettingManager->GetSettingI("Main.Main.Performance", "ParallelShaderCompile") != 0 &&
-				TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Forward", "Enabled") != 0 && DeferredRenderer::Mode() != 1 ? 1 : 0;
-			// (DeferredRenderer 1: DeferredRenderer::Load, run at load, would make its LAMPS_DEFERRED 3 record from the default overrides for a
-			// shader whose Interior record is not there yet, and LoadInterior would then keep that one: that mode keeps the old order)
+			WantedState = TheSettingManager->GetSettingI("Main.Main.Performance", "ParallelShaderCompile") != 0 ? 1 : 0;
 		}
 		return WantedState == 1;
 	}
@@ -1656,7 +1748,7 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 		// DeferredRenderer 2 lights opaque world/skin pixels in deferred passes; compile only a lean fallback forward record (stripping
 		// heavy cascade/cloud/wetness bloat to avoid SM 3.0 X4505) plus Forward+ glass records when enabled.
 		pixel->ShaderProg[ShaderRecordType::Default] = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, NULL, tmpl, "Deferred\\Fallback\\", DeferredSkin::LeanFallbackOverrides());
-		if (TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Forward", "Enabled") && PointShadowForward::Eligible(pixel->Name, tmpl))
+		if (PointShadowForward::Eligible(pixel->Name, tmpl))
 			DeferredTransparents::Load(pixel, pixel->Name, tmpl, BaseInteriorOverrides());
 	}
 	else {
@@ -1748,7 +1840,7 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 		if (LightFreeRecords::Load(pixel, pixel->Name, tmpl, lightFreeLeanFirst) && !lightFreeLeanFirst) TouchCacheCopy(LightFreeRecords::kLeanCache, pixel->Name);
 	}
 	// (2026-11-15) the lamp pass may be compiled at the first record, before any Interior record handed DeferredLamps its lamp shape: take it here
-	if (DeferredRenderer::On() && !DeferredLamps::LampFalloffOverride) DeferredLamps::LampFalloffOverride = PBRShaders::LampFalloffInteriorDefine();
+	if (!DeferredLamps::LampFalloffOverride) DeferredLamps::LampFalloffOverride = PBRShaders::LampFalloffInteriorDefine();
 	DeferredRenderer::Load(pixel, pixel->Name, tmpl);	// UNOFFICIAL 2026-11-14 full deferred renderer phase 2 ([Main.Main.Quality] DeferredRenderer; off: nothing)
 	DeferredFoliage::Load(pixel, pixel->Name, tmpl);	// UNOFFICIAL 2026-11-14 phase 3 foliage ([Main.Main.Quality] DeferredFoliage; off: nothing)
 	DeferredSkin::Load(pixel, pixel->Name, tmpl);	// UNOFFICIAL 2026-11-15 phase 4 skin ([Main.Main.Quality] DeferredSkin; off: nothing)

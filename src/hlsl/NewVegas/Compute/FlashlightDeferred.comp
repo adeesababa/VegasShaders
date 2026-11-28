@@ -54,39 +54,11 @@ const uint kFlagLampFallMatch   = 1u << 5u;
 const uint kFlagSmithCorrelated = 1u << 6u;
 const uint kFlagSmithCorrTest   = 1u << 7u;
 const uint kFlagDiffuseKeep     = 1u << 8u;
+const uint kFlagViewModel       = 1u << 9u;
 
 bool HasFlag(uint bit) { return (pc.flags & bit) != 0u; }
 
-float shades(vec3 a, vec3 b) { return max(dot(a, b), 0.0); }
-
-vec3 ShadowDecodeNormal(vec2 e) {
-    vec3 n = vec3(e, 1.0 - abs(e.x) - abs(e.y));
-    float t = clamp(-n.z, 0.0, 1.0);
-    n.xy += vec2(n.x >= 0.0 ? -t : t, n.y >= 0.0 ? -t : t);
-    return normalize(n);
-}
-
-float GBufferRoughness(float b) {
-    return (b >= 0.0 && b <= 1.0) ? b : (b <= -1.99 && b >= -3.01) ? (-2.0 - b) : 1.0;
-}
-
-float FDModel(float r) {
-    float m = floor(r + 0.01);
-    if (HasFlag(kFlagGBufferV2)) return m >= 15.5 ? m - 16.0 : m;
-    return m;
-}
-
-float FDAddedLightKeep(float a) {
-    if (HasFlag(kFlagGBufferV2)) return saturate(a > 2.5 ? a - 3.0 : a - 1.0);
-    float base = a < 4.5 ? 3.0 : a < 6.5 ? 5.0 : 7.0;
-    return saturate(a - base);
-}
-
-float FDSpecF0Decode(float a) {
-    float q = (a > 0.99 && a < 2.005) ? floor(abs(a - (a > 1.5 ? 2.0 : 1.0)) * 1024.0 + 0.5) : 0.0;
-    float s = floor((q + 0.5) / 48.0);
-    return s > 0.5 ? (s - 1.0) * 0.01 : 0.04;
-}
+#include "DeferredCommon.glsl"
 
 float vanillaAtt(vec3 toLight, float radius) {
     float r = max(radius, 1.0e-3);
@@ -107,127 +79,6 @@ float LampAtt(float att) {
     }
     float oldExp = (lin && linG > 1.0) ? (cb.linearLighting.z > 0.0 ? cb.linearLighting.z : linG) : 1.0;
     return oldExp == 1.0 ? max(att, 0.0) : pow(max(abs(att), 0.0), oldExp);
-}
-
-vec3 ReflectivityF0(vec3 f0) { return clamp(f0 + f0 * cb.pbrMath.y, 0.0, 1.0); }
-vec3 RoughReflectivityF90(vec3 f0, float r, float metal) {
-    vec3 f90 = vec3(clamp(1.0 + cb.pbrMath.y, 0.0, 1.0));
-    return max(f90 * (1.0 - clamp(r, 0.0, 1.0) * clamp(1.0 - metal, 0.0, 1.0)), f0);
-}
-
-vec3 Fresnel(vec3 f0, vec3 f90, float cosT) {
-    float omc = 1.0 - cosT;
-    float omc2 = omc * omc;
-    return f0 + (f90 - f0) * (omc2 * omc2 * omc);
-}
-
-vec3 MultiScatterMetalBoost(vec3 f0, float r, float NdotV, float metal) {
-    if (metal <= 0.001) return vec3(1.0);
-    const vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
-    const vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
-    vec4 mixed = r * c0 + c1;
-    float a004 = min(mixed.x * mixed.x, exp2(-9.28 * NdotV)) * mixed.x + mixed.y;
-    vec2 ab = vec2(-1.04, 1.04) * a004 + mixed.zw;
-    float ess = clamp(ab.x + ab.y, 0.12, 1.0);
-    vec3 comp = 1.0 + f0 * (1.0 / ess - 1.0);
-    return mix(vec3(1.0), min(comp, vec3(2.2)), metal);
-}
-
-vec3 HueShift(vec3 c, float angle) {
-    const vec3 k = vec3(0.57735027);
-    return c * cos(angle) + cross(k, c) * sin(angle) + k * dot(k, c) * (1.0 - cos(angle));
-}
-
-vec3 ApplyPearlescence(vec3 col, float NdotV, float pearl, float metal) {
-    if (pearl <= 0.001 || metal <= 0.05) return col;
-    vec3 c = clamp(col, vec3(0.0), vec3(1.0));
-    float fMax = max(c.r, max(c.g, c.b));
-    float fMin = min(c.r, min(c.g, c.b));
-    float sat = (fMax - fMin) / max(fMax, 1.0e-4);
-    float satMask = smoothstep(0.10, 0.40, sat);
-    float omv = clamp(1.0 - NdotV, 0.0, 1.0);
-    float graze = pow(omv, 1.15);
-    vec3 hueShifted = HueShift(c, -0.95 * pearl * (0.20 + 0.80 * graze));
-    vec3 filmWave = 0.50 + 0.50 * cos(omv * 5.2 + vec3(0.0, 2.094395, 4.18879));
-    float lum = max(dot(c, vec3(0.2126, 0.7152, 0.0722)), 0.14);
-    vec3 thinFilm = mix(c, lum * (0.35 + 1.15 * filmWave), clamp(0.22 + 0.78 * graze, 0.0, 1.0));
-    vec3 pearlCol = mix(thinFilm, hueShifted, satMask);
-    return mix(col, clamp(pearlCol, vec3(0.0), vec3(1.0)), pearl * smoothstep(0.05, 0.40, metal));
-}
-
-vec3 PearlF90Tint(vec3 metalCol, float pearl, float metal) {
-    if (pearl <= 0.001 || metal <= 0.05) return vec3(1.0);
-    float pTop = max(metalCol.r, max(metalCol.g, metalCol.b));
-    return mix(vec3(1.0), clamp(metalCol / max(pTop, 0.25), vec3(0.0), vec3(1.0)), pearl * smoothstep(0.05, 0.40, metal) * 0.75);
-}
-
-vec3 CandyCoatAbsorption(vec3 metalCol, float NdotV, float coatAmt, float metal) {
-    if (coatAmt <= 0.001 || metal <= 0.05) return vec3(1.0);
-    vec3 c = clamp(metalCol, vec3(0.0), vec3(1.0));
-    float fMax = max(c.r, max(c.g, c.b));
-    float fMin = min(c.r, min(c.g, c.b));
-    float sat = (fMax - fMin) / max(fMax, 1.0e-4);
-    float satMask = smoothstep(0.14, 0.45, sat);
-    vec3 tCol = mix(vec3(1.0), c / max(fMax, 1.0e-4), satMask);
-    float pathLen = (1.0 / max(NdotV, 0.28) - 1.0) * 0.55;
-    float metalMask = smoothstep(0.05, 0.40, metal);
-    return exp(-(vec3(1.0) - tCol) * (1.85 * clamp(coatAmt, 0.0, 1.0) * satMask * metalMask * pathLen));
-}
-
-float GGXPi(float nh, float r) {
-    float r2 = r * r;
-    float aSq = r2 * r2;
-    float dTerm = max((nh * aSq - nh) * nh + 1.0, 1.0e-5);
-    return aSq / (dTerm * dTerm);
-}
-
-vec3 BRDFPi(float r, vec3 F, float nv, float nl, float nh) {
-    float dPi = GGXPi(nh, r);
-    if (HasFlag(kFlagSmithCorrelated) || HasFlag(kFlagSmithCorrTest)) {
-        float r2 = r * r;
-        float aSq = r2 * r2;
-        float visV = nl * sqrt(nv * nv * (1.0 - aSq) + aSq);
-        float visL = nv * sqrt(nl * nl * (1.0 - aSq) + aSq);
-        vec3 corr = dPi * (0.5 / (visV + visL)) * F;
-        if (!HasFlag(kFlagSmithCorrTest)) return corr;
-        float rp1 = r + 1.0;
-        float kk = (rp1 * rp1) * 0.125;
-        float invK = 1.0 - kk;
-        vec3 legacy = dPi * (0.25 / ((nv * invK + kk) * (nl * invK + kk))) * F;
-        return legacy + (corr - legacy) * cb.pbrMath.x;
-    }
-    float rp1 = r + 1.0;
-    float kk = (rp1 * rp1) * 0.125;
-    float invK = 1.0 - kk;
-    float vis = 0.25 / ((nv * invK + kk) * (nl * invK + kk));
-    return dPi * vis * F;
-}
-
-float SmithCorrelatedKeep(float NdotV, float roughness) {
-    float rc = max(roughness, 0.056);
-    float sq = sqrt(clamp(NdotV, 0.02, 1.0));
-    float q0 = 0.8720785 + sq * (2.377077 + sq * (-15.78768 + sq * (20.7581 + sq * (-8.469884 + sq * 0.2183369))));
-    float q1 = -2.350215 + sq * (6.164611 + sq * (12.53951 + sq * (-24.69559 + sq * 9.321004)));
-    float q2 = -4.584592 + sq * (-17.91134 + sq * (14.6047 + sq * 0.8975321));
-    float q3 = 20.67309 + sq * (6.171803 + sq * (-8.573712));
-    float q4 = -22.05094 + sq * 2.260031;
-    float q5 = 7.527356;
-    float surplus = q0 + rc * (q1 + rc * (q2 + rc * (q3 + rc * (q4 + rc * q5))));
-    float r2 = roughness * roughness;
-    float lossClamp = 1.0 - min(1.0e5 * r2 * r2, 1.0);
-    return 1.0 - clamp(surplus * (1.0 - lossClamp * lossClamp), 0.0, 1.0);
-}
-
-float DiffuseEnergyKeep(float NdotV, float roughness) {
-    if (HasFlag(kFlagSmithCorrTest)) return 1.0 + (SmithCorrelatedKeep(NdotV, roughness) - 1.0) * cb.pbrMath.x;
-    if (HasFlag(kFlagSmithCorrelated)) return SmithCorrelatedKeep(NdotV, roughness);
-    if (!HasFlag(kFlagDiffuseKeep)) return 1.0;
-    float tv = clamp((NdotV - 0.055) * (1.0 / 0.525), 0.0, 1.0);
-    float rx = clamp((0.53 - roughness) * (1.0 / 0.461), 0.0, 1.0);
-    float lowRough = clamp((roughness - 0.02) * (1.0 / 0.05), 0.0, 1.0);
-    float inv = 1.0 - tv;
-    float bump = rx * lowRough * tv * inv * inv * ((0.10380582 + 0.69366243 * rx) + tv * (0.27762281 - 0.88561283 * rx));
-    return cb.pbrMath.x > 0.5 ? 1.0 - bump * (1.0 / 0.95) : 1.0;
 }
 
 float FLShadowTap(vec2 uv, float distShare, float bias) {
@@ -282,14 +133,18 @@ void main() {
     vec3 ray = normalize(cb.flFwd.xyz + cb.flRight.xyz * ((local.x * 2.0 - 1.0) * cb.flRight.w) + cb.flUp.xyz * ((1.0 - local.y * 2.0) * cb.flUp.w));
     vec3 position = ray * stored.b;
 
-    float viewZ = max(dot(position, cb.flFwd.xyz) * (1.0 - cb.flDepth.z) - cb.flDepth.w, 1.0);
-    float gbufProjZ = clamp(cb.flDepth.x + cb.flDepth.y / viewZ, 0.0, 1.0);
     float rawDepth = texelFetch(t_depth, px, 0).x;
-    if (HasFlag(kFlagDepthIsLinear)) {
-        float sceneProjZ = rawDepth > 1.0e-4 ? clamp(cb.flDepth.x + cb.flDepth.y / rawDepth, 0.0, 1.0) : (HasFlag(kFlagReversedZ) ? 0.0 : 1.0);
-        if (HasFlag(kFlagReversedZ) ? (gbufProjZ < sceneProjZ) : (gbufProjZ > sceneProjZ)) return;
+    if (HasFlag(kFlagViewModel)) {
+        if (HasFlag(kFlagReversedZ) ? (rawDepth <= 1.0e-5) : (rawDepth >= 1.0 - 1.0e-5)) return;
     } else {
-        if (HasFlag(kFlagReversedZ) ? (gbufProjZ < rawDepth) : (gbufProjZ > rawDepth)) return;
+        float viewZ = max(dot(position, cb.flFwd.xyz) * (1.0 - cb.flDepth.z) - cb.flDepth.w, 1.0);
+        float gbufProjZ = clamp(cb.flDepth.x + cb.flDepth.y / viewZ, 0.0, 1.0);
+        if (HasFlag(kFlagDepthIsLinear)) {
+            float sceneProjZ = rawDepth > 1.0e-4 ? clamp(cb.flDepth.x + cb.flDepth.y / rawDepth, 0.0, 1.0) : (HasFlag(kFlagReversedZ) ? 0.0 : 1.0);
+            if (HasFlag(kFlagReversedZ) ? (gbufProjZ < sceneProjZ) : (gbufProjZ > sceneProjZ)) return;
+        } else {
+            if (HasFlag(kFlagReversedZ) ? (gbufProjZ < rawDepth) : (gbufProjZ > rawDepth)) return;
+        }
     }
 
     vec3 toLight = cb.flPos.xyz - position;

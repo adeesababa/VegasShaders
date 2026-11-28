@@ -486,37 +486,9 @@ PS_OUTPUT main(PS_INPUT IN) {
     #if CAPTURED_NORMALS_ON >= 4
         pout.capturedPad2 = CapturedShadingNormal(pout.capturedPad2, gbShadingNormal);	// UNOFFICIAL 2026-11-14 GBufferV2: g / a (the deferred records too)
     #endif
-    // (test-after-110 merge) only with the MaterialBuffer's first layout: 3 / 4 (AlbedoBuffer, GBufferV2, the deferred renderer) use a for the normal
-    #if defined(OBJECT_WETNESS) && defined(PUDDLES_COMPILED) && CAPTURED_NORMALS_ON == 2
-        pout.capturedPad2.a += PuddleStandingOut;	// 2026-11-12 Puddles: the standing water drawn here, for the SSR/RT pass (Reflections.glsl)
-    #endif
-    #if LAMPS_DEFERRED && defined(MANY_LAMPS) && MANY_LAMPS_ON >= 2
-    {
-        // UNOFFICIAL 2026-10-31 DeferredLamps (docs/next/DEFERRED-C1-SPEC.md): what the DeferredLamps pass needs to light this pixel.
-        // COLOR1.a = the share of added light that survives this draw's fog (1 - f: the factor the colour above was lerped with).
-        #ifndef OBJ_TOGGLES
-            pout.capturedPad1.a = 1.0f - IN.fogColor.a;
-        #else
-            pout.capturedPad1.a = useFog <= 0.0f ? 1.0f : 1.0f - IN.fogColor.a;
-        #endif
-        #if CAPTURED_NORMALS_ON >= 4
-            pout.capturedPad1.a += FD_LAMPS_V2_BASE;	// UNOFFICIAL 2026-11-14 GBufferV2: FD_LAMPS_V2_BASE + (1 - f) marks a deferred pixel whose sun is kept (Includes/DeferredPixel.hlsl; forward records write 1)
-        #endif
-        // COLOR2.g / .a = the bumped normal in world axes, octahedral: tangent -> object through the frame's rows (light2/3/4 = tbn rows),
-        // object -> world through the transpose of the table's world -> object rows (c39-c41); a in 1.01..1.99 marks a deferred pixel.
-        // (2026-11-14 GBufferV2: the v2 layout above instead, g / a the same normal at full precision; the pass reads it with CAPTURED_NORMALS_ON 4)
-        #if CAPTURED_NORMALS_ON < 4
-        const float3 dnObj = normal.x * IN.light2.xyz + normal.y * IN.light3.xyz + normal.z * IN.light4.xyz;
-        const float3 dnWorld = normalize(dnObj.x * NVR_ManyLamps[2].xyz + dnObj.y * NVR_ManyLamps[3].xyz + dnObj.z * NVR_ManyLamps[4].xyz);
-        const float2 dnOct = ShadowEncodeNormal(dnWorld);
-        pout.capturedPad2.g = dnOct.x;
-        pout.capturedPad2.a = 1.01f + 0.49f * (dnOct.y + 1.0f);
-        #endif
-    }
-    #endif
     #if defined(NVR_LIGHT_DEFERRED) && CAPTURED_NORMALS_ON >= 3
         // UNOFFICIAL 2026-11-14 the lighting-free record's COLOR1.a, its one writer (Includes/DeferredPixel.hlsl FD_LF_CODE, as in the LIGHTS < 4
-        // variant; it replaces the table block's 1 - fog above): OPT's light 0 is a lamp (no sun); else the sun of ManyLightsDirect.hlsl
+        // variant): OPT's light 0 is a lamp (no sun); else the sun of ManyLightsDirect.hlsl
         #ifdef OBJ_FOG
             #define FD_LF_KEEP OBJ_FOG_KEEP(IN.fogColor)
         #elif defined(OBJ_AD_GBUFFER) && defined(AD_FOG_KEEP_ON)
@@ -532,23 +504,6 @@ PS_OUTPUT main(PS_INPUT IN) {
             pout.capturedPad1.a = FD_LF_CODE(FD_LF_MATTE, FD_LF_KEEP);
         #endif
         #undef FD_LF_KEEP
-    #elif defined(NVR_LAMPS_OUT) && CAPTURED_NORMALS_ON >= 3 && !(LAMPS_DEFERRED && defined(MANY_LAMPS) && MANY_LAMPS_ON >= 2)
-        // UNOFFICIAL 2026-11-14 the lamps-deferred record (LAMPS_DEFERRED 3) writes the "sun kept" code of Includes/DeferredPixel.hlsl, as the
-        // LAMPS_DEFERRED 1 records: without GBufferV2 1 - fog (and the old mark in COLOR2.a, below); with it FD_LAMPS_V2_BASE + (1 - fog). The
-        // lamp pass lights it, DeferredSun does not (its sun is in the colour already).
-        #ifdef OBJ_FOG
-            #define FD_LD_KEEP OBJ_FOG_KEEP(IN.fogColor)
-        #elif defined(OBJ_AD_GBUFFER) && defined(AD_FOG_KEEP_ON)
-            #define FD_LD_KEEP (1.0f - IN.foldColor.a)	// UNOFFICIAL 2026-11-16 fd-batchE: AD's fog comes in the game's later FOG pass (see the top)
-        #else
-            #define FD_LD_KEEP 1.0f
-        #endif
-        #if FD_GBUFFER_V2
-            pout.capturedPad1.a = pout.capturedPad1.a > 0.5f ? FD_LAMPS_CODE(FD_LD_KEEP) : 0.0f;
-        #else
-            pout.capturedPad1.a *= FD_LD_KEEP;
-        #endif
-        #undef FD_LD_KEEP
     #endif
     // UNOFFICIAL 2026-10-28 CapturedNormals: the smooth vertex normal, before the normal map (as in the LIGHTS < 4 variant)
     #if LAMPS_DEFERRED && INTERIOR_SHADOWS
@@ -571,14 +526,6 @@ PS_OUTPUT main(PS_INPUT IN) {
         pout.capturedNormal = OBJ_CAPTURED_NORMAL_OUT(ShadowPlainNormal(IN.uv.zw, IN.vertexColor.a), SHADOW_WP_LOAD(IN));
     #else
         pout.capturedNormal = CAPTURED_NORMAL_INVALID;
-    #endif
-    #if defined(NVR_LAMPS_OUT) && CAPTURED_NORMALS_ON == 3 && !(LAMPS_DEFERRED && defined(MANY_LAMPS) && MANY_LAMPS_ON >= 2)
-        // UNOFFICIAL 2026-11-14 (LAMPS_DEFERRED 2 / 3) the deferred mark from the recorded normal, as in the LIGHTS < 4 variant (the table
-        // records above write the bumped normal themselves). FD_SHADING_NORMAL hook: G-buffer v2's shading normal replaces it.
-        [flatten] if (pout.capturedNormal.a > 0.5f) {
-            pout.capturedPad2.g = pout.capturedNormal.r;
-            pout.capturedPad2.a = 1.01f + 0.49f * (pout.capturedNormal.g + 1.0f);
-        }
     #endif
     #ifdef EYE_BEAM_HERE
         // UNOFFICIAL 2026-11-12 HairAndEyes (as in the LIGHTS < 4 variant): recorded as far away while the eye takes the beam itself

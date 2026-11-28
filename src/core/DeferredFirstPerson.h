@@ -57,8 +57,7 @@ namespace DeferredFirstPerson {
 	inline bool WantedAtStartup() {
 		if (Wanted < 0) {
 			const bool key = TheSettingManager->GetSettingI(kSection, "DeferredFirstPerson") != 0;
-			Wanted = key && DeferredRenderer::Mode() > 0 && CapturedNormals::V2CompiledIn() ? 1 : 0;
-			if (key && !Wanted) Logger::Log("[WARNING] UNOFFICIAL DeferredFirstPerson: needs [Main.Main.Quality] DeferredRenderer 1 or 2 and GBufferV2 at startup: first person stays forward");
+			Wanted = key && CapturedNormals::V2CompiledIn() ? 1 : 0;
 		}
 		return Wanted != 0;
 	}
@@ -113,7 +112,8 @@ namespace DeferredFirstPerson {
 			"}"
 			"float4 main(float2 uv : TEXCOORD0) : COLOR0 {"
 			"  float4 u = float4(uv, 0, 0);"
-			"  float3 s = max(tex2Dlod(F, u).rgb, 0.0);"
+			"  float4 fSample = tex2Dlod(F, u);"
+			"  float3 s = max(fSample.rgb, 0.0);"
 			"  float3 l = max(tex2Dlod(L, u).rgb, 0.0);"
 			"  float3 sLin = G.z > 0.5 ? s : pow(s, G.x);"
 			"  [branch] if (G.w > 0.5 && uv.x >= B.x && uv.y >= B.y && uv.x <= B.z && uv.y <= B.w) {"
@@ -144,7 +144,7 @@ namespace DeferredFirstPerson {
 			"    }"
 			"  }"
 			"  float3 outLin = sLin + l;"
-			"  return float4(G.z > 0.5 ? outLin : pow(max(outLin, 0.0), G.y), 1.0);"
+			"  return float4(G.z > 0.5 ? outLin : pow(max(outLin, 0.0), G.y), fSample.a);"
 			"}";
 		static const char* kNull = "float4 main() : COLOR0 { return 0.0; }";
 		ResolvePS = CapturedNormals::FullScreenShader(d, kResolve, "DeferredFirstPerson resolve", Failed);
@@ -227,7 +227,6 @@ namespace DeferredFirstPerson {
 			why = "the flashlight is on (the deferred flashlight lights the world only; its game lamp is no lamp pass of a deferred part)";
 		else if (!Tes || !Tes->directionalLight) why = "no directional light";
 		else if (CapturedNormals::Data.x <= 0.0f || CapturedNormals::AlbedoData.x <= 0.0f) why = "the world's G-buffer was not captured this frame";
-		else if (CapturedNormals::MsaaSurface || CapturedNormals::AlbedoMsaa) why = "the game's MSAA";
 		else if (TheSettingManager->GetSettingI(kSection, "DeferredFirstPersonLive") == 0) why = "DeferredFirstPersonLive is off (the A/B key)";
 		else if (Latched && (UInt32)TheFrameRateManager->FrameNumber < LatchedUntil) why = Latched;
 		else if (const char* frustum = FrustumWhy(camera->Frustum)) why = frustum;
@@ -243,7 +242,7 @@ namespace DeferredFirstPerson {
 			const double now = TheFrameRateManager ? TheFrameRateManager->Time : 0.0;
 			if (now < AimHoldUntil - 5.0) AimHoldUntil = 0.0;
 			const bool rawAiming = Player->process && Player->IsAiming();
-			if (rawAiming) AimHoldUntil = now + 0.45;
+			if (rawAiming) AimHoldUntil = now + 0.75;
 			const bool aiming = rawAiming || now < AimHoldUntil;
 			const float maxEyeOffSq = aiming ? 4096.0f : 4.0f;	// iron sights / red dot / optics move the first-person eye onto the sight
 			const float minTurn = aiming ? 0.90f : 0.9999f;
@@ -259,7 +258,8 @@ namespace DeferredFirstPerson {
 			if (FAILED(d->GetDepthStencilSurface(&depth)) || !depth || FAILED(depth->GetDesc(&z)) || !HasStencil(z.Format)) why = "the depth surface has no stencil bits (the view-model mark needs one)";
 			if (depth) depth->Release();
 		}
-		if (!why && ((DeferredRenderer::Mode() >= 2 && !DeferredSun::Pass) || !DeferredLamps::Pass)) why = "a light pass did not load";
+		if (!why && ((!DeferredSun::Pass && !DeferredSun::ComputeEligible(false)) ||
+			(!DeferredLamps::Pass && !DeferredLamps::ComputePossible()))) why = "a light pass did not load";
 		if (why) { StatForward++; Note(why); return; }
 		if (nativeLayer) {
 			if (!CapturedNormals::PushVmNativeGBuffer(d, rtDesc.Width, rtDesc.Height)) {
@@ -480,6 +480,15 @@ namespace DeferredFirstPerson {
 		State->Capture();
 		IDirect3DSurface9* extra[3] = {};
 		for (DWORD i = 1; i < 4; i++) if (SUCCEEDED(d->GetRenderTarget(i, &extra[i - 1])) && extra[i - 1]) d->SetRenderTarget(i, nullptr);
+		IDirect3DTexture9* vmDepth = nullptr;
+		if (DxvkCompute::Available() && TheTextureManager && TheTextureManager->DepthTextureViewModel) {
+			D3DSURFACE_DESC zDesc = {};
+			if (SUCCEEDED(TheTextureManager->DepthTextureViewModel->GetLevelDesc(0, &zDesc)) &&
+				zDesc.Width == t.Width && zDesc.Height == t.Height) {
+				TheRenderManager->ResolveDepthBuffer(TheTextureManager->DepthTextureViewModel);
+				vmDepth = TheTextureManager->DepthTextureViewModel;
+			}
+		}
 		const bool reversed = NiDX9Renderer::GetSingleton()->m_fZClear < 1.0f;
 		const RECT screen = { 0, 0, (LONG)t.Width, (LONG)t.Height };
 		{	// 1. the mark: bit 0x40 where the first-person depth was written (the quad just inside the clear value, the test "nearer than it")
@@ -503,6 +512,8 @@ namespace DeferredFirstPerson {
 		d->SetRenderState(D3DRS_STENCILPASS, D3DSTENCILOP_KEEP); d->SetRenderState(D3DRS_STENCILFAIL, D3DSTENCILOP_KEEP); d->SetRenderState(D3DRS_STENCILZFAIL, D3DSTENCILOP_KEEP);
 		d->SetRenderState(D3DRS_TWOSIDEDSTENCILMODE, FALSE);
 		DeferredSun::Vm.on = DeferredLamps::Vm.on = true;
+		DeferredSun::Vm.depthTex = vmDepth;
+		DeferredLamps::Vm.depthTex = vmDepth;
 		// (fd-batch8 merge) SSS v2's skin highlight target (DeferredLamps::SkinSpecSurface) belongs to the world's passes, which used it already
 		// (DeferredSkin::AfterPasses): off for the view model's run, so its skin pixels add nothing to it and no second target is bound
 		IDirect3DSurface9* const skinSpec = DeferredLamps::SkinSpecSurface;
@@ -517,11 +528,15 @@ namespace DeferredFirstPerson {
 			fv.rows[0][3] = Frame[0].w; fv.rows[1][3] = Frame[1].w;	// tan(half fov x / y) of the first-person frustum
 			const D3DXVECTOR4& world = TheRenderManager->CameraPosition;
 			fv.shift = D3DXVECTOR3(Eye.x - Offset.x - world.x, Eye.y - Offset.y - world.y, Eye.z - Offset.z - world.z);
+			fv.depthTex = vmDepth;
 			fv.on = true;
 			FlashlightDeferred::Apply(d);
 			fv.on = false;
+			fv.depthTex = nullptr;
 		}
 		DeferredLamps::SkinSpecSurface = skinSpec;
+		DeferredSun::Vm.depthTex = nullptr;
+		DeferredLamps::Vm.depthTex = nullptr;
 		DeferredSun::Vm.on = DeferredLamps::Vm.on = false;
 		{	// 4. the resolve over the frame (its copy over the box: a target is not read while bound)
 			static GpuTimer resolveTimer("First person: deferred resolve");

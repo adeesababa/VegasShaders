@@ -1,6 +1,5 @@
 // Old-default settings migrations (SettingManager::Configuration::UpdateOldDefaults).
 // Extracted from SettingManager.cpp; version constant is SettingManager::Configuration::UnofficialSettingsVersion.
-#include "SettingForce.h"
 #include "StalePresetValues.h"
 
 // (UnofficialSettingsVersion is declared above Configuration::Init, which hands it to the install check)
@@ -705,7 +704,7 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 		}
 	}
 	// 103 (2026-11-27, p83 vs 1.1.5 performance regression audit & Vulkan defaults): Vulkan AmbientLight/Clouds/AvgLumaCompute on by default,
-	// decoupling CubeMode back to 0, avoiding TargetReleaseSeconds churn, and keeping Def=0 forward-only defaults light (DeferredRenderer >= 1 still forces them on via SettingForce).
+	// avoiding TargetReleaseSeconds churn, and keeping forward-only defaults light.
 	if (version < 103) {
 		tomlValue* perf = UserSection("Main.Main.Performance");
 		auto toTruePerf = [&](const char* key) {
@@ -724,11 +723,6 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 				(*perf)["TargetReleaseSeconds"] = 0.0;
 				changed += std::string(changed.empty() ? "" : ", ") + "Main.Main.Performance.TargetReleaseSeconds 20 -> 0";
 			}
-		}
-		tomlValue* refl = UserSection("Shaders.Reflections.Main");
-		if (refl && refl->contains("CubeMode") && refl->at("CubeMode").is_integer() && refl->at("CubeMode").as_integer() == 2) {
-			(*refl)["CubeMode"] = 0;
-			changed += std::string(changed.empty() ? "" : ", ") + "Shaders.Reflections.Main.CubeMode 2 -> 0";
 		}
 		auto toFalseSaved = [&](const char* section, const char* key) {
 			tomlValue* saved = UserSection(section);

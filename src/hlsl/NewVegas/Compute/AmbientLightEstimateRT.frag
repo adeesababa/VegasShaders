@@ -38,4 +38,4 @@ vec4 EstimateRT(vec2 uv) {
     return vec4(bounce, saturate(mix(1.0, visibility, fade)));
 }
 
-void main() { o_color = EstimateRT(frameUV()); }
+void main() { o_color = EstimateRT(frameRectUV()); }

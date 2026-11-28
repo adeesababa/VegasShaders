@@ -221,9 +221,10 @@ vec4 SampleWaterStreaks(vec4 streakUV, vec3 surfaceNormal, vec4 uvDx, vec4 uvDy)
 }
 
 // Screen-space reflection helpers
-vec3 GetSSRViewPosition(vec2 uv) {
-    vec4 d = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.sLin)), uv, 0.0);
-    vec4 p = vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.5, 1.0) * c.invProjection;
+vec3 GetSSRViewPosition(vec2 ruv) {
+    vec4 d = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.sLin)), ruv, 0.0);
+    vec2 s = rectToScreen(ruv);
+    vec4 p = vec4(s.x * 2.0 - 1.0, 1.0 - s.y * 2.0, 0.5, 1.0) * c.invProjection;
     float safeW = (p.w < 0.0 ? -1.0 : 1.0) * max(abs(p.w), 0.000001);
     vec3 viewPosition = p.xyz / safeW;
     viewPosition *= (d.x * farZ) / max(abs(viewPosition.z), 0.000001);
@@ -259,9 +260,10 @@ vec3 TraceWetReflectionFixed(vec2 sourceUV, vec3 waterNormal, vec3 groundNormal)
         float travel = 8.0 + PuddleSSRMaxDistance * fraction * fraction;
         vec3 probe = origin + rayDirection * travel;
         vec4 projected = projectedOrigin + projectedDirection * travel;
-        vec2 hitUV = projected.xy / max(abs(projected.w), 0.0001) * vec2(0.5, -0.5) + 0.5;
+        vec2 hitS = projected.xy / max(abs(projected.w), 0.0001) * vec2(0.5, -0.5) + 0.5;
+        vec2 hitUV = screenToRect(hitS);
         bool onScreen = projected.w * clipSign > 0.0001 && probe.z * viewSign > 0.0001
-            && hitUV.x > 0.001 && hitUV.x < 0.999 && hitUV.y > 0.001 && hitUV.y < 0.999;
+            && hitS.x > 0.001 && hitS.x < 0.999 && hitS.y > 0.001 && hitS.y < 0.999;
         float depthSample = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.sLin)), hitUV, 0.0).x;
         float delta = probe.z * viewSign - depthSample * farZ;
         if (!done && onScreen && depthSample > 0.0 && depthSample < 0.99999 && delta >= 0.0 && previousDelta < 0.0) {
@@ -271,7 +273,7 @@ vec3 TraceWetReflectionFixed(vec2 sourceUV, vec3 waterNormal, vec3 groundNormal)
                 float midTravel = (lowerTravel + upperTravel) * 0.5;
                 vec3 midProbe = origin + rayDirection * midTravel;
                 vec4 midClip = projectedOrigin + projectedDirection * midTravel;
-                vec2 midUV = midClip.xy / midClip.w * vec2(0.5, -0.5) + 0.5;
+                vec2 midUV = screenToRect(midClip.xy / midClip.w * vec2(0.5, -0.5) + 0.5);
                 float midZ = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.sLin)), midUV, 0.0).x * farZ;
                 bool behind = midProbe.z * viewSign - midZ >= 0.0;
                 upperTravel = behind ? midTravel : upperTravel;
@@ -279,7 +281,8 @@ vec3 TraceWetReflectionFixed(vec2 sourceUV, vec3 waterNormal, vec3 groundNormal)
             }
             vec3 hitProbe = origin + rayDirection * upperTravel;
             vec4 hitClip = projectedOrigin + projectedDirection * upperTravel;
-            vec2 refinedUV = hitClip.xy / hitClip.w * vec2(0.5, -0.5) + 0.5;
+            vec2 refinedS = hitClip.xy / hitClip.w * vec2(0.5, -0.5) + 0.5;
+            vec2 refinedUV = screenToRect(refinedS);
             float hitDepth = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.sLin)), refinedUV, 0.0).x;
             float hitDelta = hitProbe.z * viewSign - hitDepth * farZ;
             float vmHitDepth = textureLod(sampler2D(t_depthVM, NVR_SAMPLER(pc.sLin)), refinedUV, 0.0).x;
@@ -289,7 +292,7 @@ vec3 TraceWetReflectionFixed(vec2 sourceUV, vec3 waterNormal, vec3 groundNormal)
             bool validHitDepth = hitDepth > 0.0 && hitDepth < 0.99999;
             bool separatedHit = dot(pixelSeparation, pixelSeparation) >= 16.0;
             float thickness = PuddleSSRThickness + PuddleSSRThicknessPerStep * (travel - previousTravel);
-            float edge = min(min(refinedUV.x, 1.0 - refinedUV.x), min(refinedUV.y, 1.0 - refinedUV.y));
+            float edge = min(min(refinedS.x, 1.0 - refinedS.x), min(refinedS.y, 1.0 - refinedS.y));
             float edgeVisibility = smoothstep(0.0, PuddleSSREdgeFade, edge);
             float distanceVisibility = max(1.0 - smoothstep(PuddleSSRMaxDistance * 0.65,
                 PuddleSSRMaxDistance, upperTravel), 0.25);
@@ -623,8 +626,9 @@ vec4 WetPass(vec2 uv, bool fast, bool fixTrace) {
     vec4 shadowsPre = vec4(0.0);
     if (fast) {
         cloudSample = texture(sampler2D(t_cloud, NVR_SAMPLER(pc.sMipWrap)), GetPuddleCloudUV(worldPosRelRoof, combinedNormals));
-        refrLinPre = linearize(texture(sampler2D(t_source, NVR_SAMPLER(pc.sLin)), uv + refrOff).rgb);
-        vmSampleValidPre = GetViewModelMask(saturate(uv + refrOff));
+        vec2 refrUV = clampToRect(uv + refrOff, c.reciprocalResolution.xy);
+        refrLinPre = linearize(texture(sampler2D(t_source, NVR_SAMPLER(pc.sLin)), refrUV).rgb);
+        vmSampleValidPre = GetViewModelMask(refrUV);
         shadowsPre = texture(sampler2D(t_pointShadow, NVR_SAMPLER(pc.sLin)), uv);
 
         // (shadowsPre.y < -1: never true; it only keeps the read above the branch)
@@ -634,7 +638,7 @@ vec4 WetPass(vec2 uv, bool fast, bool fixTrace) {
         // the SSR trace condition of the main path below (same expressions)
         float fLinger = puddleFade * flatCoverage;
         float fSsrMask = saturate(max(rippleMask, max(fLinger, puddlemask))) * reflectionAllow;
-        float fScreen = smoothstep(PuddleSSRScreenFadeStart, PuddleSSRScreenFadeFull, uv.y);
+        float fScreen = smoothstep(PuddleSSRScreenFadeStart, PuddleSSRScreenFadeFull, rectToScreen(uv).y);
         float fAngle = 1.0 - smoothstep(PuddleSSRFadeStart, PuddleSSRFadeFull, saturate(dot(-V, up)));
         float fOpacity = fScreen * fAngle;
         float fTraceOpacity = saturate(PuddleSSRCandidateBlend) * saturate(fSsrMask * LODfade) * fOpacity;
@@ -647,7 +651,7 @@ vec4 WetPass(vec2 uv, bool fast, bool fixTrace) {
     }
 
     if (!fast) {
-        vec3 refrLin = linearize(texture(sampler2D(t_source, NVR_SAMPLER(pc.sLin)), uv + refrOff).rgb);
+        vec3 refrLin = linearize(texture(sampler2D(t_source, NVR_SAMPLER(pc.sLin)), clampToRect(uv + refrOff, c.reciprocalResolution.xy)).rgb);
 
         vec3 baseLin = linearize(baseColor).rgb;
         vec3 rippleColor = mix(baseLin, refrLin, viewRefr);
@@ -723,7 +727,7 @@ vec4 WetPass(vec2 uv, bool fast, bool fixTrace) {
         float lingeringReflectionMask = puddleFade * flatCoverage;
         float ssrMask = saturate(max(rippleMask, max(lingeringReflectionMask, puddlemask))) * reflectionAllow;
         float ssrScreenOpacity = smoothstep(PuddleSSRScreenFadeStart,
-            PuddleSSRScreenFadeFull, uv.y);
+            PuddleSSRScreenFadeFull, rectToScreen(uv).y);
         float ssrDownAngle = saturate(dot(-V, up));
         float ssrAngleOpacity = 1.0 - smoothstep(PuddleSSRFadeStart, PuddleSSRFadeFull, ssrDownAngle);
         float ssrOpacity = ssrScreenOpacity * ssrAngleOpacity;
@@ -861,7 +865,7 @@ vec4 WetPass(vec2 uv, bool fast, bool fixTrace) {
     float lingeringReflectionMask = puddleFade * flatCoverage;
     float ssrMask = saturate(max(rippleMask, max(lingeringReflectionMask, puddlemask))) * reflectionAllow;
     float ssrScreenOpacity = smoothstep(PuddleSSRScreenFadeStart,
-        PuddleSSRScreenFadeFull, uv.y);
+        PuddleSSRScreenFadeFull, rectToScreen(uv).y);
     float ssrDownAngle = saturate(dot(-V, up));
     float ssrAngleOpacity = 1.0 - smoothstep(PuddleSSRFadeStart, PuddleSSRFadeFull, ssrDownAngle);
     float ssrOpacity = ssrScreenOpacity * ssrAngleOpacity;
@@ -1008,5 +1012,5 @@ vec4 WetPass(vec2 uv, bool fast, bool fixTrace) {
 }
 
 void main() {
-    o_color = WetPass(vUV, (pc.mode & 1u) != 0u, (pc.mode & 2u) != 0u);
+    o_color = WetPass(screenToRect(vUV), (pc.mode & 1u) != 0u, (pc.mode & 2u) != 0u);
 }

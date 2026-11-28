@@ -975,32 +975,6 @@ PS_OUTPUT main(PS_INPUT IN) {
             pout.capturedPad1.a = FD_LF_CODE(FD_LF_MATTE, FD_LF_KEEP);
         #endif
         #undef FD_LF_KEEP
-    #elif defined(NVR_LAMPS_OUT) && CAPTURED_NORMALS_ON >= 3 && !defined(DIFFUSE) && !defined(ONLY_SPECULAR)
-        // UNOFFICIAL 2026-11-14 the lamps-deferred record (LAMPS_DEFERRED 3) writes the "sun kept" code of Includes/DeferredPixel.hlsl, as the
-        // LAMPS_DEFERRED 1 records: without GBufferV2 1 - fog (and the old mark in COLOR2.a, below); with it FD_LAMPS_V2_BASE + (1 - fog). The
-        // lamp pass lights it, DeferredSun does not (its sun is in the colour already).
-        #ifdef OBJ_FOG
-            #define FD_LD_KEEP OBJ_FOG_KEEP(IN.fogColor)
-        #elif defined(OBJ_AD_GBUFFER) && defined(AD_FOG_KEEP_ON)
-            #define FD_LD_KEEP (1.0f - IN.foldColor.a)	// UNOFFICIAL 2026-11-16 fd-batchE: AD's fog comes in the game's later FOG pass (see the top)
-        #else
-            #define FD_LD_KEEP 1.0f
-        #endif
-        #if FD_GBUFFER_V2
-            pout.capturedPad1.a = pout.capturedPad1.a > 0.5f ? FD_LAMPS_CODE(FD_LD_KEEP) : 0.0f;
-        #else
-            pout.capturedPad1.a *= FD_LD_KEEP;
-        #endif
-        #undef FD_LD_KEEP
-    #endif
-    #if defined(NVR_LAMPS_OUT) && CAPTURED_NORMALS_ON == 3 && !defined(DIFFUSE) && !defined(ONLY_SPECULAR)	// (G-buffer v2, CAPTURED_NORMALS_ON 4: its own mark, COLOR1.a in (1, 2])
-        // UNOFFICIAL 2026-11-14 (LAMPS_DEFERRED 2 / 3) the deferred mark: COLOR2.g / .a = the recorded normal (octahedral, as COLOR3 holds it),
-        // a in 1.01..1.99, so the lamp pass lights this pixel. The smooth normal stands in for the shading normal until the G-buffer v2
-        // (FULL-DEFERRED-RENDERER-PLAN.md 4.2, claude/fd-gbuffer) writes the bumped one here: FD_SHADING_NORMAL hook.
-        [flatten] if (pout.capturedNormal.a > 0.5f) {
-            pout.capturedPad2.g = pout.capturedNormal.r;
-            pout.capturedPad2.a = 1.01f + 0.49f * (pout.capturedNormal.g + 1.0f);
-        }
     #endif
     // UNOFFICIAL 2026-11-12 CapturedCoverage (Includes/CapturedNormals.hlsl): a blended draw (fading in, a rubble skirt's vertex alpha)
     // records only where its own alpha is 0.5 or more; below, alpha 0 = the texels stay as they were. An opaque draw: x 1, as before.

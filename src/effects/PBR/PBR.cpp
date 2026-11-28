@@ -167,9 +167,9 @@ void PBRShaders::UpdateSettings() {
 	Constants.SharpSky.z = MetalSettings.Pearlescence;
 	Constants.SharpSky.w = 0.0f;
 
-	// UNOFFICIAL linear lighting (Includes/LinearLight.hlsl: ObjectTemplate, TerrainTemplate). Enabled is read at startup
-	// (ShaderRecord::LoadShader compiles it in); Gamma is live, and 1 returns every colour unchanged.
-	LinearSettings.Enabled = TheSettingManager->GetSettingI("Shaders.PBR.Linear", "Enabled") != 0;
+	// UNOFFICIAL linear lighting (Includes/LinearLight.hlsl: ObjectTemplate, TerrainTemplate). Always compiled in for DeferredRenderer = 2;
+	// Gamma is live, and 1.0 or below floors to 2.2 in SettingManager::GetSettingF.
+	LinearSettings.Enabled = true;
 	LinearSettings.Gamma = std::clamp(TheSettingManager->GetSettingF("Shaders.PBR.Linear", "Gamma"), 1.0f, 3.0f);
 	// UNOFFICIAL 2026-10-20 NightGamma (user request): the gamma outside at night, live; 0 = the same as Gamma.
 	const float nightGamma = TheSettingManager->GetSettingF("Shaders.PBR.Linear", "NightGamma");
@@ -251,7 +251,6 @@ void PBRShaders::UpdateSettings() {
 		SettingManager* cfg = TheSettingManager;
 		PBRSettings& out = *g.into;
 		out.Saturation = cfg->GetSettingF(g.section, "Saturation");
-		out.Metallicness = cfg->GetSettingF(g.section, "Metallicness");
 		out.Roughness = cfg->GetSettingF(g.section, "Roughness");
 		out.LightScale = cfg->GetSettingF(g.section, "LightingScale");
 		out.AmbientScale = cfg->GetSettingF(g.section, "AmbientScale");
@@ -260,7 +259,7 @@ void PBRShaders::UpdateSettings() {
 		out.SkylightingSaturation = cfg->GetSettingF(g.section, "SkylightingSaturation");
 		out.RmaosMetalnessScale = std::clamp(RmaosScaleOr1(g.section, "MetalnessScale"), 0.0f, 1.0f);	// UNOFFICIAL 2026-10-18 (_rmaos maps)
 		out.RmaosAOScale = std::clamp(RmaosScaleOr1(g.section, "AOScale"), 0.0f, 1.0f);
-		out.RmaosRoughnessScale = std::clamp(cfg->GetSettingF(g.section, "RoughnessScale"), 1.0f, 2.0f);
+		out.RmaosRoughnessScale = std::clamp(RmaosScaleOr1(g.section, "RoughnessScale"), 0.25f, 2.0f);
 	}
 }
 
@@ -351,8 +350,12 @@ void PBRShaders::UpdateConstants() {
 	// without it), so the shaders never read a stale or missing cube.
 	const ReflectionsEffect* reflections = TheShaderManager->Effects.Reflections;
 	const bool cube = reflections && reflections->CubeReady();
-	Constants.EnvCube = D3DXVECTOR4(cube ? MetalSettings.CubeReflections : 0.0f, cube ? MetalSettings.EnvCubeReflections : 0.0f,
-		(float)(reflections ? (reflections->cubeLevels - 1) : 7), 0.0f);
+	// (2026-11-27 cube-visible) [Shaders.Reflections.Main] CubeStrength k: the shares times min(k, 1); w = 1 / max(k, 1) (LiveCube.hlsl:
+	// above 1 the blur on smooth metal cut by k; Object.hlsl: the metal's dimming to the local light eased by k). 1 while the cube is not kept up.
+	const float cubeStrength = cube ? reflections->Settings.CubeStrength : 1.0f;
+	const float cubeShare = (std::min)(cubeStrength, 1.0f);
+	Constants.EnvCube = D3DXVECTOR4(cube ? MetalSettings.CubeReflections * cubeShare : 0.0f, cube ? MetalSettings.EnvCubeReflections * cubeShare : 0.0f,
+		(float)(reflections ? (reflections->cubeLevels - 1) : 7), 1.0f / (std::max)(cubeStrength, 1.0f));
 
 	// UNOFFICIAL foliage translucency (see UpdateSettings), live.
 	Constants.Translucency.x = FoliageSettings.Translucency;
@@ -414,7 +417,7 @@ void PBRShaders::UpdateConstants() {
 	// carry MetalnessScale - 1 and RoughnessScale - 1 (0 = the map as it is, also for a register never written); AOScale scales the
 	// Occlusion that RmaosDraw sends per object (c220.y). All 1.0 by default: the picture exactly as without them.
 	Constants.Math.z = std::clamp(weather(&PBRSettings::RmaosMetalnessScale), 0.0f, 1.0f) - 1.0f;
-	Constants.Math.w = std::clamp(weather(&PBRSettings::RmaosRoughnessScale), 1.0f, 2.0f) - 1.0f;
+	Constants.Math.w = std::clamp(weather(&PBRSettings::RmaosRoughnessScale), 0.25f, 2.0f) - 1.0f;
 	RmaosSettings.OcclusionNow = RmaosSettings.Occlusion * std::clamp(weather(&PBRSettings::RmaosAOScale), 0.0f, 1.0f);
 
 	// UNOFFICIAL 2026-10-25 Reflectivity ([Shaders.PBR.Main] ReflectivityExterior / ReflectivityInterior): the highlights (TESR_PBRMath.y,

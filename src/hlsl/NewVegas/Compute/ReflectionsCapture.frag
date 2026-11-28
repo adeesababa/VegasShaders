@@ -38,6 +38,17 @@ void main() {
     vec2 vpos = floor(gl_FragCoord.xy);
     vec2 st = (vpos + 0.5) / CubeSize * 2.0 - 1.0;
     vec3 dir = FaceDirection(CubeFace, st);
+    vec3 view = WorldToViewDir(dir);
+    // (2026-11-27 cube-visible) on screen this frame, the screen's picture is the truth. CubeMode 2 pulled EVERY texel, these too, 12 %
+    // a frame toward the world cube's cheap render (no shadows, flat light, 128 a face) while the screen put back only CubeCapture (0.25
+    // default, 0.02 in the owner's file): where the screen showed the real thing the cube held 26-85 % of the hazy world render, the
+    // bluish ghost over the crisp capture. Now a texel on screen fades at CubeFade as in CubeMode 1. (2026-11-27 cube-keep-capture) Out of
+    // view too: it went to the world cube at max(CubeFade x 8, 0.03), half in ~23 frames, so what the screen had just shown was gone a
+    // second after looking away (the owner's window). It now gives way only as the camera moves: -CubeReset, the distance moved this
+    // frame over 2 x CubeMoveThreshold (Reflections.cpp CubeStep), 0 while turning on the spot.
+    vec2 uv = view.z > 0.05 ? ToScreen(view) : vec2(-1.0);
+    vec2 suv = view.z > 0.05 ? rectToScreen(uv) : vec2(-1.0);
+    bool onScreen = view.z > 0.05 && all(greaterThan(suv, vec2(0.005))) && all(lessThan(suv, vec2(0.995)));
     vec4 result;
     if (CubeOn >= 1.5) {
         vec3 ndir = normalize(dir);
@@ -46,38 +57,33 @@ void main() {
             vec4 world = textureLod(samplerCube(t_worldCube, LINEAR_S), ndir, 0.0);
             baseEnv = mix(baseEnv, world.rgb, clamp(world.a, 0.0, 1.0));
         }
-        float decay = CubeOn > 2.5 ? max(CubeFade * 20.0, 0.12) : CubeFade;
+        float decay = (CubeOn > 2.5 && !onScreen) ? max(CubeFade, -min(CubeReset, 0.0)) : CubeFade;
         vec4 prev = textureLod(samplerCube(t_capture, POINT_S), dir, 0.0);
         result = CubeReset > 0.0 ? vec4(baseEnv, 1.0) : mix(prev, vec4(baseEnv, 1.0), decay);
     } else {
         result = CubeReset > 0.0 ? vec4(0.0) : textureLod(samplerCube(t_capture, POINT_S), dir, 0.0) * (1.0 - CubeFade);
     }
 
-    vec3 view = WorldToViewDir(dir);
-    if (view.z > 0.05) {
-        vec2 uv = ToScreen(view);
-        vec2 suv = rectToScreen(uv);
-        if (all(greaterThan(suv, vec2(0.005))) && all(lessThan(suv, vec2(0.995)))) {
-            // A cube texel covers a patch of many screen pixels: average a 4 x 4 grid of reads across it.
-            vec2 du = ToScreen(WorldToViewDir(FaceDirection(CubeFace, st + vec2(2.0 / CubeSize, 0.0)))) - uv;
-            vec2 dv = ToScreen(WorldToViewDir(FaceDirection(CubeFace, st + vec2(0.0, 2.0 / CubeSize)))) - uv;
-            vec3 sum = vec3(0.0);
-            float found = 0.0;
-            for (int y = 0; y < 4; y++) {
-                for (int x = 0; x < 4; x++) {
-                    vec2 at = uv + du * ((float(x) - 1.5) / 4.0) + dv * ((float(y) - 1.5) / 4.0);
-                    bool usable = all(greaterThan(at, vec2(0.0))) && all(lessThan(at, cb.renderScale.xy)) && !IsWeapon(at) && readDepthLod(at) > 40.0;
-                    vec3 c = linearize(textureLod(sampler2D(t_rendered, LINEAR_S), at, 0.0).rgb);
-                    float brightest = max(c.r, max(c.g, c.b));
-                    sum += usable ? c * min(1.0, 8.0 / max(brightest, 1.0e-4)) : vec3(0.0);
-                    found += usable ? 1.0 : 0.0;
-                }
+    if (onScreen) {
+        // A cube texel covers a patch of many screen pixels: average a 4 x 4 grid of reads across it.
+        vec2 du = ToScreen(WorldToViewDir(FaceDirection(CubeFace, st + vec2(2.0 / CubeSize, 0.0)))) - uv;
+        vec2 dv = ToScreen(WorldToViewDir(FaceDirection(CubeFace, st + vec2(0.0, 2.0 / CubeSize)))) - uv;
+        vec3 sum = vec3(0.0);
+        float found = 0.0;
+        for (int y = 0; y < 4; y++) {
+            for (int x = 0; x < 4; x++) {
+                vec2 at = uv + du * ((float(x) - 1.5) / 4.0) + dv * ((float(y) - 1.5) / 4.0);
+                bool usable = all(greaterThan(at, vec2(0.0))) && all(lessThan(at, cb.renderScale.xy)) && !IsWeapon(at) && readDepthLod(at) > 40.0;
+                vec3 c = linearize(textureLod(sampler2D(t_rendered, LINEAR_S), at, 0.0).rgb);
+                float brightest = max(c.r, max(c.g, c.b));
+                sum += usable ? c * min(1.0, 8.0 / max(brightest, 1.0e-4)) : vec3(0.0);
+                found += usable ? 1.0 : 0.0;
             }
-            if (found > 0.0) {
-                vec2 edge = min(suv, 1.0 - suv);
-                float blend = CaptureBlend * saturate(min(edge.x, edge.y) * 20.0) * found / 16.0;
-                result = mix(result, vec4(sum / found, 1.0), blend);
-            }
+        }
+        if (found > 0.0) {
+            vec2 edge = min(suv, 1.0 - suv);
+            float blend = CaptureBlend * saturate(min(edge.x, edge.y) * 20.0) * found / 16.0;
+            result = mix(result, vec4(sum / found, 1.0), blend);
         }
     }
     o_color = result;
